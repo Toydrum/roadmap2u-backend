@@ -98,11 +98,14 @@ exit 2
   }
 }
 
-function runBreakGlassWithFakeAws() {
+type BreakGlassProbeMode = 'exists' | 'missing' | 'bucket-denied' | 'stack-denied';
+
+function runBreakGlassWithFakeAws(probeMode: BreakGlassProbeMode = 'exists') {
   const fakeDirectory = mkdtempSync(join(tmpdir(), 'roadmap2u-fake-break-glass-'));
   const windows = process.platform === 'win32';
   const fakeAwsPath = join(fakeDirectory, windows ? 'aws.cmd' : 'aws');
   const caBundlePath = join(fakeDirectory, 'trusted-ca.pem');
+  const callsPath = join(fakeDirectory, 'destructive-calls.log');
   const fakeAws = windows
     ? `@echo off
 if "%~1"=="--version" (
@@ -133,12 +136,38 @@ if "%~1"=="sts" (
   echo 765932874577
   exit /b 0
 )
+if /I "%~1|%~2|${probeMode}"=="s3api|head-bucket|missing" (
+  echo An error occurred ^(404^) when calling the HeadBucket operation: Not Found 1>&2
+  exit /b 255
+)
+if /I "%~1|%~2|${probeMode}"=="s3api|head-bucket|stack-denied" (
+  echo An error occurred ^(404^) when calling the HeadBucket operation: Not Found 1>&2
+  exit /b 255
+)
+if /I "%~1|%~2|${probeMode}"=="s3api|head-bucket|bucket-denied" (
+  echo An error occurred ^(403^) when calling the HeadBucket operation: AccessDenied 1>&2
+  exit /b 255
+)
+if /I "%~1|%~2|${probeMode}"=="cloudformation|describe-stacks|missing" (
+  echo An error occurred ^(ValidationError^) when calling the DescribeStacks operation: Stack does not exist 1>&2
+  exit /b 255
+)
+if /I "%~1|%~2|${probeMode}"=="cloudformation|describe-stacks|stack-denied" (
+  echo An error occurred ^(AccessDenied^) when calling the DescribeStacks operation: AccessDenied 1>&2
+  exit /b 255
+)
 if "%~1"=="s3api" (
+  if "%~2"=="delete-objects" echo delete-objects>>"%FAKE_AWS_DESTRUCTIVE_LOG%"
+  if "%~2"=="head-bucket" exit /b 0
   if "%~2"=="list-object-versions" echo {"Versions":[],"DeleteMarkers":[]}
   exit /b 0
 )
 if "%~1"=="cloudformation" (
-  if "%~2"=="describe-stacks" echo ROLLBACK_COMPLETE
+  if "%~2"=="delete-stack" echo delete-stack>>"%FAKE_AWS_DESTRUCTIVE_LOG%"
+  if "%~2"=="describe-stacks" (
+    echo ROLLBACK_COMPLETE
+    exit /b 0
+  )
   exit /b 0
 )
 exit /b 2
@@ -173,11 +202,35 @@ if [[ "$1" == "sts" ]]; then
   exit 0
 fi
 if [[ "$1" == "s3api" ]]; then
+  [[ "$2" == "delete-objects" ]] && echo 'delete-objects' >> "$FAKE_AWS_DESTRUCTIVE_LOG"
+  if [[ "$2" == "head-bucket" ]]; then
+    if [[ "${probeMode}" == "missing" || "${probeMode}" == "stack-denied" ]]; then
+      echo 'An error occurred (404) when calling the HeadBucket operation: Not Found' >&2
+      exit 255
+    fi
+    if [[ "${probeMode}" == "bucket-denied" ]]; then
+      echo 'An error occurred (403) when calling the HeadBucket operation: AccessDenied' >&2
+      exit 255
+    fi
+    exit 0
+  fi
   [[ "$2" == "list-object-versions" ]] && echo '{"Versions":[],"DeleteMarkers":[]}'
   exit 0
 fi
 if [[ "$1" == "cloudformation" ]]; then
-  [[ "$2" == "describe-stacks" ]] && echo 'ROLLBACK_COMPLETE'
+  [[ "$2" == "delete-stack" ]] && echo 'delete-stack' >> "$FAKE_AWS_DESTRUCTIVE_LOG"
+  if [[ "$2" == "describe-stacks" ]]; then
+    if [[ "${probeMode}" == "missing" ]]; then
+      echo 'An error occurred (ValidationError) when calling the DescribeStacks operation: Stack does not exist' >&2
+      exit 255
+    fi
+    if [[ "${probeMode}" == "stack-denied" ]]; then
+      echo 'An error occurred (AccessDenied) when calling the DescribeStacks operation: AccessDenied' >&2
+      exit 255
+    fi
+    echo 'ROLLBACK_COMPLETE'
+    exit 0
+  fi
   exit 0
 fi
 exit 2
@@ -192,6 +245,7 @@ exit 2
     const pathKey = Object.keys(environment).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH';
     environment[pathKey] = `${fakeDirectory}${delimiter}${environment[pathKey] ?? ''}`;
     environment.FAKE_PROFILE_CA_BUNDLE = caBundlePath;
+    environment.FAKE_AWS_DESTRUCTIVE_LOG = callsPath;
     environment.AWS_PROFILE = 'ambient-profile';
     environment.AWS_DEFAULT_PROFILE = 'ambient-default-profile';
     delete environment.AWS_CA_BUNDLE;
@@ -221,6 +275,7 @@ exit 2
       stdout: result.stdout,
       stderr: result.stderr,
       error: result.error?.message,
+      destructiveCalls: existsSync(callsPath) ? readFileSync(callsPath, 'utf8') : '',
     };
   } finally {
     rmSync(fakeDirectory, { recursive: true, force: true });
@@ -669,11 +724,46 @@ describe('custom stage CDK bootstrap template', () => {
   });
 
   it(
-    'pins profile-scoped TLS config in the break-glass temporary session',
+    'pins profile-scoped TLS config and preserves the existing-resource teardown path',
     () => {
       const result = runBreakGlassWithFakeAws();
 
       expect(result, JSON.stringify(result)).toMatchObject({ status: 0, error: undefined });
+      expect(result.destructiveCalls.match(/delete-stack/g)).toHaveLength(2);
+    },
+    20_000,
+  );
+
+  it(
+    'treats only the expected not-found probe errors as already removed',
+    () => {
+      const result = runBreakGlassWithFakeAws('missing');
+
+      expect(result, JSON.stringify(result)).toMatchObject({
+        status: 0,
+        error: undefined,
+        destructiveCalls: '',
+      });
+      expect(result.stdout).toContain('Bucket roadmap2u-dev-765932874577 does not exist');
+      expect(result.stdout).toContain('Stack Roadmap-dev-Hosting does not exist');
+      expect(result.stdout).toContain('Stack Roadmap-dev-Backend does not exist');
+    },
+    20_000,
+  );
+
+  it.each([
+    ['bucket-denied', 'Checking bucket roadmap2u-dev-765932874577 failed'],
+    ['stack-denied', 'Checking stack Roadmap-dev-Hosting failed'],
+  ] as const)(
+    'fails closed without destructive calls when the %s probe is denied',
+    (probeMode, expectedError) => {
+      const result = runBreakGlassWithFakeAws(probeMode);
+      const output = `${result.stdout}\n${result.stderr}`;
+
+      expect(result.status).not.toBe(0);
+      expect(result.destructiveCalls).toBe('');
+      expect(output).toContain(expectedError);
+      expect(output).toContain('AccessDenied');
     },
     20_000,
   );
