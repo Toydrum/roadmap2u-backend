@@ -293,13 +293,17 @@ describe('GitHub OIDC bootstrap', () => {
     expect(rendered).not.toContain(':log-group//aws/');
   });
 
-  it('allows CloudFormation read-only log discovery while mutations stay stage-scoped', () => {
+  it('allows both CloudFormation log-tag ARN forms while every mutation stays stage-scoped', () => {
     const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) =>
         resource.Type === 'AWS::IAM::ManagedPolicy' &&
         resource.Properties.ManagedPolicyName.endsWith('-cfn-core'),
     ) as any[];
     for (const policy of policies) {
+      const stage = policy.Properties.ManagedPolicyName.match(
+        /^roadmap2u-(dev|test|prod)-cfn-core$/,
+      )?.[1];
+      expect(stage).toBeDefined();
       const statements = policy.Properties.PolicyDocument.Statement;
       const discovery = statements.find(
         (statement: any) => statement.Sid === 'InspectLogGroupsForCloudFormation',
@@ -316,17 +320,38 @@ describe('GitHub OIDC bootstrap', () => {
         Resource: '*',
       });
       expect(mutation.Action).not.toContain('logs:DescribeLogGroups');
-      expect(mutation.Action).not.toContain('logs:TagResource');
-      expect(JSON.stringify(mutation.Resource)).toContain('/aws/lambda/roadmap-');
+      expect(mutation.Action).toEqual([
+        'logs:CreateLogGroup',
+        'logs:DeleteLogGroup',
+        'logs:PutRetentionPolicy',
+        'logs:TagResource',
+      ]);
+      expect(mutation.Resource).toHaveLength(4);
+      expect(mutation.Resource).not.toContain('*');
       expect(tagging.Action).toEqual([
         'logs:ListTagsForResource',
         'logs:TagResource',
         'logs:UntagResource',
       ]);
-      expect(JSON.stringify(tagging.Resource)).toContain(':log-group:/aws/lambda/roadmap-');
-      expect(JSON.stringify(tagging.Resource)).not.toContain('-dev:*');
-      expect(JSON.stringify(tagging.Resource)).not.toContain('-test:*');
-      expect(JSON.stringify(tagging.Resource)).not.toContain('-prod:*');
+      expect(tagging.Resource).toHaveLength(4);
+      expect(tagging.Resource).not.toContain('*');
+
+      const mutationResources = JSON.stringify(mutation.Resource);
+      const taggingResources = JSON.stringify(tagging.Resource);
+      for (const logGroupName of [
+        `/aws/lambda/roadmap-pre-signup-${stage}`,
+        `/aws/lambda/roadmap-post-confirmation-${stage}`,
+        `/aws/lambda/roadmap-router-${stage}`,
+        `/aws/apigateway/roadmap-api-${stage}`,
+      ]) {
+        expect(mutationResources).toContain(`${logGroupName}:*`);
+        expect(taggingResources).toContain(logGroupName);
+        expect(taggingResources).not.toContain(`${logGroupName}:*`);
+      }
+      for (const otherStage of ['dev', 'test', 'prod'].filter((value) => value !== stage)) {
+        expect(mutationResources).not.toContain(`-${otherStage}:*`);
+        expect(taggingResources).not.toContain(`-${otherStage}`);
+      }
     }
   });
 
