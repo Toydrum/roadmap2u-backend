@@ -14,6 +14,14 @@ export interface StageManagedPolicies {
 const ROOT_DOMAIN = 'roadmap2u.com';
 const PROJECT_TAG = 'roadmap2u-project';
 const STAGE_TAG = 'roadmap2u-stage';
+const CLOUDFORMATION_API_TAG_KEYS = [
+  PROJECT_TAG,
+  STAGE_TAG,
+  'aws:cloudformation:logical-id',
+  'aws:cloudformation:stack-id',
+  'aws:cloudformation:stack-name',
+];
+const CERTIFICATE_CREATE_TAG_KEYS = ['Name', PROJECT_TAG, STAGE_TAG];
 const BOOTSTRAP_QUALIFIERS: Record<PolicyStage, string> = {
   dev: 'rmap2udev',
   test: 'rmap2utst',
@@ -179,6 +187,10 @@ function route53Statement(
 
 function certificateStatements(stack: Stack, stage: PolicyStage): iam.PolicyStatement[] {
   const allowedDomains = [apiDomain(stage), frontendDomain(stage)];
+  const allowedNames = [
+    `Roadmap-${stage}-Backend/ApiCertificate`,
+    `Roadmap-${stage}-Hosting/SiteCertificate`,
+  ];
   if (stage === 'prod') allowedDomains.push(`www.${ROOT_DOMAIN}`);
   return [
     new iam.PolicyStatement({
@@ -186,14 +198,63 @@ function certificateStatements(stack: Stack, stage: PolicyStage): iam.PolicyStat
       actions: ['acm:RequestCertificate'],
       resources: ['*'],
       conditions: {
-        ...requestTagConditions(stage),
+        StringEquals: {
+          'acm:CertificateKeyPairOrigin': 'AWS_MANAGED',
+          'acm:ValidationMethod': 'DNS',
+        },
         'ForAllValues:StringEquals': { 'acm:DomainNames': allowedDomains },
+        Null: {
+          'acm:CertificateAuthority': 'true',
+          'acm:DomainNames': 'false',
+        },
+      },
+    }),
+    new iam.PolicyStatement({
+      sid: 'TagOnlyUntaggedStageCertificates',
+      actions: ['acm:AddTagsToCertificate'],
+      resources: [resourceArn(stack, 'acm', 'certificate', '*')],
+      conditions: {
+        StringEquals: {
+          'acm:CertificateKeyPairOrigin': 'AWS_MANAGED',
+          'aws:RequestTag/Name': allowedNames,
+        },
+        StringEqualsIfExists: {
+          ...requestTagConditions(stage).StringEquals,
+        },
+        Null: {
+          'aws:ResourceTag/Name': 'true',
+          [`aws:ResourceTag/${PROJECT_TAG}`]: 'true',
+          [`aws:ResourceTag/${STAGE_TAG}`]: 'true',
+          'aws:TagKeys': 'false',
+        },
+        'ForAllValues:StringEquals': {
+          'aws:TagKeys': CERTIFICATE_CREATE_TAG_KEYS,
+        },
+      },
+    }),
+    new iam.PolicyStatement({
+      sid: 'TagOnlyNamedStageCertificates',
+      actions: ['acm:AddTagsToCertificate'],
+      resources: [resourceArn(stack, 'acm', 'certificate', '*')],
+      conditions: {
+        StringEquals: {
+          'acm:CertificateKeyPairOrigin': 'AWS_MANAGED',
+          'aws:ResourceTag/Name': allowedNames,
+        },
+        StringEqualsIfExists: {
+          ...requestTagConditions(stage).StringEquals,
+        },
+        'ForAllValues:StringEquals': {
+          'aws:TagKeys': [PROJECT_TAG, STAGE_TAG],
+        },
+        Null: {
+          'aws:TagKeys': 'false',
+        },
       },
     }),
     new iam.PolicyStatement({
       sid: 'ManageOnlyTaggedStageCertificates',
       actions: [
-        'acm:AddTagsToCertificate',
         'acm:DeleteCertificate',
         'acm:DescribeCertificate',
         'acm:ListTagsForCertificate',
@@ -267,6 +328,17 @@ function createCorePolicies(
     path: `/roadmap2u/${stage}/`,
     description: `CloudFormation core-service permissions for RoadMap2U ${stage}`,
     statements: [
+      new iam.PolicyStatement({
+        sid: 'DenyExportableStageCertificates',
+        effect: iam.Effect.DENY,
+        actions: ['acm:RequestCertificate'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            'acm:Export': 'ENABLED',
+          },
+        },
+      }),
       new iam.PolicyStatement({
         sid: 'CreateBoundedStageRuntimeRoles',
         actions: ['iam:CreateRole'],
@@ -469,7 +541,7 @@ function createCorePolicies(
             'apigateway:Request/ApiName': `roadmap-api-${stage}`,
           },
           'ForAllValues:StringEquals': {
-            'aws:TagKeys': [PROJECT_TAG, STAGE_TAG],
+            'aws:TagKeys': CLOUDFORMATION_API_TAG_KEYS,
           },
         },
       }),
@@ -494,7 +566,7 @@ function createCorePolicies(
         conditions: {
           ...requestTagConditions(stage),
           'ForAllValues:StringEquals': {
-            'aws:TagKeys': [PROJECT_TAG, STAGE_TAG],
+            'aws:TagKeys': CLOUDFORMATION_API_TAG_KEYS,
             'apigateway:Request/EndpointType': ['REGIONAL'],
           },
         },

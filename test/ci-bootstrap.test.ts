@@ -536,6 +536,9 @@ describe('GitHub OIDC bootstrap', () => {
       const createApi = statements.find(
         (statement: any) => statement.Sid === 'CreateTaggedStageHttpApi',
       );
+      const createDomain = statements.find(
+        (statement: any) => statement.Sid === 'CreateTaggedStageApiDomain',
+      );
       const manageApi = statements.find(
         (statement: any) => statement.Sid === 'ManageOnlyTaggedStageHttpApi',
       );
@@ -549,6 +552,22 @@ describe('GitHub OIDC bootstrap', () => {
         'aws:RequestTag/roadmap2u-project': 'RoadMap2U',
         'aws:RequestTag/roadmap2u-stage': stage,
       });
+      const cloudFormationApiTagKeys = [
+        'roadmap2u-project',
+        'roadmap2u-stage',
+        'aws:cloudformation:logical-id',
+        'aws:cloudformation:stack-id',
+        'aws:cloudformation:stack-name',
+      ];
+      expect(createApi.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(
+        cloudFormationApiTagKeys,
+      );
+      expect(createDomain.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(
+        cloudFormationApiTagKeys,
+      );
+      expect(createDomain.Condition['ForAllValues:StringEquals'][
+        'apigateway:Request/EndpointType'
+      ]).toEqual(['REGIONAL']);
       expect(manageApi.Condition.StringEquals).toMatchObject({
         'aws:ResourceTag/roadmap2u-project': 'RoadMap2U',
         'aws:ResourceTag/roadmap2u-stage': stage,
@@ -657,7 +676,7 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
-  it('separates ACM certificate requests from tagged certificate maintenance', () => {
+  it('requests only public DNS certificates for stage domains and safely bootstraps their tags', () => {
     const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
     ) as any[];
@@ -666,13 +685,116 @@ describe('GitHub OIDC bootstrap', () => {
         (statement: any) => statement.Sid === 'RequestOnlyStageCertificates',
       ),
     )) {
+      const stage = policy.Properties.ManagedPolicyName.includes('-dev-')
+        ? 'dev'
+        : policy.Properties.ManagedPolicyName.includes('-test-')
+          ? 'test'
+          : 'prod';
       const statements = policy.Properties.PolicyDocument.Statement;
-      const request = statements.find((statement: any) => statement.Sid === 'RequestOnlyStageCertificates');
+      const request = statements.find(
+        (statement: any) => statement.Sid === 'RequestOnlyStageCertificates',
+      );
+      const corePolicy = policies.find(
+        (candidate) =>
+          candidate.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-core`,
+      );
+      const denyExport = corePolicy.Properties.PolicyDocument.Statement.find(
+        (statement: any) => statement.Sid === 'DenyExportableStageCertificates',
+      );
+      const initialTag = statements.find(
+        (statement: any) => statement.Sid === 'TagOnlyUntaggedStageCertificates',
+      );
+      const ownershipTag = statements.find(
+        (statement: any) => statement.Sid === 'TagOnlyNamedStageCertificates',
+      );
       const manage = statements.find(
         (statement: any) => statement.Sid === 'ManageOnlyTaggedStageCertificates',
       );
+
+      const apiDomain = stage === 'prod' ? 'api.roadmap2u.com' : `api.${stage}.roadmap2u.com`;
+      const frontendDomain = stage === 'prod' ? 'roadmap2u.com' : `${stage}.roadmap2u.com`;
+      const allowedDomains =
+        stage === 'prod'
+          ? [apiDomain, frontendDomain, 'www.roadmap2u.com']
+          : [apiDomain, frontendDomain];
+
       expect(request.Action).toBe('acm:RequestCertificate');
-      expect(manage.Action).toContain('acm:AddTagsToCertificate');
+      expect(request.Resource).toBe('*');
+      expect(request.Condition.StringEquals).toMatchObject({
+        'acm:CertificateKeyPairOrigin': 'AWS_MANAGED',
+        'acm:ValidationMethod': 'DNS',
+      });
+      expect(request.Condition['ForAllValues:StringEquals']['acm:DomainNames']).toEqual(
+        allowedDomains,
+      );
+      expect(request.Condition.Null).toEqual({
+        'acm:CertificateAuthority': 'true',
+        'acm:DomainNames': 'false',
+      });
+      expect(JSON.stringify(request.Condition)).not.toContain('aws:RequestTag');
+
+      expect(denyExport).toEqual({
+        Action: 'acm:RequestCertificate',
+        Condition: {
+          StringEquals: {
+            'acm:Export': 'ENABLED',
+          },
+        },
+        Effect: 'Deny',
+        Resource: '*',
+        Sid: 'DenyExportableStageCertificates',
+      });
+
+      expect(initialTag.Action).toBe('acm:AddTagsToCertificate');
+      expect(JSON.stringify(initialTag.Resource)).toContain(
+        ':acm:us-east-1:123456789012:certificate/*',
+      );
+      expect(initialTag.Condition.StringEquals).toMatchObject({
+        'acm:CertificateKeyPairOrigin': 'AWS_MANAGED',
+        'aws:RequestTag/Name': [
+          `Roadmap-${stage}-Backend/ApiCertificate`,
+          `Roadmap-${stage}-Hosting/SiteCertificate`,
+        ],
+      });
+      expect(initialTag.Condition.StringEqualsIfExists).toEqual({
+        'aws:RequestTag/roadmap2u-project': 'RoadMap2U',
+        'aws:RequestTag/roadmap2u-stage': stage,
+      });
+      expect(initialTag.Condition.Null).toEqual({
+        'aws:ResourceTag/Name': 'true',
+        'aws:ResourceTag/roadmap2u-project': 'true',
+        'aws:ResourceTag/roadmap2u-stage': 'true',
+        'aws:TagKeys': 'false',
+      });
+      expect(initialTag.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual([
+        'Name',
+        'roadmap2u-project',
+        'roadmap2u-stage',
+      ]);
+
+      expect(ownershipTag.Action).toBe('acm:AddTagsToCertificate');
+      expect(ownershipTag.Condition.StringEquals['acm:CertificateKeyPairOrigin']).toBe(
+        'AWS_MANAGED',
+      );
+      expect(ownershipTag.Condition.StringEquals['aws:ResourceTag/Name']).toEqual([
+        `Roadmap-${stage}-Backend/ApiCertificate`,
+        `Roadmap-${stage}-Hosting/SiteCertificate`,
+      ]);
+      expect(ownershipTag.Condition.StringEqualsIfExists).toEqual({
+        'aws:RequestTag/roadmap2u-project': 'RoadMap2U',
+        'aws:RequestTag/roadmap2u-stage': stage,
+      });
+      expect(ownershipTag.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual([
+        'roadmap2u-project',
+        'roadmap2u-stage',
+      ]);
+      expect(ownershipTag.Condition.Null['aws:TagKeys']).toBe('false');
+
+      expect(manage.Action).not.toContain('acm:AddTagsToCertificate');
+      expect(manage.Condition.StringEquals).toMatchObject({
+        'aws:ResourceTag/roadmap2u-project': 'RoadMap2U',
+        'aws:ResourceTag/roadmap2u-stage': stage,
+      });
     }
   });
 

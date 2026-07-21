@@ -18,6 +18,7 @@ El deploy ordinario jamás realiza el corte de `roadmap2u.com`/`www`. Ese cambio
 - Para `test`/`prod`, el mismo SHA consta como exitoso en el ambiente anterior.
 - Para `prod`, un aprobador revisó el SHA inmutable, el PR, el synth/template y el cambio esperado antes de aprobar el GitHub Environment. El job registra después un `cdk diff` inmediatamente antes del deploy; esa salida es evidencia, no una segunda pausa de aprobación.
 - El preflight `oidc-preflight.yml` pasó para el repo/stage y confirmó únicamente `sts:GetCallerIdentity` en la cuenta esperada.
+- El inventario de certificados ACM sin tags quedó registrado y siguen válidas las fronteras de confianza aceptadas en el [límite de aislamiento del etiquetado inicial](../architecture.md#límite-de-aislamiento-durante-el-etiquetado-acm).
 
 Mantén separados los SHA de backend y frontend si sus repositorios no avanzan al mismo commit; registra la pareja exacta desplegada por ambiente.
 
