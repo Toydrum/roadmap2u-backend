@@ -570,6 +570,9 @@ describe('GitHub OIDC bootstrap', () => {
       const domain = statements.find(
         (statement: any) => statement.Sid === 'ManageOnlyStageApiDomain',
       );
+      const initialDomainTag = statements.find(
+        (statement: any) => statement.Sid === 'TagOnlyCreatingStageApiDomain',
+      );
 
       expect(createApi.Action).toBe('apigateway:POST');
       expect(createApi.Condition.StringEquals).toMatchObject({
@@ -593,6 +596,25 @@ describe('GitHub OIDC bootstrap', () => {
       expect(createDomain.Condition['ForAllValues:StringEquals'][
         'apigateway:Request/EndpointType'
       ]).toEqual(['REGIONAL']);
+      expect(initialDomainTag).toBeDefined();
+      const expectedDomain =
+        stage === 'prod' ? 'api.roadmap2u.com' : `api.${stage}.roadmap2u.com`;
+      const encodedDomainTagResource = JSON.stringify(initialDomainTag.Resource);
+      expect(initialDomainTag.Action).toBe('apigateway:PUT');
+      expect(encodedDomainTagResource).toContain(':apigateway:us-east-1::/tags/arn%3A');
+      expect(encodedDomainTagResource).toContain(
+        `%3Aapigateway%3Aus-east-1%3A%3A%2Fdomainnames%2F${expectedDomain}`,
+      );
+      expect(encodedDomainTagResource).not.toContain('/tags/*');
+      expect(initialDomainTag.Condition.StringEquals).toEqual({
+        'aws:RequestTag/roadmap2u-project': 'RoadMap2U',
+        'aws:RequestTag/roadmap2u-stage': stage,
+      });
+      expect(initialDomainTag.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(
+        cloudFormationApiTagKeys,
+      );
+      expect(initialDomainTag.Condition.Null).toEqual({ 'aws:TagKeys': 'false' });
+      expect(JSON.stringify(initialDomainTag.Condition)).not.toContain('aws:ResourceTag');
       expect(manageApi.Condition.StringEquals).toMatchObject({
         'aws:ResourceTag/roadmap2u-project': 'RoadMap2U',
         'aws:ResourceTag/roadmap2u-stage': stage,
