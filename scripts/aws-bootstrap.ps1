@@ -40,6 +40,27 @@ $awsVersion = & $awsCli --version 2>&1
 if ($LASTEXITCODE -ne 0 -or "$awsVersion" -notmatch '^aws-cli/2\.') {
   throw "RoadMap2U bootstrap requires AWS CLI v2; found: $awsVersion"
 }
+$effectiveCaBundle = $env:AWS_CA_BUNDLE
+if ([string]::IsNullOrWhiteSpace("$effectiveCaBundle")) {
+  $profileCaBundle = & $awsCli configure get ca_bundle --profile $AdminProfile
+  $profileCaBundleExitCode = $LASTEXITCODE
+  if (
+    $profileCaBundleExitCode -notin @(0, 1) -or
+    ($profileCaBundleExitCode -eq 1 -and -not [string]::IsNullOrWhiteSpace("$profileCaBundle"))
+  ) {
+    throw "Reading the AWS CA bundle for profile $AdminProfile failed with exit code $profileCaBundleExitCode."
+  }
+  $effectiveCaBundle = $profileCaBundle
+}
+if (-not [string]::IsNullOrWhiteSpace("$effectiveCaBundle")) {
+  $effectiveCaBundle = [Environment]::ExpandEnvironmentVariables("$effectiveCaBundle".Trim())
+  if (-not (Test-Path -LiteralPath $effectiveCaBundle -PathType Leaf)) {
+    throw "The effective AWS CA bundle does not exist: $effectiveCaBundle"
+  }
+  $effectiveCaBundle = (Resolve-Path -LiteralPath $effectiveCaBundle).Path
+} else {
+  $effectiveCaBundle = $null
+}
 $operatorStackName = 'RoadMap2U-BootstrapOperator'
 $operatorRoleArn = "arn:aws:iam::$AccountId`:role/roadmap2u/bootstrap/RoadMap2U-BootstrapOperator"
 $controlPlaneBucket = "roadmap2u-bootstrap-templates-$AccountId-$Region"
@@ -103,11 +124,15 @@ function Enter-BootstrapOperatorSession {
     SecretKey = $env:AWS_SECRET_ACCESS_KEY
     SessionToken = $env:AWS_SESSION_TOKEN
     Region = $env:AWS_REGION
+    CaBundle = $env:AWS_CA_BUNDLE
   }
   $env:AWS_ACCESS_KEY_ID = $credentials.AccessKeyId
   $env:AWS_SECRET_ACCESS_KEY = $credentials.SecretAccessKey
   $env:AWS_SESSION_TOKEN = $credentials.SessionToken
   $env:AWS_REGION = $Region
+  if (-not [string]::IsNullOrWhiteSpace("$effectiveCaBundle")) {
+    $env:AWS_CA_BUNDLE = $effectiveCaBundle
+  }
   return $previous
 }
 
@@ -116,6 +141,7 @@ function Exit-BootstrapOperatorSession([hashtable]$Previous) {
   $env:AWS_SECRET_ACCESS_KEY = $Previous.SecretKey
   $env:AWS_SESSION_TOKEN = $Previous.SessionToken
   $env:AWS_REGION = $Previous.Region
+  $env:AWS_CA_BUNDLE = $Previous.CaBundle
 }
 
 if ($Phase -eq 'create-operator') {

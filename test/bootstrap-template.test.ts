@@ -1,5 +1,7 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 const templatePath = join(
@@ -11,6 +13,89 @@ const operatorTemplatePath = join(process.cwd(), 'bootstrap', 'bootstrap-operato
 const bootstrapScriptPath = join(process.cwd(), 'scripts', 'aws-bootstrap.ps1');
 const breakGlassScriptPath = join(process.cwd(), 'scripts', 'aws-break-glass.ps1');
 const smokeCleanupScriptPath = join(process.cwd(), 'scripts', 'aws-smoke-cleanup.ps1');
+
+function runBootstrapWithFakeAws(options: {
+  environmentCaBundle: boolean;
+  failConfigureLookup: boolean;
+}) {
+  const fakeDirectory = mkdtempSync(join(tmpdir(), 'roadmap2u-fake-aws-'));
+  const windows = process.platform === 'win32';
+  const fakeAwsPath = join(fakeDirectory, windows ? 'aws.cmd' : 'aws');
+  const fakeAws = windows
+    ? `@echo off
+if "%~1"=="--version" (
+  echo aws-cli/2.36.4 Python/3.13 Windows/11 exe/AMD64
+  exit /b 0
+)
+if "%~1"=="configure" (
+  if /I "%FAKE_AWS_FAIL_CONFIG%"=="true" exit /b 9
+  exit /b 1
+)
+if "%~1"=="sts" (
+  echo {"UserId":"AIDATEST","Account":"765932874577","Arn":"arn:aws:iam::765932874577:user/Hector-admin"}
+  exit /b 0
+)
+if "%~1"=="cloudformation" exit /b 0
+exit /b 2
+`
+    : `#!/usr/bin/env bash
+if [[ "$1" == "--version" ]]; then
+  echo "aws-cli/2.36.4 Python/3.13 Linux/amd64"
+  exit 0
+fi
+if [[ "$1" == "configure" ]]; then
+  [[ "$FAKE_AWS_FAIL_CONFIG" == "true" ]] && exit 9
+  exit 1
+fi
+if [[ "$1" == "sts" ]]; then
+  echo '{"UserId":"AIDATEST","Account":"765932874577","Arn":"arn:aws:iam::765932874577:user/Hector-admin"}'
+  exit 0
+fi
+[[ "$1" == "cloudformation" ]] && exit 0
+exit 2
+`;
+
+  try {
+    writeFileSync(fakeAwsPath, fakeAws, 'utf8');
+    if (!windows) chmodSync(fakeAwsPath, 0o755);
+
+    const environment = { ...process.env };
+    const pathKey = Object.keys(environment).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH';
+    environment[pathKey] = `${fakeDirectory}${delimiter}${environment[pathKey] ?? ''}`;
+    environment.FAKE_AWS_FAIL_CONFIG = options.failConfigureLookup ? 'true' : 'false';
+    if (options.environmentCaBundle) {
+      const caBundlePath = join(fakeDirectory, 'trusted-ca.pem');
+      writeFileSync(caBundlePath, 'test-ca', 'utf8');
+      environment.AWS_CA_BUNDLE = caBundlePath;
+    } else {
+      delete environment.AWS_CA_BUNDLE;
+    }
+
+    const result = spawnSync(windows ? 'powershell.exe' : 'pwsh', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      bootstrapScriptPath,
+      '-Phase',
+      'create-operator',
+      '-AdminProfile',
+      'mock-profile',
+    ], {
+      encoding: 'utf8',
+      env: environment,
+    });
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      error: result.error?.message,
+    };
+  } finally {
+    rmSync(fakeDirectory, { recursive: true, force: true });
+  }
+}
 
 describe('custom stage CDK bootstrap template', () => {
   it('is versioned and parameterized for the three fixed stage qualifiers', () => {
@@ -284,6 +369,15 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).not.toContain('role/Hector-admin');
     expect(script).toContain("Join-Path $env:LOCALAPPDATA 'Programs\\Amazon\\AWSCLIV2\\aws.exe'");
     expect(script).toContain("-notmatch '^aws-cli/2\\.'");
+    expect(script).toContain('configure get ca_bundle');
+    expect(script).toContain('--profile $AdminProfile');
+    expect(script).toContain('$effectiveCaBundle = $env:AWS_CA_BUNDLE');
+    expect(script).toContain('$profileCaBundleExitCode -notin @(0, 1)');
+    expect(script).toContain('Test-Path -LiteralPath $effectiveCaBundle -PathType Leaf');
+    expect(script).toContain('(Resolve-Path -LiteralPath $effectiveCaBundle).Path');
+    expect(script).toContain('CaBundle = $env:AWS_CA_BUNDLE');
+    expect(script).toContain('$env:AWS_CA_BUNDLE = $effectiveCaBundle');
+    expect(script).toContain('$env:AWS_CA_BUNDLE = $Previous.CaBundle');
     expect(script).toContain('--s3-bucket $controlPlaneBucket');
     expect(script).toContain("--s3-prefix 'control-plane'");
     expect(script).toContain('s3://$controlPlaneBucket/control-plane/');
@@ -316,6 +410,24 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script.indexOf('sts get-caller-identity')).toBeLessThan(
       script.indexOf("if ($Phase -eq 'create-operator')"),
     );
+  });
+
+  it('accepts an AWS profile that does not configure a custom CA bundle', () => {
+    const result = runBootstrapWithFakeAws({
+      environmentCaBundle: false,
+      failConfigureLookup: false,
+    });
+
+    expect(result).toMatchObject({ status: 0, error: undefined });
+  });
+
+  it('keeps AWS_CA_BUNDLE precedence instead of reading a lower-priority profile value', () => {
+    const result = runBootstrapWithFakeAws({
+      environmentCaBundle: true,
+      failConfigureLookup: true,
+    });
+
+    expect(result).toMatchObject({ status: 0, error: undefined });
   });
 
   it('provides a resumable MFA-only non-production destroy script that empties every object version first', () => {
