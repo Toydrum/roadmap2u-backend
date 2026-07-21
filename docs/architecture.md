@@ -73,6 +73,12 @@ La ley de resolución es LWW por `rev` y luego `updatedAt`. El backend rechaza u
 - Certificado ACM en `us-east-1`, región requerida por CloudFront.
 - `www.roadmap2u.com` deberá responder con redirección permanente al apex una vez realizado el cutover.
 
+### Límite de aislamiento durante el etiquetado ACM
+
+El resource provider de CloudFormation observado en esta cuenta crea cada certificado público sin tags y después aplica `Name`, seguido por los tags de proyecto y stage. IAM no expone en `AddTagsToCertificate` una condición que relacione ese ARN recién creado con la solicitud anterior. Por ello, la concesión inicial también podría asignar uno de los dos nombres exactos del stage a otro certificado `AWS_MANAGED` completamente sin tags de la misma cuenta. La cuenta es compartida y ya contiene certificados ajenos sin tags; se acepta este riesgo residual porque el execution role es asumible únicamente por CloudFormation, los roles de GitHub no pueden invocar ACM ni asumirlo directamente, los roles runtime tienen una permissions boundary sin ACM, los dominios de emisión están cerrados por stage y existe una denegación explícita para certificados exportables.
+
+Antes de cada despliegue se debe inventariar y conservar evidencia de los certificados ACM sin tags y volver a validar esas fronteras de confianza. Si el execution role se comparte, puede asumirse fuera de CloudFormation, un rol runtime obtiene ACM o deja de ser aceptable el inventario observado, el etiquetado debe migrarse a un mecanismo de provisión atómica o a una cuenta aislada antes de continuar.
+
 El despliegue del frontend publica primero assets con hash y caché `immutable`, después punteros PWA sin caché, y `index.html` al final. S3 Versioning y la conservación de los manifiestos actual/anterior permiten republicar un SHA conocido.
 
 ## DNS
