@@ -385,11 +385,17 @@ export class RoadmapStack extends Stack {
       `https://cognito-idp.${this.region}.amazonaws.com/${pool.userPoolId}`,
       { jwtAudience: [webClient.userPoolClientId] },
     );
+    const routerIntegration = new HttpLambdaIntegration('RouterIntegration', router);
     api.addRoutes({
       path: '/v1/{proxy+}',
       methods: [apigatewayv2.HttpMethod.ANY],
-      integration: new HttpLambdaIntegration('RouterIntegration', router),
+      integration: routerIntegration,
       authorizer,
+    });
+    api.addRoutes({
+      path: '/v1/{proxy+}',
+      methods: [apigatewayv2.HttpMethod.OPTIONS],
+      integration: routerIntegration,
     });
     const apiLogGroup = logs.LogGroup.fromLogGroupName(
       this,

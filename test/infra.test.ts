@@ -25,6 +25,27 @@ function backendTemplate(stage: 'dev' | 'test' | 'prod'): Template {
 }
 
 describe('stage backend infrastructure', () => {
+  it('keeps CORS preflight unauthenticated while application routes require JWT', () => {
+    const template = backendTemplate('dev').toJSON();
+    const routes = Object.values(template.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::ApiGatewayV2::Route',
+    ) as any[];
+    const preflight = routes.find(
+      (resource) => resource.Properties.RouteKey === 'OPTIONS /v1/{proxy+}',
+    );
+    const application = routes.find(
+      (resource) => resource.Properties.RouteKey === 'ANY /v1/{proxy+}',
+    );
+
+    expect(preflight).toBeDefined();
+    expect(preflight.Properties.AuthorizationType).toBe('NONE');
+    expect(preflight.Properties.AuthorizerId).toBeUndefined();
+    expect(preflight.Properties.Target).toBeDefined();
+    expect(application.Properties.AuthorizationType).toBe('JWT');
+    expect(application.Properties.AuthorizerId).toBeDefined();
+    expect(preflight.Properties.Target).toEqual(application.Properties.Target);
+  });
+
   it.each([
     ['dev', ['https://dev.roadmap2u.com', 'http://localhost:4200', 'http://localhost:8826']],
     ['test', ['https://test.roadmap2u.com', 'http://localhost:4200', 'http://localhost:8826']],

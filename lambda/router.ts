@@ -1,4 +1,7 @@
-﻿import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
+import type {
+  APIGatewayProxyEventV2,
+  APIGatewayProxyEventV2WithJWTAuthorizer,
+} from 'aws-lambda';
 import { ApiError } from '@app/api/contracts';
 import { Ctx, resolveCaller } from './authz';
 import { Deps, realDeps } from './db';
@@ -10,10 +13,10 @@ import * as forests from './handlers/forests';
 import * as sync from './handlers/sync';
 
 /**
- * The single router behind `/v1/{proxy+}` — the JWT authorizer has already
- * verified the idToken; this resolves the caller from the TABLE (authz truth)
- * and dispatches. Route patterns mirror API_PATHS in contracts.ts 1:1; the
- * parity test in test/routes.test.ts enforces it.
+ * The single router behind `/v1/{proxy+}`. CORS preflight returns before auth;
+ * application routes arrive after the JWT authorizer has verified the idToken,
+ * resolve the caller from the TABLE (authz truth), and dispatch. Route patterns
+ * mirror API_PATHS in contracts.ts 1:1; test/routes.test.ts enforces parity.
  */
 
 type Handler = (ctx: Ctx, params: Record<string, string>, body: unknown) => Promise<unknown>;
@@ -83,17 +86,24 @@ export function matchRoute(
 
 let deps: Deps | null = null;
 
+type RouterEvent = APIGatewayProxyEventV2 | APIGatewayProxyEventV2WithJWTAuthorizer;
+
 export async function handleEvent(
-  event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  event: RouterEvent,
   injected?: Deps,
 ): Promise<HttpResponse> {
   try {
+    const method = event.requestContext.http.method.toUpperCase();
+    if (method === 'OPTIONS') return { statusCode: 204, headers: {}, body: '' };
+
     const d = injected ?? (deps ??= realDeps());
-    const sub = event.requestContext.authorizer?.jwt?.claims?.['sub'];
+    const sub =
+      'authorizer' in event.requestContext
+        ? event.requestContext.authorizer.jwt.claims['sub']
+        : undefined;
     if (typeof sub !== 'string' || !sub) throw new ApiError('UNAUTHENTICATED');
 
     const rawPath = event.rawPath.replace(/^\/v1(?=\/|$)/, '') || '/';
-    const method = event.requestContext.http.method.toUpperCase();
     const found = matchRoute(method, rawPath);
     if (!found) throw new ApiError('NOT_FOUND');
 
@@ -108,4 +118,4 @@ export async function handleEvent(
   }
 }
 
-export const handler = (event: APIGatewayProxyEventV2WithJWTAuthorizer) => handleEvent(event);
+export const handler = (event: RouterEvent) => handleEvent(event);
