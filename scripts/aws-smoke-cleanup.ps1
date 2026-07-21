@@ -101,6 +101,7 @@ function Get-UserPartitionItems(
       '--key-condition-expression', 'pk = :pk',
       '--expression-attribute-values', "file://$valuesPath",
       '--projection-expression', 'pk, sk',
+      '--consistent-read',
       '--no-paginate',
       '--output', 'json'
     )
