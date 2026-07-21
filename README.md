@@ -2,7 +2,7 @@
 
 Infraestructura como código y backend serverless de RoadMap2U. Este repositorio es dueño de Cognito, API Gateway, Lambda, DynamoDB, hosting web en S3/CloudFront, certificados, DNS administrado por ambiente, parámetros SSM y la confianza OIDC usada por GitHub Actions.
 
-> **Estado de esta entrega:** el código y los workflows quedan preparados, pero **no se ejecuta** `cdk bootstrap`, `cdk deploy`, una invalidación de CloudFront ni un cambio de Route 53. En particular, producción no administra todavía los registros `roadmap2u.com` ni `www.roadmap2u.com`.
+> Los despliegues y el corte DNS nunca se ejecutan al clonar el repositorio: requieren los gates, roles OIDC, environments protegidos y aprobaciones descritos en los runbooks. Producción no administra sus aliases apex/`www` desde el stack ordinario; el corte y su rollback viven en un workflow protegido separado.
 
 ## Ambientes
 
@@ -100,6 +100,7 @@ El procedimiento de captura, verificación, cambio y rollback está en [docs/run
 - [Contratos vendorizados y hash](docs/contracts.md)
 - [Configuración GitHub ↔ AWS](docs/github-aws-setup.md)
 - [Runbook de deploy y rollback](docs/runbooks/deploy.md)
+- [Runbook de operaciones MFA](docs/runbooks/operations.md)
 - [Runbook futuro de corte DNS](docs/runbooks/dns-cutover.md)
 
 ## Licencia

@@ -1,5 +1,7 @@
 node_modules/
 cdk.out/
+cdk.out-*/
+cdk.out.*/
 coverage/
 *.log
 .env

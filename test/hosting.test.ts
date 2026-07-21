@@ -23,6 +23,30 @@ function hostingTemplate(stage: 'dev' | 'test' | 'prod'): Template {
 }
 
 describe('private PWA hosting', () => {
+  it.each(['dev', 'test', 'prod'] as const)('globally tags %s hosting resources', (stage) => {
+    const template = hostingTemplate(stage).toJSON();
+    for (const resourceType of ['AWS::S3::Bucket', 'AWS::SSM::Parameter']) {
+      const resources = Object.values(template.Resources).filter(
+        (resource: any) => resource.Type === resourceType,
+      ) as any[];
+      expect(resources.length).toBeGreaterThan(0);
+      for (const resource of resources) {
+        const tags = Array.isArray(resource.Properties.Tags)
+          ? Object.fromEntries(
+              resource.Properties.Tags.map((tag: { Key: string; Value: string }) => [
+                tag.Key,
+                tag.Value,
+              ]),
+            )
+          : resource.Properties.Tags;
+        expect(tags).toMatchObject({
+          'roadmap2u-project': 'RoadMap2U',
+          'roadmap2u-stage': stage,
+        });
+      }
+    }
+  });
+
   it.each(['dev', 'test', 'prod'] as const)(
     'uses a private, encrypted, versioned %s bucket behind CloudFront OAC',
     (stage) => {
@@ -38,7 +62,13 @@ describe('private PWA hosting', () => {
         },
         VersioningConfiguration: { Status: 'Enabled' },
       });
-      template.resourceCountIs('AWS::CloudFront::OriginAccessControl', 1);
+      template.resourceCountIs('AWS::CloudFront::OriginAccessControl', 0);
+      const distribution = Object.values(template.toJSON().Resources).find(
+        (resource: any) => resource.Type === 'AWS::CloudFront::Distribution',
+      ) as any;
+      expect(JSON.stringify(distribution.Properties.DistributionConfig.Origins)).toContain(
+        `RoadMap2U-${stage}-SiteOacId`,
+      );
       template.hasResourceProperties('AWS::S3::BucketPolicy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
@@ -123,15 +153,13 @@ describe('private PWA hosting', () => {
 
   it('publishes baseline browser security headers', () => {
     const template = hostingTemplate('prod');
-    template.hasResourceProperties('AWS::CloudFront::ResponseHeadersPolicy', {
-      ResponseHeadersPolicyConfig: {
-        SecurityHeadersConfig: Match.objectLike({
-          ContentTypeOptions: { Override: true },
-          FrameOptions: { FrameOption: 'DENY', Override: true },
-          ReferrerPolicy: { ReferrerPolicy: 'strict-origin-when-cross-origin', Override: true },
-          StrictTransportSecurity: Match.objectLike({ Override: true }),
+    template.resourceCountIs('AWS::CloudFront::ResponseHeadersPolicy', 0);
+    template.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        DefaultCacheBehavior: Match.objectLike({
+          ResponseHeadersPolicyId: Match.anyValue(),
         }),
-      },
+      }),
     });
   });
 

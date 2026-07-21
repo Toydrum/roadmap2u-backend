@@ -1,0 +1,88 @@
+name: AWS OIDC identity preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: GitHub Environment whose AWS identity must be verified
+        required: true
+        type: choice
+        options: [dev, test, prod, prod-dns-plan, prod-dns-cutover]
+
+permissions: {}
+
+jobs:
+  stage-identity:
+    if: ${{ contains(fromJSON('["dev","test","prod"]'), inputs.stage) }}
+    permissions:
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: ${{ inputs.stage }}
+    steps:
+      - name: Configure AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: backend-identity-${{ inputs.stage }}-${{ github.run_id }}
+          aws-region: us-east-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - name: Verify the expected AWS identity
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          ACTUAL_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          test "$ACTUAL_ACCOUNT" = "$AWS_ACCOUNT_ID"
+          echo "OIDC identity confirmed for account $ACTUAL_ACCOUNT and environment ${{ inputs.stage }}."
+
+  dns-plan-identity:
+    if: ${{ inputs.stage == 'prod-dns-plan' }}
+    permissions:
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: prod
+    steps:
+      - name: Configure the read-only DNS planning identity
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        with:
+          role-to-assume: ${{ vars.DNS_PLAN_ROLE_ARN }}
+          role-session-name: backend-identity-prod-dns-plan-${{ github.run_id }}
+          aws-region: us-east-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - name: Verify the expected AWS identity
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          ACTUAL_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          test "$ACTUAL_ACCOUNT" = "$AWS_ACCOUNT_ID"
+          echo "OIDC DNS plan identity confirmed for account $ACTUAL_ACCOUNT."
+
+  dns-cutover-identity:
+    if: ${{ inputs.stage == 'prod-dns-cutover' }}
+    permissions:
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: prod-dns-cutover
+    steps:
+      - name: Configure the DNS cutover identity
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        with:
+          role-to-assume: ${{ vars.DNS_CUTOVER_ROLE_ARN }}
+          role-session-name: backend-identity-prod-dns-cutover-${{ github.run_id }}
+          aws-region: us-east-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - name: Verify the expected AWS identity
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          ACTUAL_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          test "$ACTUAL_ACCOUNT" = "$AWS_ACCOUNT_ID"
+          echo "OIDC DNS cutover identity confirmed for account $ACTUAL_ACCOUNT."

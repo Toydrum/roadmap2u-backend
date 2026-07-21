@@ -1,0 +1,560 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "RoadMap2U stage-isolated CDK bootstrap (template version 32)",
+  "Parameters": {
+    "Stage": {
+      "Type": "String",
+      "AllowedValues": [
+        "dev",
+        "test",
+        "prod"
+      ],
+      "Description": "RoadMap2U deployment stage",
+      "Default": "test"
+    },
+    "Qualifier": {
+      "Type": "String",
+      "AllowedPattern": "^[a-z0-9]{9}$",
+      "Description": "Stage-specific CDK bootstrap qualifier",
+      "Default": "rmap2utst"
+    }
+  },
+  "Rules": {
+    "StageQualifierMustMatch": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Or": [
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "Stage"
+                      },
+                      "dev"
+                    ]
+                  },
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "Qualifier"
+                      },
+                      "rmap2udev"
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "Stage"
+                      },
+                      "test"
+                    ]
+                  },
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "Qualifier"
+                      },
+                      "rmap2utst"
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "Stage"
+                      },
+                      "prod"
+                    ]
+                  },
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "Qualifier"
+                      },
+                      "rmap2uprd"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Qualifier must be rmap2udev, rmap2utst, or rmap2uprd for its matching stage."
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "StagingBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "BucketName": {
+          "Fn::Sub": "cdk-${Qualifier}-assets-${AWS::AccountId}-${AWS::Region}"
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "Tags": [
+          {
+            "Key": "roadmap2u-project",
+            "Value": "RoadMap2U"
+          },
+          {
+            "Key": "roadmap2u-stage",
+            "Value": {
+              "Ref": "Stage"
+            }
+          }
+        ]
+      }
+    },
+    "StagingBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "StagingBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyInsecureTransport",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "StagingBucket",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${StagingBucket.Arn}/*"
+                }
+              ],
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "SiteOriginAccessControl": {
+      "Type": "AWS::CloudFront::OriginAccessControl",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "OriginAccessControlConfig": {
+          "Description": {
+            "Fn::Sub": "RoadMap2U ${Stage} private S3 origin"
+          },
+          "Name": {
+            "Fn::Sub": "roadmap2u-${Stage}-s3-oac"
+          },
+          "OriginAccessControlOriginType": "s3",
+          "SigningBehavior": "always",
+          "SigningProtocol": "sigv4"
+        }
+      }
+    },
+    "CloudFormationExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "cdk-${Qualifier}-cfn-exec-role-${AWS::AccountId}-${AWS::Region}"
+        },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "cloudformation.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-core"
+          },
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-api"
+          },
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-data"
+          },
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-edge"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "roadmap2u-project",
+            "Value": "RoadMap2U"
+          },
+          {
+            "Key": "roadmap2u-stage",
+            "Value": {
+              "Ref": "Stage"
+            }
+          }
+        ]
+      }
+    },
+    "DeploymentActionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "cdk-${Qualifier}-deploy-role-${AWS::AccountId}-${AWS::Region}"
+        },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/roadmap2u/${Stage}/roadmap2u-${Stage}-backend-deploy"
+                }
+              },
+              "Action": [
+                "sts:AssumeRole",
+                "sts:TagSession"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "DeployOnlySelectedStageStacks",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "CreateOrUpdateWithExactExecutionRole",
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudformation:CreateStack",
+                    "cloudformation:UpdateStack"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Roadmap-${Stage}-Backend/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Roadmap-${Stage}-Hosting/*"
+                    }
+                  ],
+                  "Condition": {
+                    "StringEquals": {
+                      "cloudformation:RoleArn": {
+                        "Fn::GetAtt": [
+                          "CloudFormationExecutionRole",
+                          "Arn"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "Sid": "CreateOnlyStageCreateOrUpdateChangeSets",
+                  "Effect": "Allow",
+                  "Action": "cloudformation:CreateChangeSet",
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Roadmap-${Stage}-Backend/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Roadmap-${Stage}-Hosting/*"
+                    }
+                  ],
+                  "Condition": {
+                    "StringEquals": {
+                      "cloudformation:RoleArn": {
+                        "Fn::GetAtt": [
+                          "CloudFormationExecutionRole",
+                          "Arn"
+                        ]
+                      }
+                    },
+                    "Null": {
+                      "cloudformation:ImportResourceTypes": "true"
+                    }
+                  }
+                },
+                {
+                  "Sid": "OperateOnlySelectedStageChangeSets",
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudformation:DeleteChangeSet",
+                    "cloudformation:DescribeChangeSet",
+                    "cloudformation:DescribeStackEvents",
+                    "cloudformation:DescribeStackResources",
+                    "cloudformation:DescribeStacks",
+                    "cloudformation:ExecuteChangeSet",
+                    "cloudformation:GetTemplate",
+                    "cloudformation:GetTemplateSummary",
+                    "cloudformation:UpdateTerminationProtection"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Roadmap-${Stage}-Backend/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Roadmap-${Stage}-Hosting/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ListStacksForDeploymentDiscovery",
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudformation:ListStacks"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "PassOnlyExactExecutionRole",
+                  "Effect": "Allow",
+                  "Action": "iam:PassRole",
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "CloudFormationExecutionRole",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "iam:PassedToService": "cloudformation.amazonaws.com"
+                    }
+                  }
+                },
+                {
+                  "Sid": "ReadOnlyBootstrapVersion",
+                  "Effect": "Allow",
+                  "Action": "ssm:GetParameter",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cdk-bootstrap/${Qualifier}/version"
+                  }
+                },
+                {
+                  "Sid": "ReadStageFileAssets",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetBucketLocation",
+                    "s3:GetObject",
+                    "s3:ListBucket"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "StagingBucket",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::Sub": "${StagingBucket.Arn}/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "roadmap2u-project",
+            "Value": "RoadMap2U"
+          },
+          {
+            "Key": "roadmap2u-stage",
+            "Value": {
+              "Ref": "Stage"
+            }
+          }
+        ]
+      }
+    },
+    "FilePublishingRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "cdk-${Qualifier}-file-publishing-role-${AWS::AccountId}-${AWS::Region}"
+        },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/roadmap2u/${Stage}/roadmap2u-${Stage}-backend-deploy"
+                }
+              },
+              "Action": [
+                "sts:AssumeRole",
+                "sts:TagSession"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PublishOnlyStageAssets",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetBucketLocation",
+                    "s3:GetBucketVersioning",
+                    "s3:ListBucket"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "StagingBucket",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:AbortMultipartUpload",
+                    "s3:DeleteObject",
+                    "s3:GetObject",
+                    "s3:PutObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${StagingBucket.Arn}/*"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "roadmap2u-project",
+            "Value": "RoadMap2U"
+          },
+          {
+            "Key": "roadmap2u-stage",
+            "Value": {
+              "Ref": "Stage"
+            }
+          }
+        ]
+      }
+    },
+    "CdkBootstrapVersion": {
+      "Type": "AWS::SSM::Parameter",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "/cdk-bootstrap/${Qualifier}/version"
+        },
+        "Type": "String",
+        "Value": "32",
+        "Description": "Version of the RoadMap2U stage-isolated CDK bootstrap resources",
+        "Tags": {
+          "roadmap2u-project": "RoadMap2U",
+          "roadmap2u-stage": {
+            "Ref": "Stage"
+          }
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "BucketName": {
+      "Value": {
+        "Ref": "StagingBucket"
+      }
+    },
+    "BucketDomainName": {
+      "Value": {
+        "Fn::GetAtt": [
+          "StagingBucket",
+          "RegionalDomainName"
+        ]
+      }
+    },
+    "CloudFormationExecutionRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "CloudFormationExecutionRole",
+          "Arn"
+        ]
+      }
+    },
+    "DeploymentActionRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DeploymentActionRole",
+          "Arn"
+        ]
+      }
+    },
+    "FilePublishingRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "FilePublishingRole",
+          "Arn"
+        ]
+      }
+    },
+    "SiteOriginAccessControlId": {
+      "Value": {
+        "Ref": "SiteOriginAccessControl"
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "RoadMap2U-${Stage}-SiteOacId"
+        }
+      }
+    },
+    "BootstrapVersion": {
+      "Value": "32"
+    }
+  },
+  "Metadata": {
+    "RoadMap2U": {
+      "StackName": "RoadMap2U-CDK-test",
+      "Qualifier": "rmap2utst",
+      "Stage": "test",
+      "TerminationProtection": true
+    }
+  }
+}

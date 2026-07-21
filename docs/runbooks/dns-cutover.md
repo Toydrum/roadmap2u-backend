@@ -2,7 +2,7 @@
 
 ## Aviso de seguridad
 
-Este runbook es para una ventana futura, con aprobación explícita. **No se ejecuta durante esta entrega.** El deploy ordinario de infraestructura no administra los registros frontend de producción.
+Este runbook se ejecuta solo en la ventana de corte con aprobación explícita, después de validar producción por CloudFront. El deploy ordinario de infraestructura no administra los registros frontend de producción.
 
 El workflow usa dos fases dentro de la misma ejecución manual:
 
@@ -11,7 +11,7 @@ El workflow usa dos fases dentro de la misma ejecución manual:
 
 `prod` usa `DNS_PLAN_ROLE_ARN` (`prodDnsPlanRoleArn`), cuya policy no permite cambios ni escrituras. `prod-dns-cutover` usa `DNS_CUTOVER_ROLE_ARN` (`prodDnsCutoverRoleArn`), el único rol del flujo con `ChangeResourceRecordSets` y escritura del respaldo SSM. No configures el mismo ARN en ambos environments.
 
-Las dos variables de repositorio `AWS_DEPLOY_ENABLED` y `DNS_CUTOVER_ENABLED` deben seguir en `false` fuera de la ventana aprobada. Habilitar una no sustituye la aprobación de ninguno de los environments.
+Las variables de repositorio `AWS_DEPLOY_ENABLED`, `AWS_ROLLBACK_ENABLED` y `DNS_CUTOVER_ENABLED` deben seguir en `false` fuera de la ventana aprobada. El corte exige `AWS_DEPLOY_ENABLED=true`, `AWS_ROLLBACK_ENABLED=false` y `DNS_CUTOVER_ENABLED=true`; la reversión exige `AWS_DEPLOY_ENABLED=false`, `AWS_ROLLBACK_ENABLED=true` y `DNS_CUTOVER_ENABLED=true`. Una variable ausente, mal escrita o una combinación no exclusiva bloquea el workflow. Habilitar un gate no sustituye la aprobación de ninguno de los environments.
 
 Hasta el corte, deben permanecer intactos:
 
@@ -43,6 +43,7 @@ Al iniciar la ejecución, el job `plan` debe leer —no inferir— la zona y gua
 - fecha/hora UTC;
 - AWS account ID y hosted zone ID;
 - SHA del workflow;
+- todos los record sets de la zona, normalizados, para demostrar que HostGator y los records no administrados permanecen idénticos;
 - record sets completos de apex y `www`, incluidos TTL/routing policy/identificadores;
 - distribution ID y hostname CloudFront objetivo;
 - estado del certificado;
@@ -52,6 +53,7 @@ El artefacto `production-dns-plan-<operación>-<run>-<attempt>` contiene, como m
 
 - `metadata.json`, ligado a cuenta, zona, repositorio, commit, run, intento y operación;
 - `current-records.json`, con **todos** los record sets de apex y `www`, sin filtrarlos previamente por tipo;
+- `zone-before.json`, `zone-before-normalized.json` y `zone-unmanaged-before-normalized.json`, que preservan la zona completa y excluyen solo A/AAAA/CNAME de apex/`www` en la comparación no administrada;
 - `original-records.json`, que es el snapshot previo al corte o el respaldo persistido que alimenta un rollback;
 - `distribution.json`, `certificate.json` y los marcadores de release verificados;
 - `resolver-observations.txt`, con respuestas previas desde `1.1.1.1` y `8.8.8.8`;
@@ -90,12 +92,12 @@ El certificado del dominio no debe “probarse” apuntando temporalmente el ape
 
 El workflow exclusivo de cutover debe presentar `plan.md` y ambos JSON de cambios, y requerir la aprobación de `prod-dns-cutover` **después** de publicar el artefacto. El aprobador debe revisar el artifact ID/digest mostrado en el resumen del job, el snapshot y los dos batches.
 
-Después de la aprobación, `apply` descarga por el `artifact-id` emitido por `plan`, valida automáticamente el digest de GitHub, verifica `SHA256SUMS` y confirma que metadata, cuenta, zona, commit, run, intento y operación corresponden a esa misma ejecución. Luego vuelve a leer apex/`www` y compara el resultado completo con `current-records.json`; cualquier drift aborta. El job no vuelve a calcular ni modifica el batch aprobado.
+Después de la aprobación, `apply` descarga por el `artifact-id` emitido por `plan` con extracción plana (`merge-multiple`), descarga también el ZIP inmutable por la API de artefactos y compara su SHA-256 con `artifact-digest`; cualquier diferencia falla cerrado. Después verifica `SHA256SUMS`, metadata, cuenta, zona, commit, run, intento y operación. Antes de aplicar vuelve a leer la zona completa: apex/`www` deben coincidir con `current-records.json` y todos los records no administrados con `zone-unmanaged-before-normalized.json`. El job no vuelve a calcular ni modifica el batch aprobado.
 
 Para `cutover`, `apply` persiste en SSM el snapshot completo aprobado y ejecuta `forward-batch.json`. En una sola operación transaccional de Route 53:
 
 1. UPSERT del A apex desde `162.241.62.201` a alias de la distribución CloudFront.
-2. Crear el alias AAAA del apex si IPv6 está habilitado en la distribución.
+2. Crear los aliases AAAA únicamente después de demostrar `DistributionConfig.IsIPV6Enabled == true`; si CloudFront no tiene IPv6, el plan aborta.
 3. Sustituir el CNAME `www → roadmap2u.com` por el/los aliases a la distribución que ejecuta la redirección permanente.
 
 Route 53 no permite conservar un CNAME y un A/AAAA con el mismo nombre. Por eso el change batch de `www` debe eliminar el CNAME capturado y crear los aliases de forma atómica. No ejecutes primero el delete en una llamada separada.
@@ -125,6 +127,7 @@ Después valida:
 - inicio de sesión y una operación autenticada de bajo riesgo funcionan;
 - logs/métricas no muestran aumento de 4xx/5xx ni errores de origen;
 - el contenido corresponde al SHA aprobado.
+- la zona completa, excluyendo únicamente A/AAAA/CNAME administrados de apex/`www`, coincide con el snapshot normalizado; esto incluye MX, SPF, DKIM, DMARC, `mail`, `webmail`, `autodiscover` y records de cPanel/HostGator.
 
 Mantén observación durante la ventana acordada. La propagación en caches recursivos puede hacer que usuarios distintos vean el origen anterior y CloudFront temporalmente; ambos deben permanecer operables durante esa fase.
 
@@ -132,7 +135,7 @@ Mantén observación durante la ventana acordada. La propagación en caches recu
 
 Activa rollback si hay fallo sostenido de TLS, loops de redirección, 403/5xx de CloudFront, rutas SPA rotas, assets faltantes, regresión crítica de autenticación/PWA o métricas fuera del umbral acordado.
 
-El rollback usa el snapshot, no los valores recordados por una persona. Inicia una nueva ejecución manual con operación `rollback`; su fase `plan` lee el respaldo SSM, captura el estado actual y vuelve a producir un artefacto revisable. `apply` sigue requiriendo la aprobación independiente de `prod-dns-cutover` y consume exactamente ese artefacto:
+El rollback usa el snapshot, no los valores recordados por una persona. Primero cierra el gate normal y abre únicamente la ventana de recuperación con `AWS_DEPLOY_ENABLED=false`, `AWS_ROLLBACK_ENABLED=true` y `DNS_CUTOVER_ENABLED=true`. Inicia una nueva ejecución manual con operación `rollback`; su fase `plan` lee el respaldo SSM, captura el estado actual y vuelve a producir un artefacto revisable. `apply` sigue requiriendo la aprobación independiente de `prod-dns-cutover` y consume exactamente ese artefacto:
 
 1. Bloquear despliegues adicionales y conservar evidencia.
 2. Revisar el `rollback-batch.json` generado por `plan`, que quita los aliases creados.
@@ -151,5 +154,5 @@ No apruebes un `apply` si cambió Route 53 después del plan, si el artifact ID 
 - Registrar change ID, snapshot previo, SHA, aprobadores, hora y resultados de smokes.
 - Mantener la versión anterior del frontend y S3 Versioning durante el periodo de seguridad.
 - No retirar GitHub Pages ni cambiar el enlace “Live” hasta una decisión posterior explícita.
-- Crear por separado el trabajo de observabilidad, alertas, SES y demás gates de go-live.
+- Crear por separado el trabajo de observabilidad, alertas y demás gates de go-live. El correo permanece en HostGator y este rollout no habilita SES.
 - Solo después de una ventana estable, evaluar si el IaC productivo debe asumir ownership de los aliases apex/`www`; importarlos o modelarlos es otra migración, no parte de este cutover inicial.

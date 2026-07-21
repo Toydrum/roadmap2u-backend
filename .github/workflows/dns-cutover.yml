@@ -23,7 +23,22 @@ concurrency:
 
 jobs:
   plan:
-    if: ${{ vars.AWS_DEPLOY_ENABLED == 'true' && vars.DNS_CUTOVER_ENABLED == 'true' }}
+    if: >-
+      ${{
+        vars.DNS_CUTOVER_ENABLED == 'true' &&
+        (
+          (
+            inputs.operation == 'cutover' &&
+            vars.AWS_DEPLOY_ENABLED == 'true' &&
+            vars.AWS_ROLLBACK_ENABLED == 'false'
+          ) ||
+          (
+            inputs.operation == 'rollback' &&
+            vars.AWS_DEPLOY_ENABLED == 'false' &&
+            vars.AWS_ROLLBACK_ENABLED == 'true'
+          )
+        )
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: prod
@@ -40,14 +55,22 @@ jobs:
       - name: Confirm both safety gates and typed intent
         env:
           AWS_DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED }}
+          AWS_ROLLBACK_ENABLED: ${{ vars.AWS_ROLLBACK_ENABLED }}
           DNS_CUTOVER_ENABLED: ${{ vars.DNS_CUTOVER_ENABLED }}
         run: |
           set -euo pipefail
-          test "$AWS_DEPLOY_ENABLED" = "true"
           test "$DNS_CUTOVER_ENABLED" = "true"
           case "$OPERATION" in
-            cutover) test "$CONFIRMATION" = "CUTOVER roadmap2u.com" ;;
-            rollback) test "$CONFIRMATION" = "ROLLBACK roadmap2u.com" ;;
+            cutover)
+              test "$AWS_DEPLOY_ENABLED" = "true"
+              test "$AWS_ROLLBACK_ENABLED" = "false"
+              test "$CONFIRMATION" = "CUTOVER roadmap2u.com"
+              ;;
+            rollback)
+              test "$AWS_DEPLOY_ENABLED" = "false"
+              test "$AWS_ROLLBACK_ENABLED" = "true"
+              test "$CONFIRMATION" = "ROLLBACK roadmap2u.com"
+              ;;
             *) exit 2 ;;
           esac
 
@@ -94,6 +117,7 @@ jobs:
           jq -e '
             .Distribution.Status == "Deployed" and
             .Distribution.DistributionConfig.Enabled == true and
+            .Distribution.DistributionConfig.IsIPV6Enabled == true and
             (.Distribution.DistributionConfig.Aliases.Items // [] | index("roadmap2u.com") != null) and
             (.Distribution.DistributionConfig.Aliases.Items // [] | index("www.roadmap2u.com") != null)
           ' dns-plan/distribution.json >/dev/null
@@ -113,7 +137,7 @@ jobs:
             (([.Certificate.DomainName] + (.Certificate.SubjectAlternativeNames // [])) | index("www.roadmap2u.com") != null)
           ' dns-plan/certificate.json >/dev/null
 
-      - name: Capture the complete current apex and www snapshot
+      - name: Capture the complete current hosted zone and apex/www snapshot
         run: |
           set -euo pipefail
           aws route53 get-hosted-zone \
@@ -121,8 +145,23 @@ jobs:
             --output json > dns-plan/hosted-zone.json
           aws route53 list-resource-record-sets \
             --hosted-zone-id "$HOSTED_ZONE_ID" \
-            --query "ResourceRecordSets[?Name=='roadmap2u.com.' || Name=='www.roadmap2u.com.']" \
-            --output json > dns-plan/current-records.json
+            --query 'ResourceRecordSets' \
+            --output json > dns-plan/zone-before.json
+          jq -e 'type == "array" and length > 0' dns-plan/zone-before.json >/dev/null
+          jq '[.[] | select(.Name == "roadmap2u.com." or .Name == "www.roadmap2u.com.")]' \
+            dns-plan/zone-before.json > dns-plan/current-records.json
+          jq -S '
+            map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
+            sort_by(.Name,.Type,(.SetIdentifier // ""))
+          ' dns-plan/zone-before.json > dns-plan/zone-before-normalized.json
+          jq -S '
+            def managed:
+              ((.Name == "roadmap2u.com." or .Name == "www.roadmap2u.com.") and
+               (.Type == "A" or .Type == "AAAA" or .Type == "CNAME"));
+            map(select(managed | not)) |
+            map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
+            sort_by(.Name,.Type,(.SetIdentifier // ""))
+          ' dns-plan/zone-before.json > dns-plan/zone-unmanaged-before-normalized.json
           jq -e 'type == "array" and length > 0' dns-plan/current-records.json >/dev/null
           {
             for RESOLVER in 1.1.1.1 8.8.8.8; do
@@ -305,8 +344,28 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   apply:
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     needs: plan
-    if: ${{ needs.plan.result == 'success' && vars.AWS_DEPLOY_ENABLED == 'true' && vars.DNS_CUTOVER_ENABLED == 'true' }}
+    if: >-
+      ${{
+        needs.plan.result == 'success' &&
+        vars.DNS_CUTOVER_ENABLED == 'true' &&
+        (
+          (
+            inputs.operation == 'cutover' &&
+            vars.AWS_DEPLOY_ENABLED == 'true' &&
+            vars.AWS_ROLLBACK_ENABLED == 'false'
+          ) ||
+          (
+            inputs.operation == 'rollback' &&
+            vars.AWS_DEPLOY_ENABLED == 'false' &&
+            vars.AWS_ROLLBACK_ENABLED == 'true'
+          )
+        )
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: prod-dns-cutover
@@ -321,22 +380,47 @@ jobs:
       - name: Confirm both safety gates and typed intent again
         env:
           AWS_DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED }}
+          AWS_ROLLBACK_ENABLED: ${{ vars.AWS_ROLLBACK_ENABLED }}
           DNS_CUTOVER_ENABLED: ${{ vars.DNS_CUTOVER_ENABLED }}
         run: |
           set -euo pipefail
-          test "$AWS_DEPLOY_ENABLED" = "true"
           test "$DNS_CUTOVER_ENABLED" = "true"
           case "$OPERATION" in
-            cutover) test "$CONFIRMATION" = "CUTOVER roadmap2u.com" ;;
-            rollback) test "$CONFIRMATION" = "ROLLBACK roadmap2u.com" ;;
+            cutover)
+              test "$AWS_DEPLOY_ENABLED" = "true"
+              test "$AWS_ROLLBACK_ENABLED" = "false"
+              test "$CONFIRMATION" = "CUTOVER roadmap2u.com"
+              ;;
+            rollback)
+              test "$AWS_DEPLOY_ENABLED" = "false"
+              test "$AWS_ROLLBACK_ENABLED" = "true"
+              test "$CONFIRMATION" = "ROLLBACK roadmap2u.com"
+              ;;
             *) exit 2 ;;
           esac
-          test -n "$EXPECTED_ARTIFACT_DIGEST"
+          [[ "$EXPECTED_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+
+      - name: Verify immutable artifact archive digest
+        env:
+          ARTIFACT_ID: ${{ needs.plan.outputs.artifact-id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
+            --output approved-plan.zip
+          ACTUAL_ARTIFACT_DIGEST="$(sha256sum approved-plan.zip | cut --delimiter=' ' --fields=1)"
+          test "$ACTUAL_ARTIFACT_DIGEST" = "$EXPECTED_ARTIFACT_DIGEST"
 
       - name: Download exactly the planned artifact by immutable ID
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ needs.plan.outputs.artifact-id }}
+          merge-multiple: true
           path: approved-plan
 
       - name: Verify plan integrity and bind it to this workflow run
@@ -379,8 +463,10 @@ jobs:
           test "$ACTUAL_ACCOUNT" = "$AWS_ACCOUNT_ID"
           aws route53 list-resource-record-sets \
             --hosted-zone-id "$HOSTED_ZONE_ID" \
-            --query "ResourceRecordSets[?Name=='roadmap2u.com.' || Name=='www.roadmap2u.com.']" \
-            --output json > apply-result/live-before.json
+            --query 'ResourceRecordSets' \
+            --output json > apply-result/zone-live-before.json
+          jq '[.[] | select(.Name == "roadmap2u.com." or .Name == "www.roadmap2u.com.")]' \
+            apply-result/zone-live-before.json > apply-result/live-before.json
           jq -S '
             map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
             sort_by(.Name,.Type,(.SetIdentifier // ""))
@@ -390,6 +476,17 @@ jobs:
             sort_by(.Name,.Type,(.SetIdentifier // ""))
           ' apply-result/live-before.json > apply-result/live-normalized.json
           diff -u apply-result/planned-normalized.json apply-result/live-normalized.json
+          jq -S '
+            def managed:
+              ((.Name == "roadmap2u.com." or .Name == "www.roadmap2u.com.") and
+               (.Type == "A" or .Type == "AAAA" or .Type == "CNAME"));
+            map(select(managed | not)) |
+            map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
+            sort_by(.Name,.Type,(.SetIdentifier // ""))
+          ' apply-result/zone-live-before.json > apply-result/zone-unmanaged-live-before-normalized.json
+          diff -u \
+            approved-plan/zone-unmanaged-before-normalized.json \
+            apply-result/zone-unmanaged-live-before-normalized.json
 
       - name: Apply the exact reviewed batch and wait for INSYNC
         run: |
@@ -422,8 +519,10 @@ jobs:
           set -euo pipefail
           aws route53 list-resource-record-sets \
             --hosted-zone-id "$HOSTED_ZONE_ID" \
-            --query "ResourceRecordSets[?Name=='roadmap2u.com.' || Name=='www.roadmap2u.com.']" \
-            --output json > apply-result/live-after.json
+            --query 'ResourceRecordSets' \
+            --output json > apply-result/zone-live-after.json
+          jq '[.[] | select(.Name == "roadmap2u.com." or .Name == "www.roadmap2u.com.")]' \
+            apply-result/zone-live-after.json > apply-result/live-after.json
           if [[ "$OPERATION" == "cutover" ]]; then
             EXPECTED='approved-plan/cloudfront-records.json'
           else
@@ -440,6 +539,17 @@ jobs:
             sort_by(.Name,.Type,(.SetIdentifier // ""))
           ' apply-result/live-after.json > apply-result/live-managed.json
           diff -u apply-result/expected-managed.json apply-result/live-managed.json
+          jq -S '
+            def managed:
+              ((.Name == "roadmap2u.com." or .Name == "www.roadmap2u.com.") and
+               (.Type == "A" or .Type == "AAAA" or .Type == "CNAME"));
+            map(select(managed | not)) |
+            map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
+            sort_by(.Name,.Type,(.SetIdentifier // ""))
+          ' apply-result/zone-live-after.json > apply-result/zone-unmanaged-live-after-normalized.json
+          diff -u \
+            approved-plan/zone-unmanaged-before-normalized.json \
+            apply-result/zone-unmanaged-live-after-normalized.json
 
       - name: Preserve apply evidence
         if: ${{ always() }}

@@ -15,10 +15,10 @@ on:
         required: true
         type: string
       operation:
-        description: Promote from the previous stage or redeploy a same-stage release for rollback
+        description: Deploy dev, promote from the previous stage, or redeploy a same-stage rollback
         required: true
         type: choice
-        options: [promote, rollback]
+        options: [deploy, promote, rollback]
 
 permissions:
   contents: read
@@ -54,10 +54,21 @@ jobs:
             echo "A full 40-character commit SHA is required; branches such as main are forbidden." >&2
             exit 1
           fi
-          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$STAGE" == "dev" && "$OPERATION" != "rollback" ]]; then
-            echo "dev receives new releases only from a push to main; manual dev runs are rollback-only." >&2
-            exit 1
-          fi
+          case "${OPERATION}:${STAGE}" in
+            deploy:dev|promote:test|promote:prod|rollback:dev|rollback:test|rollback:prod) ;;
+            deploy:*)
+              echo "Manual deploy is allowed only for dev." >&2
+              exit 1
+              ;;
+            promote:*)
+              echo "Promotion is allowed only for test or prod." >&2
+              exit 1
+              ;;
+            *)
+              echo "Unsupported operation/stage combination: ${OPERATION}:${STAGE}" >&2
+              exit 1
+              ;;
+          esac
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
@@ -67,7 +78,22 @@ jobs:
       contents: read
       id-token: write
     needs: prepare
-    if: ${{ needs.prepare.result == 'success' && vars.AWS_DEPLOY_ENABLED == 'true' }}
+    if: >-
+      ${{
+        needs.prepare.result == 'success' &&
+        (
+          (
+            needs.prepare.outputs.operation == 'rollback' &&
+            vars.AWS_ROLLBACK_ENABLED == 'true' &&
+            vars.AWS_DEPLOY_ENABLED == 'false'
+          ) ||
+          (
+            needs.prepare.outputs.operation != 'rollback' &&
+            vars.AWS_DEPLOY_ENABLED == 'true' &&
+            vars.AWS_ROLLBACK_ENABLED == 'false'
+          )
+        )
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     environment: ${{ needs.prepare.outputs.stage }}
@@ -82,13 +108,25 @@ jobs:
       STAGE: ${{ needs.prepare.outputs.stage }}
       SHA: ${{ needs.prepare.outputs.sha }}
       OPERATION: ${{ needs.prepare.outputs.operation }}
+      TRIGGER_EVENT: ${{ github.event_name }}
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
       HOSTED_ZONE_ID: ${{ vars.HOSTED_ZONE_ID }}
     steps:
-      - name: Confirm deployment gate
+      - name: Confirm mutually exclusive deployment gate
         env:
           AWS_DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED }}
-        run: test "$AWS_DEPLOY_ENABLED" = "true"
+          AWS_ROLLBACK_ENABLED: ${{ vars.AWS_ROLLBACK_ENABLED }}
+        run: |
+          set -euo pipefail
+          if [[ "$OPERATION" == "rollback" ]]; then
+            if [[ "$AWS_DEPLOY_ENABLED" != "false" || "$AWS_ROLLBACK_ENABLED" != "true" ]]; then
+              echo "Exactly one of AWS_DEPLOY_ENABLED or AWS_ROLLBACK_ENABLED must be true, and rollback requires AWS_ROLLBACK_ENABLED." >&2
+              exit 1
+            fi
+          elif [[ "$AWS_DEPLOY_ENABLED" != "true" || "$AWS_ROLLBACK_ENABLED" != "false" ]]; then
+            echo "Exactly one of AWS_DEPLOY_ENABLED or AWS_ROLLBACK_ENABLED must be true, and deploy/promote requires AWS_DEPLOY_ENABLED." >&2
+            exit 1
+          fi
         working-directory: .
 
       - name: Checkout immutable backend release
@@ -111,6 +149,10 @@ jobs:
           ACTUAL_SHA="$(git rev-parse HEAD)"
           test "$ACTUAL_SHA" = "$SHA"
           git cat-file -e "${SHA}^{commit}"
+          if [[ "$TRIGGER_EVENT" == "workflow_dispatch" && "$STAGE" == "dev" && "$OPERATION" == "deploy" ]]; then
+            git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+            test "$SHA" = "$(git rev-parse refs/remotes/origin/main)"
+          fi
 
       - name: Use Node.js 22
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -154,6 +196,29 @@ jobs:
             test "$PROOF" = "$SHA"
           fi
 
+      - name: Validate pre-deploy CloudFormation states
+        run: |
+          set -euo pipefail
+          for STACK in "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"; do
+            if aws cloudformation describe-stacks \
+              --stack-name "$STACK" \
+              --output json > predeploy-stack.json 2> predeploy-stack.err; then
+              STATUS="$(jq -er 'if (.Stacks | length) == 1 then .Stacks[0].StackStatus else error("expected exactly one stack") end' predeploy-stack.json)"
+              case "$STATUS" in
+                CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE) ;;
+                *)
+                  echo "Refusing to deploy over $STACK in state $STATUS." >&2
+                  exit 1
+                  ;;
+              esac
+            elif grep --quiet 'ValidationError' predeploy-stack.err && grep --quiet 'does not exist' predeploy-stack.err; then
+              echo "$STACK does not exist; first deployment is allowed."
+            else
+              cat predeploy-stack.err >&2
+              exit 1
+            fi
+          done
+
       - name: Review CDK diff
         run: >-
           npx --no-install cdk diff
@@ -177,7 +242,13 @@ jobs:
           set -euo pipefail
           for STACK in "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"; do
             STATUS="$(aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].StackStatus' --output text)"
-            [[ "$STATUS" == *_COMPLETE ]]
+            case "$STATUS" in
+              CREATE_COMPLETE|UPDATE_COMPLETE) ;;
+              *)
+                echo "$STACK did not finish in an accepted success state: $STATUS" >&2
+                exit 1
+                ;;
+            esac
             aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].Outputs[].{Key:OutputKey,Value:OutputValue}' --output table
           done
 
@@ -209,6 +280,34 @@ jobs:
           test "$(parameter frontend-bucket)" = "roadmap2u-${STAGE}-${AWS_ACCOUNT_ID}"
           test "$(parameter contract-hash)" = "$(npm run --silent contracts:hash)"
           jq -r '.Parameters[] | [.Name, .Value] | @tsv' deployed-config.json
+
+      - name: Validate application log retention
+        run: |
+          set -euo pipefail
+          case "$STAGE" in
+            dev) EXPECTED_LOG_RETENTION=7 ;;
+            test) EXPECTED_LOG_RETENTION=14 ;;
+            prod) EXPECTED_LOG_RETENTION=30 ;;
+            *) exit 2 ;;
+          esac
+          LOG_GROUPS=(
+            "/aws/lambda/roadmap-pre-signup-${STAGE}"
+            "/aws/lambda/roadmap-post-confirmation-${STAGE}"
+            "/aws/lambda/roadmap-router-${STAGE}"
+            "/aws/apigateway/roadmap-api-${STAGE}"
+          )
+          for LOG_GROUP in "${LOG_GROUPS[@]}"; do
+            aws logs describe-log-groups \
+              --log-group-name-prefix "$LOG_GROUP" \
+              --output json > log-groups.json
+            jq -e \
+              --arg name "$LOG_GROUP" \
+              --argjson retention "$EXPECTED_LOG_RETENTION" '
+                [.logGroups[] | select(.logGroupName == $name)] as $matches |
+                ($matches | length) == 1 and
+                $matches[0].retentionInDays == $retention
+              ' log-groups.json >/dev/null
+          done
 
       - name: Smoke-test protected API and exact CORS allowlist
         run: |
@@ -247,6 +346,77 @@ jobs:
           tr -d '\r' < response.headers |
             grep --ignore-case --fixed-strings --line-regexp --quiet "access-control-allow-origin: $PRIMARY_ORIGIN"
           jq -e '.message | type == "string"' response.json >/dev/null
+
+      - name: Publish immutable backend release manifest
+        run: |
+          set -euo pipefail
+          jq --compact-output --sort-keys \
+            --arg prefix "/roadmap2u/${STAGE}/" \
+            --arg stage "$STAGE" \
+            --arg sha "$SHA" '
+              def parameter($leaf):
+                [.Parameters[] | select(.Name == ($prefix + $leaf)) | .Value] as $values |
+                if (($values | length) == 1 and
+                    ($values[0] | type) == "string" and
+                    ($values[0] | length) > 0)
+                then $values[0]
+                else error("missing or duplicate handoff parameter: " + $leaf)
+                end;
+              {
+                schemaVersion: 1,
+                stage: $stage,
+                backendReleaseSha: $sha,
+                handoff: {
+                  region: parameter("region"),
+                  userPoolId: parameter("user-pool-id"),
+                  userPoolClientId: parameter("user-pool-client-id"),
+                  apiBaseUrl: parameter("api-base-url"),
+                  frontendBucket: parameter("frontend-bucket"),
+                  cloudFrontDistributionId: parameter("cloudfront-distribution-id"),
+                  frontendUrl: parameter("frontend-url"),
+                  contractHash: parameter("contract-hash")
+                }
+              }
+            ' deployed-config.json > backend-release-manifest.json
+
+          jq -e \
+            --arg stage "$STAGE" \
+            --arg sha "$SHA" '
+              .schemaVersion == 1 and
+              .stage == $stage and
+              .backendReleaseSha == $sha and
+              (.handoff | keys) == [
+                "apiBaseUrl",
+                "cloudFrontDistributionId",
+                "contractHash",
+                "frontendBucket",
+                "frontendUrl",
+                "region",
+                "userPoolClientId",
+                "userPoolId"
+              ] and
+              all(.handoff[]; type == "string" and length > 0)
+            ' backend-release-manifest.json >/dev/null
+          MANIFEST_BYTES="$(wc -c < backend-release-manifest.json)"
+          test "$MANIFEST_BYTES" -le 4096
+
+          MANIFEST_NAME="/roadmap2u/${STAGE}/backend-release-manifests/${SHA}"
+          MANIFEST_VALUE="$(cat backend-release-manifest.json)"
+          if aws ssm get-parameter \
+            --name "$MANIFEST_NAME" \
+            --output json > existing-manifest.json 2> existing-manifest.err; then
+            EXISTING_VALUE="$(jq -r '.Parameter.Value' existing-manifest.json)"
+            EXISTING_CANONICAL="$(printf '%s' "$EXISTING_VALUE" | jq --compact-output --sort-keys .)"
+            test "$EXISTING_CANONICAL" = "$MANIFEST_VALUE"
+          elif grep --quiet 'ParameterNotFound' existing-manifest.err; then
+            aws ssm put-parameter \
+              --name "$MANIFEST_NAME" \
+              --type String \
+              --value "$MANIFEST_VALUE"
+          else
+            cat existing-manifest.err >&2
+            exit 1
+          fi
 
       - name: Record exact successful backend SHA
         run: |
