@@ -122,6 +122,14 @@ if "%~1"=="sts" (
     echo temporary session did not inherit AWS_CA_BUNDLE 1>&2
     exit /b 7
   )
+  if /I not "%AWS_PROFILE%"=="mock-profile" (
+    echo temporary session inherited the wrong AWS_PROFILE 1>&2
+    exit /b 8
+  )
+  if /I not "%AWS_DEFAULT_PROFILE%"=="mock-profile" (
+    echo temporary session inherited the wrong AWS_DEFAULT_PROFILE 1>&2
+    exit /b 9
+  )
   echo 765932874577
   exit /b 0
 )
@@ -153,6 +161,14 @@ if [[ "$1" == "sts" ]]; then
     echo 'temporary session did not inherit AWS_CA_BUNDLE' >&2
     exit 7
   fi
+  if [[ "$AWS_PROFILE" != 'mock-profile' ]]; then
+    echo 'temporary session inherited the wrong AWS_PROFILE' >&2
+    exit 8
+  fi
+  if [[ "$AWS_DEFAULT_PROFILE" != 'mock-profile' ]]; then
+    echo 'temporary session inherited the wrong AWS_DEFAULT_PROFILE' >&2
+    exit 9
+  fi
   echo '765932874577'
   exit 0
 fi
@@ -176,6 +192,8 @@ exit 2
     const pathKey = Object.keys(environment).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH';
     environment[pathKey] = `${fakeDirectory}${delimiter}${environment[pathKey] ?? ''}`;
     environment.FAKE_PROFILE_CA_BUNDLE = caBundlePath;
+    environment.AWS_PROFILE = 'ambient-profile';
+    environment.AWS_DEFAULT_PROFILE = 'ambient-default-profile';
     delete environment.AWS_CA_BUNDLE;
 
     const result = spawnSync(windows ? 'powershell.exe' : 'pwsh', [
@@ -651,7 +669,7 @@ describe('custom stage CDK bootstrap template', () => {
   });
 
   it(
-    'propagates the profile CA bundle into the break-glass temporary session',
+    'pins profile-scoped TLS config in the break-glass temporary session',
     () => {
       const result = runBreakGlassWithFakeAws();
 
@@ -671,8 +689,14 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).toContain('$effectiveCaBundle = $env:AWS_CA_BUNDLE');
     expect(script).toContain('configure get ca_bundle --profile $AdminProfile');
     expect(script).toContain('CaBundle = $env:AWS_CA_BUNDLE');
+    expect(script).toContain('Profile = $env:AWS_PROFILE');
+    expect(script).toContain('DefaultProfile = $env:AWS_DEFAULT_PROFILE');
     expect(script).toContain('$env:AWS_CA_BUNDLE = $effectiveCaBundle');
+    expect(script).toContain('$env:AWS_PROFILE = $AdminProfile');
+    expect(script).toContain('$env:AWS_DEFAULT_PROFILE = $AdminProfile');
     expect(script).toContain('$env:AWS_CA_BUNDLE = $previous.CaBundle');
+    expect(script).toContain('$env:AWS_PROFILE = $previous.Profile');
+    expect(script).toContain('$env:AWS_DEFAULT_PROFILE = $previous.DefaultProfile');
     expect(script).toContain('/roadmap2u/$Stage/user-pool-id');
     expect(script).toContain('admin-get-user');
     expect(script).toContain('admin-delete-user');

@@ -178,6 +178,8 @@ $previous = @{
   SessionToken = $env:AWS_SESSION_TOKEN
   Region = $env:AWS_REGION
   CaBundle = $env:AWS_CA_BUNDLE
+  Profile = $env:AWS_PROFILE
+  DefaultProfile = $env:AWS_DEFAULT_PROFILE
 }
 $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) (
   'roadmap2u-smoke-cleanup-' + [Guid]::NewGuid()
@@ -190,6 +192,8 @@ try {
   $env:AWS_SESSION_TOKEN = $credentials.SessionToken
   $env:AWS_REGION = $Region
   $env:AWS_CA_BUNDLE = $effectiveCaBundle
+  $env:AWS_PROFILE = $AdminProfile
+  $env:AWS_DEFAULT_PROFILE = $AdminProfile
 
   $configuredPoolId = & $awsCli ssm get-parameter `
     --region $Region `
@@ -261,6 +265,8 @@ try {
   $env:AWS_SESSION_TOKEN = $previous.SessionToken
   $env:AWS_REGION = $previous.Region
   $env:AWS_CA_BUNDLE = $previous.CaBundle
+  $env:AWS_PROFILE = $previous.Profile
+  $env:AWS_DEFAULT_PROFILE = $previous.DefaultProfile
 
   if (Test-Path -LiteralPath $temporaryDirectory) {
     $resolvedTemporaryPath = (Resolve-Path -LiteralPath $temporaryDirectory).Path
