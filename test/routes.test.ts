@@ -1,6 +1,7 @@
+import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { describe, expect, it } from 'vitest';
 import { API_PATHS } from '@app/api/contracts';
-import { ROUTES, matchRoute } from '../lambda/router';
+import { ROUTES, handleEvent, matchRoute } from '../lambda/router';
 
 /**
  * Contract parity: every path the client transport can emit (http-api.ts,
@@ -36,6 +37,39 @@ const CLIENT_CALLS: { method: string; path: string }[] = [
 ];
 
 describe('router ↔ API_PATHS parity', () => {
+  it('answers an unauthenticated CORS preflight before resolving the caller', async () => {
+    const event: APIGatewayProxyEventV2 = {
+      version: '2.0',
+      routeKey: 'OPTIONS /v1/{proxy+}',
+      rawPath: '/v1/me',
+      rawQueryString: '',
+      headers: {},
+      requestContext: {
+        accountId: '123456789012',
+        apiId: 'api-id',
+        domainName: 'api.dev.roadmap2u.com',
+        domainPrefix: 'api.dev',
+        http: {
+          method: 'OPTIONS',
+          path: '/v1/me',
+          protocol: 'HTTP/1.1',
+          sourceIp: '127.0.0.1',
+          userAgent: 'vitest',
+        },
+        requestId: 'request-id',
+        routeKey: 'OPTIONS /v1/{proxy+}',
+        stage: '$default',
+        time: '21/Jul/2026:15:00:00 +0000',
+        timeEpoch: 0,
+      },
+      isBase64Encoded: false,
+    };
+
+    const response = await handleEvent(event, {} as never);
+
+    expect(response).toEqual({ statusCode: 204, headers: {}, body: '' });
+  });
+
   it('covers every client call', () => {
     for (const call of CLIENT_CALLS) {
       const found = matchRoute(call.method, call.path);
