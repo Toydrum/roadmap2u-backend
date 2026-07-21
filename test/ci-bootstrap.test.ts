@@ -286,6 +286,21 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
+  it('preserves immutable descriptions on stage-named managed policies', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const data = policies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-data`,
+      );
+      expect(data.Properties.Description).toBe(
+        `CloudFormation data-service permissions for RoadMap2U ${stage}`,
+      );
+    }
+  });
+
   it('keeps Cognito lifecycle permissions in the attached data policy to preserve API policy headroom', () => {
     const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
@@ -652,11 +667,10 @@ describe('GitHub OIDC bootstrap', () => {
       );
       expect(JSON.stringify(initialStageTag.Resource)).not.toContain('/tags/*');
       expect(initialStageTag.Condition.StringEquals).toEqual({
-        'aws:ResourceTag/roadmap2u-project': 'RoadMap2U',
-        'aws:ResourceTag/roadmap2u-stage': stage,
         'aws:RequestTag/roadmap2u-project': 'RoadMap2U',
         'aws:RequestTag/roadmap2u-stage': stage,
       });
+      expect(JSON.stringify(initialStageTag.Condition)).not.toContain('aws:ResourceTag');
       expect(initialStageTag.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(
         cloudFormationApiTagKeys,
       );

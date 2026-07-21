@@ -476,7 +476,8 @@ function createCorePolicies(
   const dataPolicy = new iam.ManagedPolicy(stack, `CfnDataPolicy${stage}`, {
     managedPolicyName: `roadmap2u-${stage}-cfn-data`,
     path: `/roadmap2u/${stage}/`,
-    description: `CloudFormation data and identity-service permissions for RoadMap2U ${stage}`,
+    // AWS::IAM::ManagedPolicy.Description is create-only; keep this deployed value stable.
+    description: `CloudFormation data-service permissions for RoadMap2U ${stage}`,
     statements: [
       new iam.PolicyStatement({
         sid: 'CreateOnlyTaggedStageUserPools',
@@ -577,16 +578,14 @@ function createCorePolicies(
       new iam.PolicyStatement({
         // The AWS::ApiGatewayV2::Stage provider invokes this literal dependent action on create.
         // Access Analyzer can lag the CloudFormation provider schema and report INVALID_ACTION.
+        // Request tags are reliable during create; the parent-tag gate remains on the POST above.
         sid: 'TagOnlyCreatingStageApiStage',
         actions: ['apigateway:TagResource'],
         resources: [
           resourceArn(stack, 'apigateway', '/apis/*/stages', undefined, { account: '' }),
         ],
         conditions: {
-          StringEquals: {
-            ...stageTagConditions(stage).StringEquals,
-            ...requestTagConditions(stage).StringEquals,
-          },
+          ...requestTagConditions(stage),
           'ForAllValues:StringEquals': {
             'aws:TagKeys': CLOUDFORMATION_API_TAG_KEYS,
           },
