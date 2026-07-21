@@ -440,6 +440,7 @@ function createCorePolicies(
           'logs:CreateLogGroup',
           'logs:DeleteLogGroup',
           'logs:PutRetentionPolicy',
+          'logs:TagResource',
         ],
         resources: [...lambdaLogArns(stack, stage), apiLogArn(stack, stage)],
       }),
