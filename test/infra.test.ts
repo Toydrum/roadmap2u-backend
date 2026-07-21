@@ -65,6 +65,9 @@ describe('stage backend infrastructure', () => {
     expect(pool.Properties.VerificationMessageTemplate.DefaultEmailOption).toBe(
       'CONFIRM_WITH_CODE',
     );
+    expect(pool.Properties.EmailConfiguration).toEqual({
+      EmailSendingAccount: 'COGNITO_DEFAULT',
+    });
     expect(pool.Properties.DeletionProtection).toBe('INACTIVE');
     expect(pool.DeletionPolicy).toBe('Delete');
     expect(table.Properties.PointInTimeRecoverySpecification).toEqual({
@@ -97,6 +100,70 @@ describe('stage backend infrastructure', () => {
       'aws:ResourceTag/roadmap2u-project': 'RoadMap2U',
       'aws:ResourceTag/roadmap2u-stage': 'dev',
     });
+  });
+
+  it.each([
+    ['dev', 7],
+    ['test', 14],
+    ['prod', 30],
+  ] as const)('retains %s Lambda and HTTP API logs for %d days without sensitive fields', (stage, days) => {
+    const template = backendTemplate(stage).toJSON();
+    const logGroups = Object.values(template.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::Logs::LogGroup',
+    ) as any[];
+    const lambdaLogs = logGroups.filter((resource) =>
+      JSON.stringify(resource.Properties.LogGroupName).includes('/aws/lambda/'),
+    );
+    const apiLogs = logGroups.filter((resource) =>
+      JSON.stringify(resource.Properties.LogGroupName).includes('/aws/apigateway/'),
+    );
+
+    expect(lambdaLogs).toHaveLength(3);
+    expect(apiLogs).toHaveLength(1);
+    expect(logGroups.every((resource) => resource.Properties.RetentionInDays === days)).toBe(true);
+
+    const apiStage = Object.values(template.Resources).find(
+      (resource: any) => resource.Type === 'AWS::ApiGatewayV2::Stage',
+    ) as any;
+    const accessLogs = JSON.stringify(apiStage.Properties.AccessLogSettings);
+    expect(accessLogs).toContain('$context.requestId');
+    expect(accessLogs).toContain('$context.status');
+    expect(accessLogs).not.toMatch(/authorization|identity|requestbody|header/i);
+  });
+
+  it.each(['dev', 'test', 'prod'] as const)(
+    'places %s runtime roles under the stage path and applies the runtime boundary',
+    (stage) => {
+      const template = backendTemplate(stage).toJSON();
+      const functions = Object.values(template.Resources).filter(
+        (resource: any) => resource.Type === 'AWS::Lambda::Function',
+      ) as any[];
+
+      expect(functions).toHaveLength(3);
+      for (const fn of functions) {
+        const roleLogicalId = fn.Properties.Role['Fn::GetAtt'][0] as string;
+        const role = template.Resources[roleLogicalId] as any;
+        expect(role.Properties.Path).toBe(`/roadmap2u/${stage}/runtime/`);
+        expect(JSON.stringify(role.Properties.PermissionsBoundary)).toContain(
+          `/roadmap2u/${stage}/roadmap2u-${stage}-runtime-boundary`,
+        );
+        expect(role.Properties.Tags).toEqual(
+          expect.arrayContaining([
+            { Key: 'roadmap2u-project', Value: 'RoadMap2U' },
+            { Key: 'roadmap2u-stage', Value: stage },
+          ]),
+        );
+      }
+    },
+  );
+
+  it('uses no SES resources or permissions', () => {
+    for (const stage of ['dev', 'test', 'prod'] as const) {
+      const rendered = JSON.stringify(backendTemplate(stage).toJSON());
+      expect(rendered).not.toContain('AWS::SES::');
+      expect(rendered).not.toMatch(/ses:\*/i);
+      expect(rendered).not.toMatch(/ses:[A-Za-z]/);
+    }
   });
 
   it('runs both auth-contract triggers and permits Cognito to invoke each Lambda', () => {

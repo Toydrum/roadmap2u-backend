@@ -1,0 +1,285 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Temporary MFA-only operator used to install the RoadMap2U control plane and isolated CDK toolkits",
+  "Parameters": {
+    "HectorAdminPrincipalArn": {
+      "Type": "String",
+      "Default": "arn:aws:iam::765932874577:user/Hector-admin",
+      "AllowedValues": ["arn:aws:iam::765932874577:user/Hector-admin"]
+    }
+  },
+  "Resources": {
+    "ControlPlaneTemplateBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": "roadmap2u-bootstrap-templates-765932874577-us-east-1",
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" }
+            }
+          ]
+        },
+        "OwnershipControls": {
+          "Rules": [{ "ObjectOwnership": "BucketOwnerEnforced" }]
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "Tags": [
+          { "Key": "roadmap2u-project", "Value": "RoadMap2U" },
+          { "Key": "roadmap2u-purpose", "Value": "temporary-bootstrap" }
+        ]
+      }
+    },
+    "ControlPlaneTemplateBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": { "Ref": "ControlPlaneTemplateBucket" },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyInsecureTransport",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                { "Fn::GetAtt": ["ControlPlaneTemplateBucket", "Arn"] },
+                { "Fn::Sub": "${ControlPlaneTemplateBucket.Arn}/*" }
+              ],
+              "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+            }
+          ]
+        }
+      }
+    },
+    "BootstrapOperatorRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "RoadMap2U-BootstrapOperator",
+        "Path": "/roadmap2u/bootstrap/",
+        "Description": "Temporary one-hour operator for RoadMap2U bootstrap installation",
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": { "AWS": { "Ref": "HectorAdminPrincipalArn" } },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "Bool": { "aws:MultiFactorAuthPresent": "true" },
+                "NumericLessThanEquals": { "aws:MultiFactorAuthAge": "3600" }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "InstallOnlyRoadMap2UControlPlane",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "OperateOnlyRoadMap2UBootstrapStacks",
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudformation:CreateChangeSet",
+                    "cloudformation:CreateStack",
+                    "cloudformation:DeleteChangeSet",
+                    "cloudformation:DescribeChangeSet",
+                    "cloudformation:DescribeStackEvents",
+                    "cloudformation:DescribeStacks",
+                    "cloudformation:ExecuteChangeSet",
+                    "cloudformation:GetTemplate",
+                    "cloudformation:GetTemplateSummary",
+                    "cloudformation:UpdateStack",
+                    "cloudformation:UpdateTerminationProtection"
+                  ],
+                  "Resource": [
+                    "arn:aws:cloudformation:us-east-1:765932874577:stack/Roadmap-CiBootstrap/*",
+                    "arn:aws:cloudformation:us-east-1:765932874577:stack/RoadMap2U-CDK-dev/*",
+                    "arn:aws:cloudformation:us-east-1:765932874577:stack/RoadMap2U-CDK-test/*",
+                    "arn:aws:cloudformation:us-east-1:765932874577:stack/RoadMap2U-CDK-prod/*"
+                  ]
+                },
+                {
+                  "Sid": "InspectBootstrapStacks",
+                  "Effect": "Allow",
+                  "Action": "cloudformation:ListStacks",
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "CreateAndManageRoadMap2URoles",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:CreateRole",
+                    "iam:DeleteRole",
+                    "iam:DeleteRolePolicy",
+                    "iam:GetRole",
+                    "iam:GetRolePolicy",
+                    "iam:ListAttachedRolePolicies",
+                    "iam:ListRolePolicies",
+                    "iam:PutRolePolicy",
+                    "iam:TagRole",
+                    "iam:UntagRole",
+                    "iam:UpdateAssumeRolePolicy",
+                    "iam:UpdateRole",
+                    "iam:UpdateRoleDescription"
+                  ],
+                  "Resource": [
+                    "arn:aws:iam::765932874577:role/roadmap2u/dev/*",
+                    "arn:aws:iam::765932874577:role/roadmap2u/test/*",
+                    "arn:aws:iam::765932874577:role/roadmap2u/prod/*",
+                    "arn:aws:iam::765932874577:role/roadmap2u/operations/*",
+                    "arn:aws:iam::765932874577:role/cdk-rmap2udev-*",
+                    "arn:aws:iam::765932874577:role/cdk-rmap2utst-*",
+                    "arn:aws:iam::765932874577:role/cdk-rmap2uprd-*"
+                  ]
+                },
+                {
+                  "Sid": "AttachOnlyRoadMap2UControlPlanePolicies",
+                  "Effect": "Allow",
+                  "Action": ["iam:AttachRolePolicy", "iam:DetachRolePolicy"],
+                  "Resource": [
+                    "arn:aws:iam::765932874577:role/roadmap2u/dev/*",
+                    "arn:aws:iam::765932874577:role/roadmap2u/test/*",
+                    "arn:aws:iam::765932874577:role/roadmap2u/prod/*",
+                    "arn:aws:iam::765932874577:role/roadmap2u/operations/*",
+                    "arn:aws:iam::765932874577:role/cdk-rmap2udev-*",
+                    "arn:aws:iam::765932874577:role/cdk-rmap2utst-*",
+                    "arn:aws:iam::765932874577:role/cdk-rmap2uprd-*"
+                  ],
+                  "Condition": {
+                    "ArnEquals": {
+                      "iam:PolicyARN": [
+                        "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-core",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-api",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-data",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-edge",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-core",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-api",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-data",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-edge",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-core",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-api",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-data",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-edge"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Sid": "CreateAndManageRoadMap2UPolicies",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:CreatePolicy",
+                    "iam:CreatePolicyVersion",
+                    "iam:DeletePolicy",
+                    "iam:DeletePolicyVersion",
+                    "iam:GetPolicy",
+                    "iam:GetPolicyVersion",
+                    "iam:ListPolicyVersions",
+                    "iam:SetDefaultPolicyVersion"
+                  ],
+                  "Resource": "arn:aws:iam::765932874577:policy/roadmap2u/*"
+                },
+                {
+                  "Sid": "ManageOnlyRoadMap2UBootstrapBuckets",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:CreateBucket",
+                    "s3:DeleteBucketPolicy",
+                    "s3:GetBucketAcl",
+                    "s3:GetEncryptionConfiguration",
+                    "s3:GetBucketLocation",
+                    "s3:GetBucketPolicy",
+                    "s3:GetBucketPublicAccessBlock",
+                    "s3:GetBucketTagging",
+                    "s3:GetBucketVersioning",
+                    "s3:ListBucket",
+                    "s3:PutEncryptionConfiguration",
+                    "s3:PutBucketPolicy",
+                    "s3:PutBucketPublicAccessBlock",
+                    "s3:PutBucketTagging",
+                    "s3:PutBucketVersioning"
+                  ],
+                  "Resource": [
+                    "arn:aws:s3:::cdk-rmap2udev-assets-765932874577-us-east-1",
+                    "arn:aws:s3:::cdk-rmap2utst-assets-765932874577-us-east-1",
+                    "arn:aws:s3:::cdk-rmap2uprd-assets-765932874577-us-east-1"
+                  ]
+                },
+                {
+                  "Sid": "ManageOnlyRoadMap2UBootstrapVersions",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ssm:AddTagsToResource",
+                    "ssm:DeleteParameter",
+                    "ssm:GetParameter",
+                    "ssm:GetParameters",
+                    "ssm:ListTagsForResource",
+                    "ssm:PutParameter",
+                    "ssm:RemoveTagsFromResource"
+                  ],
+                  "Resource": [
+                    "arn:aws:ssm:us-east-1:765932874577:parameter/cdk-bootstrap/rmap2udev/version",
+                    "arn:aws:ssm:us-east-1:765932874577:parameter/cdk-bootstrap/rmap2utst/version",
+                    "arn:aws:ssm:us-east-1:765932874577:parameter/cdk-bootstrap/rmap2uprd/version"
+                  ]
+                },
+                {
+                  "Sid": "CreateToolkitOriginAccessControls",
+                  "Effect": "Allow",
+                  "Action": "cloudfront:CreateOriginAccessControl",
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "ManageToolkitOriginAccessControls",
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudfront:DeleteOriginAccessControl",
+                    "cloudfront:GetOriginAccessControl",
+                    "cloudfront:UpdateOriginAccessControl"
+                  ],
+                  "Resource": "arn:aws:cloudfront::765932874577:origin-access-control/*"
+                },
+                {
+                  "Sid": "UseOnlyControlPlaneTemplateBucket",
+                  "Effect": "Allow",
+                  "Action": ["s3:GetBucketLocation", "s3:ListBucket"],
+                  "Resource": "arn:aws:s3:::roadmap2u-bootstrap-templates-765932874577-us-east-1",
+                  "Condition": {
+                    "StringLike": { "s3:prefix": ["control-plane", "control-plane/*"] }
+                  }
+                },
+                {
+                  "Sid": "UseOnlyControlPlaneTemplateObjects",
+                  "Effect": "Allow",
+                  "Action": ["s3:DeleteObject", "s3:GetObject", "s3:PutObject"],
+                  "Resource": "arn:aws:s3:::roadmap2u-bootstrap-templates-765932874577-us-east-1/control-plane/*"
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          { "Key": "roadmap2u-project", "Value": "RoadMap2U" },
+          { "Key": "roadmap2u-purpose", "Value": "temporary-bootstrap" }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "ControlPlaneTemplateBucketName": {
+      "Value": { "Ref": "ControlPlaneTemplateBucket" }
+    },
+    "BootstrapOperatorRoleArn": {
+      "Value": { "Fn::GetAtt": ["BootstrapOperatorRole", "Arn"] }
+    }
+  }
+}

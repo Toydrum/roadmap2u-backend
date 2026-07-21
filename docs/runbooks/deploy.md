@@ -2,7 +2,7 @@
 
 ## Estado actual
 
-Los workflows se entregan deshabilitados para escritura mediante `AWS_DEPLOY_ENABLED=false`. Este documento describe la operación **futura** una vez configurados OIDC, environments y aprobaciones. No ejecutes comandos de deploy durante la preparación inicial del repositorio.
+Los workflows permanecen deshabilitados para escritura con `AWS_DEPLOY_ENABLED=false` y `AWS_ROLLBACK_ENABLED=false` fuera de una ventana aprobada. Los gates aceptan solo los literales `true`/`false`; una variable ausente o un typo falla cerrado. Este documento describe la operación una vez configurados OIDC, environments y aprobaciones; no ejecutes comandos locales para eludir esos controles.
 
 El deploy ordinario jamás realiza el corte de `roadmap2u.com`/`www`. Ese cambio tiene su propio [runbook](dns-cutover.md).
 
@@ -17,6 +17,7 @@ El deploy ordinario jamás realiza el corte de `roadmap2u.com`/`www`. Ese cambio
 - El hash contractual calculado coincide entre ambos repositorios.
 - Para `test`/`prod`, el mismo SHA consta como exitoso en el ambiente anterior.
 - Para `prod`, un aprobador revisó el SHA inmutable, el PR, el synth/template y el cambio esperado antes de aprobar el GitHub Environment. El job registra después un `cdk diff` inmediatamente antes del deploy; esa salida es evidencia, no una segunda pausa de aprobación.
+- El preflight `oidc-preflight.yml` pasó para el repo/stage y confirmó únicamente `sts:GetCallerIdentity` en la cuenta esperada.
 
 Mantén separados los SHA de backend y frontend si sus repositorios no avanzan al mismo commit; registra la pareja exacta desplegada por ambiente.
 
@@ -53,16 +54,20 @@ Un PR no solicita credenciales de despliegue y no escribe en AWS.
 
 Orden ejecutado por el workflow autorizado:
 
-1. Verificar `AWS_DEPLOY_ENABLED=true`, environment, SHA, account y región.
+1. Verificar `AWS_DEPLOY_ENABLED=true`, `AWS_ROLLBACK_ENABLED=false`, environment, SHA, account y región. Para el primer `dev/deploy` manual, el SHA debe ser exactamente el HEAD remoto de `main`.
 2. Repetir instalación, contratos, typecheck, tests y synth.
-3. Ejecutar `cdk diff` para el stage y conservarlo como evidencia del job.
-4. Desplegar solo el alcance que ya fue aprobado. Si la organización exige aprobar el diff vivo, mantener `AWS_DEPLOY_ENABLED=false` y crear un flujo plan/apply con una segunda aprobación; este workflow no finge esa pausa.
-5. Ejecutar el deploy no interactivo del stack o stacks de ese stage.
-6. Leer outputs y los ocho parámetros SSM; validar formato, stage y hash.
-7. Ejecutar smokes del API y hosting.
-8. Registrar SHA/resultado como candidato válido para la promoción siguiente.
+3. Antes del diff, permitir que cada stack esté ausente (primer deploy) o exactamente en `CREATE_COMPLETE`, `UPDATE_COMPLETE` o `UPDATE_ROLLBACK_COMPLETE`. Este último permite corregir o revertir una actualización fallida ya estabilizada; cualquier estado `*_IN_PROGRESS`, `ROLLBACK_COMPLETE` de una creación fallida, import o fallo aborta.
+4. Ejecutar `cdk diff` para el stage y conservarlo como evidencia del job.
+5. Desplegar solo el alcance que ya fue aprobado. El job de deploy es el único asociado al environment, por lo que `prod` conserva una sola aprobación.
+6. Ejecutar el deploy no interactivo del stack o stacks de ese stage.
+7. Después del deploy, aceptar únicamente `CREATE_COMPLETE` o `UPDATE_COMPLETE`; no usar el patrón permisivo `*_COMPLETE`.
+8. Leer outputs y los ocho parámetros SSM; validar formato, stage y hash.
+9. Verificar que los tres log groups Lambda y el access log del API existen con retención exacta de 7/14/30 días para dev/test/prod.
+10. Ejecutar smokes del API y hosting.
+11. Construir `/roadmap2u/{stage}/backend-release-manifests/{sha}` con `schemaVersion=1`, stage, SHA y los ocho valores de `handoff`. Crearlo sin overwrite o comprobar igualdad canónica si ya existe.
+12. Solo después escribir `/backend-releases/{sha}` y finalmente el pointer `/backend-release-sha`.
 
-El backend se despliega antes del frontend cuando cambia el contrato, porque el build web consume de SSM la configuración y el hash ya publicados.
+El backend se despliega antes del frontend. El build web toma un snapshot consistente leyendo el pointer backend, su manifiesto inmutable y el pointer nuevamente; cualquier cambio entre ambas lecturas aborta la publicación.
 
 ## Build y publicación del frontend
 
@@ -132,12 +137,13 @@ S3 Versioning es una red adicional, no una razón para restaurar objetos a ciega
 
 ## Rollback backend
 
-1. Bloquear nuevas promociones y evaluar si el cambio afectó datos o solo código/configuración.
+1. Establecer `AWS_DEPLOY_ENABLED=false` y, solo durante la ventana de incidente, `AWS_ROLLBACK_ENABLED=true`. Si ambos gates están activos o ambos inactivos, el workflow no ejecuta cambios.
 2. Seleccionar el último SHA bueno del mismo stage y revisar su `cdk diff` contra el estado actual.
 3. No reemplazar ni borrar User Pools, tablas o buckets productivos.
-4. Desplegar el template/código anterior mediante el workflow protegido.
+4. Ejecutar manualmente `operation=rollback`; el workflow debe validar el marcador `/roadmap2u/{stage}/backend-releases/{sha}` antes de desplegar el template/código anterior.
 5. Revalidar SSM, contrato y smokes.
 6. Si hubo cambio de schema incompatible o escritura corrupta, detener el rollback automático y ejecutar un plan de recuperación de datos específico; PITR no se restaura encima de la tabla activa sin diseño previo.
+7. Al cerrar el incidente, volver a dejar ambos gates en `false`; no convertir rollback en el modo normal de despliegue.
 
 ## Condiciones de aborto
 
@@ -152,4 +158,4 @@ Interrumpe el despliegue si:
 - un stack ordinario toca apex/`www`;
 - los smokes de autenticación, PWA o assets fallan.
 
-Después de abortar, deja `AWS_DEPLOY_ENABLED=false`, conserva logs/diff y abre una corrección nueva; no eludas el gate mediante un deploy local.
+Después de abortar, deja `AWS_DEPLOY_ENABLED=false` y `AWS_ROLLBACK_ENABLED=false`, conserva logs/diff y abre una corrección nueva; no eludas el gate mediante un deploy local.

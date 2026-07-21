@@ -1,4 +1,15 @@
-import { Arn, Aws, CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Tags } from 'aws-cdk-lib';
+import {
+  Arn,
+  Aws,
+  BootstraplessSynthesizer,
+  CfnOutput,
+  Duration,
+  Fn,
+  RemovalPolicy,
+  Stack,
+  StackProps,
+  Tags,
+} from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
@@ -11,6 +22,8 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import { AccessLogFormat } from 'aws-cdk-lib/aws-apigateway';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import { ApiGatewayv2DomainProperties, CloudFrontTarget } from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -20,6 +33,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PASSWORD_POLICY } from '@app/auth/auth-types';
+import { createStageManagedPolicies } from './stage-policies';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT_DOMAIN = 'roadmap2u.com';
@@ -47,8 +61,12 @@ export interface RoadmapHostingStackProps extends StackProps {
 export interface RoadmapCiBootstrapStackProps extends StackProps {
   readonly hostedZoneId: string;
   readonly githubOwner: string;
+  readonly githubOwnerId: string;
   readonly backendRepository: string;
+  readonly backendRepositoryId: string;
   readonly frontendRepository: string;
+  readonly frontendRepositoryId: string;
+  readonly operationsPrincipalArn: string;
 }
 
 export function assertDeploymentStage(value: string): asserts value is DeploymentStage {
@@ -60,6 +78,65 @@ export function assertDeploymentStage(value: string): asserts value is Deploymen
 export function bootstrapQualifierFor(stage: DeploymentStage): string {
   assertDeploymentStage(stage);
   return STAGE_BOOTSTRAP_QUALIFIERS[stage];
+}
+
+export function createCiBootstrapSynthesizer(): BootstraplessSynthesizer {
+  return new BootstraplessSynthesizer();
+}
+
+function logRetentionFor(stage: DeploymentStage): logs.RetentionDays {
+  return {
+    dev: logs.RetentionDays.ONE_WEEK,
+    test: logs.RetentionDays.TWO_WEEKS,
+    prod: logs.RetentionDays.ONE_MONTH,
+  }[stage];
+}
+
+function runtimeBoundaryArn(stack: Stack, stage: DeploymentStage): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'iam',
+      region: '',
+      account: stack.account,
+      resource: 'policy',
+      resourceName: `roadmap2u/${stage}/roadmap2u-${stage}-runtime-boundary`,
+    },
+    stack,
+  );
+}
+
+function createRuntimeRole(
+  scope: Stack,
+  id: string,
+  stage: DeploymentStage,
+): iam.Role {
+  return new iam.Role(scope, id, {
+    assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    path: `/roadmap2u/${stage}/runtime/`,
+    permissionsBoundary: iam.ManagedPolicy.fromManagedPolicyArn(
+      scope,
+      `${id}Boundary`,
+      runtimeBoundaryArn(scope, stage),
+    ),
+    managedPolicies: [
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+    ],
+  });
+}
+
+function createFunctionLogGroup(
+  scope: Stack,
+  id: string,
+  functionName: string,
+  stage: DeploymentStage,
+): logs.LogGroup {
+  const group = new logs.LogGroup(scope, id, {
+    logGroupName: `/aws/lambda/${functionName}`,
+    retention: logRetentionFor(stage),
+    removalPolicy: stage === 'prod' ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
+  });
+  return group;
 }
 
 export function calculateContractHash(): string {
@@ -117,17 +194,22 @@ export class RoadmapStack extends Stack {
     const apiDomain = apiDomainFor(stage);
     const parameterPrefix = `/roadmap2u/${stage}`;
     const contractHash = props.contractHash ?? calculateContractHash();
+    Tags.of(this).add('roadmap2u-project', 'RoadMap2U');
+    Tags.of(this).add('roadmap2u-stage', stage);
     const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'HostedZone', {
       hostedZoneId,
       zoneName: ROOT_DOMAIN,
     });
 
+    const preSignUpName = `roadmap-pre-signup-${stage}`;
     const preSignUp = new NodejsFunction(this, 'PreSignUp', {
-      functionName: `roadmap-pre-signup-${stage}`,
+      functionName: preSignUpName,
       entry: join(here, '../lambda/pre-signup.ts'),
       runtime: lambda.Runtime.NODEJS_22_X,
       memorySize: 256,
       timeout: Duration.seconds(10),
+      role: createRuntimeRole(this, 'PreSignUpRole', stage),
+      logGroup: createFunctionLogGroup(this, 'PreSignUpLogs', preSignUpName, stage),
       bundling: {
         format: OutputFormat.ESM,
         tsconfig: join(here, '../tsconfig.json'),
@@ -135,12 +217,20 @@ export class RoadmapStack extends Stack {
       },
     });
 
+    const postConfirmationName = `roadmap-post-confirmation-${stage}`;
     const postConfirmation = new NodejsFunction(this, 'PostConfirmation', {
-      functionName: `roadmap-post-confirmation-${stage}`,
+      functionName: postConfirmationName,
       entry: join(here, '../lambda/post-confirmation.ts'),
       runtime: lambda.Runtime.NODEJS_22_X,
       memorySize: 256,
       timeout: Duration.seconds(10),
+      role: createRuntimeRole(this, 'PostConfirmationRole', stage),
+      logGroup: createFunctionLogGroup(
+        this,
+        'PostConfirmationLogs',
+        postConfirmationName,
+        stage,
+      ),
       bundling: {
         format: OutputFormat.ESM,
         tsconfig: join(here, '../tsconfig.json'),
@@ -169,13 +259,12 @@ export class RoadmapStack extends Stack {
         requireSymbols: false,
       },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+      email: cognito.UserPoolEmail.withCognito(),
       userVerification: { emailStyle: cognito.VerificationEmailStyle.CODE },
       deletionProtection: production,
       removalPolicy,
       lambdaTriggers: { preSignUp, postConfirmation },
     });
-    Tags.of(pool).add('roadmap2u-project', 'RoadMap2U');
-    Tags.of(pool).add('roadmap2u-stage', stage);
 
     const webClient = pool.addClient('Web', {
       userPoolClientName: `roadmap-web-${stage}`,
@@ -239,12 +328,15 @@ export class RoadmapStack extends Stack {
       }),
     );
 
+    const routerName = `roadmap-router-${stage}`;
     const router = new NodejsFunction(this, 'Router', {
-      functionName: `roadmap-router-${stage}`,
+      functionName: routerName,
       entry: join(here, '../lambda/router.ts'),
       runtime: lambda.Runtime.NODEJS_22_X,
       memorySize: 512,
       timeout: Duration.seconds(15),
+      role: createRuntimeRole(this, 'RouterRole', stage),
+      logGroup: createFunctionLogGroup(this, 'RouterLogs', routerName, stage),
       environment: { TABLE_NAME: table.tableName, USER_POOL_ID: pool.userPoolId },
       bundling: {
         format: OutputFormat.ESM,
@@ -268,8 +360,6 @@ export class RoadmapStack extends Stack {
       domainName: apiDomain,
       validation: certificatemanager.CertificateValidation.fromDns(zone),
     });
-    Tags.of(apiCertificate).add('roadmap2u-project', 'RoadMap2U');
-    Tags.of(apiCertificate).add('roadmap2u-stage', stage);
     const customDomain = new apigatewayv2.DomainName(this, 'ApiDomain', {
       domainName: apiDomain,
       certificate: apiCertificate,
@@ -277,7 +367,7 @@ export class RoadmapStack extends Stack {
     });
     const api = new apigatewayv2.HttpApi(this, 'Api', {
       apiName: `roadmap-api-${stage}`,
-      defaultDomainMapping: { domainName: customDomain },
+      createDefaultStage: false,
       corsPreflight: {
         allowOrigins: corsOriginsFor(stage),
         allowMethods: [
@@ -300,6 +390,29 @@ export class RoadmapStack extends Stack {
       methods: [apigatewayv2.HttpMethod.ANY],
       integration: new HttpLambdaIntegration('RouterIntegration', router),
       authorizer,
+    });
+    const apiLogGroup = new logs.LogGroup(this, 'ApiAccessLogs', {
+      logGroupName: `/aws/apigateway/roadmap-api-${stage}`,
+      retention: logRetentionFor(stage),
+      removalPolicy,
+    });
+    new apigatewayv2.HttpStage(this, 'DefaultStage', {
+      httpApi: api,
+      stageName: '$default',
+      autoDeploy: true,
+      domainMapping: { domainName: customDomain },
+      accessLogSettings: {
+        destination: new apigatewayv2.LogGroupLogDestination(apiLogGroup),
+        format: AccessLogFormat.custom(
+          JSON.stringify({
+            requestId: '$context.requestId',
+            routeKey: '$context.routeKey',
+            status: '$context.status',
+            responseLength: '$context.responseLength',
+            latency: '$context.responseLatency',
+          }),
+        ),
+      },
     });
 
     const apiAlias = route53.RecordTarget.fromAlias(
@@ -350,6 +463,8 @@ export class RoadmapHostingStack extends Stack {
     const removalPolicy = production ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY;
     const frontendDomain = frontendDomainFor(stage);
     const parameterPrefix = `/roadmap2u/${stage}`;
+    Tags.of(this).add('roadmap2u-project', 'RoadMap2U');
+    Tags.of(this).add('roadmap2u-stage', stage);
     const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'HostedZone', {
       hostedZoneId,
       zoneName: ROOT_DOMAIN,
@@ -362,7 +477,7 @@ export class RoadmapHostingStack extends Stack {
       enforceSSL: true,
       versioned: true,
       removalPolicy,
-      autoDeleteObjects: !production,
+      autoDeleteObjects: false,
     });
 
     const certificate = new certificatemanager.Certificate(this, 'SiteCertificate', {
@@ -370,27 +485,13 @@ export class RoadmapHostingStack extends Stack {
       subjectAlternativeNames: production ? [`www.${ROOT_DOMAIN}`] : undefined,
       validation: certificatemanager.CertificateValidation.fromDns(zone),
     });
-    Tags.of(certificate).add('roadmap2u-project', 'RoadMap2U');
-    Tags.of(certificate).add('roadmap2u-stage', stage);
 
-    const responseHeadersPolicy = new cloudfront.ResponseHeadersPolicy(this, 'SecurityHeaders', {
-      responseHeadersPolicyName: `roadmap2u-${stage}-security-headers`,
-      comment: `Baseline browser security headers for RoadMap2U ${stage}`,
-      securityHeadersBehavior: {
-        contentTypeOptions: { override: true },
-        frameOptions: { frameOption: cloudfront.HeadersFrameOption.DENY, override: true },
-        referrerPolicy: {
-          referrerPolicy: cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
-          override: true,
-        },
-        strictTransportSecurity: {
-          accessControlMaxAge: Duration.days(365),
-          includeSubdomains: production,
-          preload: production,
-          override: true,
-        },
-      },
-    });
+    const responseHeadersPolicy = cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS;
+    const originAccessControl = cloudfront.S3OriginAccessControl.fromOriginAccessControlId(
+      this,
+      'SiteOriginAccessControl',
+      Fn.importValue(`RoadMap2U-${stage}-SiteOacId`),
+    );
 
     const requestRouter = new cloudfront.Function(this, 'RequestRouter', {
       functionName: `roadmap2u-${stage}-request-router`,
@@ -410,7 +511,9 @@ export class RoadmapHostingStack extends Stack {
       enableIpv6: true,
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
       defaultBehavior: {
-        origin: origins.S3BucketOrigin.withOriginAccessControl(siteBucket),
+        origin: origins.S3BucketOrigin.withOriginAccessControl(siteBucket, {
+          originAccessControl,
+        }),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         compress: true,
         cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
@@ -423,8 +526,6 @@ export class RoadmapHostingStack extends Stack {
         ],
       },
     });
-    Tags.of(distribution).add('roadmap2u-project', 'RoadMap2U');
-    Tags.of(distribution).add('roadmap2u-stage', stage);
 
     // The current production apex/www records remain untouched until the
     // separately gated cutover workflow is explicitly enabled.
@@ -479,45 +580,56 @@ export class RoadmapCiBootstrapStack extends Stack {
       throw new Error('RoadMap2U infrastructure must be deployed in us-east-1.');
     }
 
-    const provider = new iam.CfnOIDCProvider(this, 'GitHubActionsProvider', {
-      url: 'https://token.actions.githubusercontent.com',
-      clientIdList: ['sts.amazonaws.com'],
-    });
-    provider.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    Tags.of(this).add('roadmap2u-project', 'RoadMap2U');
     const providerArn = `arn:${Aws.PARTITION}:iam::${this.account}:oidc-provider/token.actions.githubusercontent.com`;
 
     for (const stage of STAGES) {
+      const policies = createStageManagedPolicies(this, stage, props.hostedZoneId);
       const backendRole = this.createBackendRole(providerArn, stage, props);
       const frontendRole = this.createFrontendRole(providerArn, stage, props);
-      backendRole.node.addDependency(provider);
-      frontendRole.node.addDependency(provider);
+      const smokeCleanupRole = this.createSmokeCleanupRole(props.operationsPrincipalArn, stage);
       new CfnOutput(this, `${stage}BackendRoleArn`, { value: backendRole.roleArn });
       new CfnOutput(this, `${stage}FrontendRoleArn`, { value: frontendRole.roleArn });
+      new CfnOutput(this, `${stage}SmokeCleanupRoleArn`, { value: smokeCleanupRole.roleArn });
+      new CfnOutput(this, `${stage}CfnCorePolicyArn`, { value: policies.core.managedPolicyArn });
+      new CfnOutput(this, `${stage}CfnApiPolicyArn`, { value: policies.api.managedPolicyArn });
+      new CfnOutput(this, `${stage}CfnDataPolicyArn`, { value: policies.data.managedPolicyArn });
+      new CfnOutput(this, `${stage}CfnEdgePolicyArn`, { value: policies.edge.managedPolicyArn });
+      new CfnOutput(this, `${stage}RuntimeBoundaryArn`, {
+        value: policies.runtimeBoundary.managedPolicyArn,
+      });
     }
 
+    const breakGlassRole = this.createNonProdBreakGlassRole(props.operationsPrincipalArn);
+    new CfnOutput(this, 'nonProdBreakGlassRoleArn', { value: breakGlassRole.roleArn });
+
     const dnsPlanRole = this.createDnsPlanRole(providerArn, props);
-    dnsPlanRole.node.addDependency(provider);
     new CfnOutput(this, 'prodDnsPlanRoleArn', { value: dnsPlanRole.roleArn });
 
     const dnsCutoverRole = this.createDnsCutoverRole(providerArn, props);
-    dnsCutoverRole.node.addDependency(provider);
     new CfnOutput(this, 'prodDnsCutoverRoleArn', { value: dnsCutoverRole.roleArn });
   }
 
   private githubPrincipal(
     providerArn: string,
     owner: string,
+    ownerId: string,
     repository: string,
+    repositoryId: string,
     environment: string | readonly string[],
   ): iam.FederatedPrincipal {
     const environments = typeof environment === 'string' ? [environment] : [...environment];
-    const subjects = environments.map((name) => `repo:${owner}/${repository}:environment:${name}`);
+    const subjects = environments.map(
+      (name) => `repo:${owner}@${ownerId}/${repository}@${repositoryId}:environment:${name}`,
+    );
     return new iam.FederatedPrincipal(
       providerArn,
       {
         StringEquals: {
           'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
           'token.actions.githubusercontent.com:sub': subjects.length === 1 ? subjects[0] : subjects,
+          'token.actions.githubusercontent.com:repository_owner_id': ownerId,
+          'token.actions.githubusercontent.com:repository_id': repositoryId,
         },
       },
       'sts:AssumeRoleWithWebIdentity',
@@ -538,6 +650,111 @@ export class RoadmapCiBootstrapStack extends Stack {
     );
   }
 
+  private mfaUserPrincipal(principalArn: string): iam.IPrincipal {
+    return new iam.ArnPrincipal(principalArn).withConditions({
+      Bool: { 'aws:MultiFactorAuthPresent': 'true' },
+      NumericLessThanEquals: { 'aws:MultiFactorAuthAge': '3600' },
+    });
+  }
+
+  private createNonProdBreakGlassRole(principalArn: string): iam.Role {
+    const role = new iam.Role(this, 'NonProdBreakGlassRole', {
+      roleName: 'roadmap2u-nonprod-break-glass',
+      description: 'MFA-only deletion role for RoadMap2U dev and test workload stacks',
+      assumedBy: this.mfaUserPrincipal(principalArn),
+      path: '/roadmap2u/operations/',
+      maxSessionDuration: Duration.hours(1),
+    });
+    Tags.of(role).add('roadmap2u-project', 'RoadMap2U');
+    Tags.of(role).add('roadmap2u-purpose', 'nonprod-break-glass');
+
+    const resources = (['dev', 'test'] as const).flatMap((stage) =>
+      ['Backend', 'Hosting'].map(
+        (stackType) =>
+          `arn:${Aws.PARTITION}:cloudformation:us-east-1:${this.account}:stack/Roadmap-${stage}-${stackType}/*`,
+      ),
+    );
+    role.attachInlinePolicy(
+      new iam.Policy(this, 'NonProdBreakGlassPolicy', {
+        policyName: 'NonProdBreakGlassPolicy',
+        statements: [
+          new iam.PolicyStatement({
+            sid: 'DeleteOnlyNonProdWorkloadStacks',
+            actions: [
+              'cloudformation:DeleteStack',
+              'cloudformation:DescribeStackEvents',
+              'cloudformation:DescribeStacks',
+            ],
+            resources,
+          }),
+          new iam.PolicyStatement({
+            sid: 'ListOnlyNonProdHostingVersions',
+            actions: ['s3:GetBucketLocation', 's3:ListBucket', 's3:ListBucketVersions'],
+            resources: (['dev', 'test'] as const).map(
+              (stage) => `arn:${Aws.PARTITION}:s3:::roadmap2u-${stage}-${this.account}`,
+            ),
+          }),
+          new iam.PolicyStatement({
+            sid: 'DeleteOnlyNonProdHostingVersions',
+            actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+            resources: (['dev', 'test'] as const).map(
+              (stage) => `arn:${Aws.PARTITION}:s3:::roadmap2u-${stage}-${this.account}/*`,
+            ),
+          }),
+        ],
+      }),
+    );
+    return role;
+  }
+
+  private createSmokeCleanupRole(principalArn: string, stage: DeploymentStage): iam.Role {
+    const role = new iam.Role(this, `SmokeCleanupRole${stage}`, {
+      roleName: `roadmap2u-${stage}-smoke-cleanup`,
+      description: `MFA-only deletion of RoadMap2U ${stage} smoke users and their application records`,
+      assumedBy: this.mfaUserPrincipal(principalArn),
+      path: `/roadmap2u/${stage}/operations/`,
+      maxSessionDuration: Duration.hours(1),
+    });
+    Tags.of(role).add('roadmap2u-project', 'RoadMap2U');
+    Tags.of(role).add('roadmap2u-stage', stage);
+    Tags.of(role).add('roadmap2u-purpose', 'smoke-cleanup');
+
+    const stageTagConditions = {
+      StringEquals: {
+        'aws:ResourceTag/roadmap2u-project': 'RoadMap2U',
+        'aws:ResourceTag/roadmap2u-stage': stage,
+      },
+    };
+    const tableArn = `arn:${Aws.PARTITION}:dynamodb:us-east-1:${this.account}:table/roadmap-${stage}`;
+    role.attachInlinePolicy(
+      new iam.Policy(this, `SmokeCleanupPolicy${stage}`, {
+        policyName: `SmokeCleanupPolicy-${stage}`,
+        statements: [
+          new iam.PolicyStatement({
+            sid: 'DeleteOnlyTaggedRoadMap2USmokeUsers',
+            actions: ['cognito-idp:AdminDeleteUser', 'cognito-idp:AdminGetUser'],
+            resources: [
+              `arn:${Aws.PARTITION}:cognito-idp:us-east-1:${this.account}:userpool/*`,
+            ],
+            conditions: stageTagConditions,
+          }),
+          new iam.PolicyStatement({
+            sid: 'DeleteOnlyTaggedRoadMap2USmokeRecords',
+            actions: ['dynamodb:DeleteItem', 'dynamodb:Query'],
+            resources: [tableArn, `${tableArn}/index/*`],
+            conditions: stageTagConditions,
+          }),
+          new iam.PolicyStatement({
+            sid: 'ReadOnlyStageUserPoolIds',
+            actions: ['ssm:GetParameter'],
+            resources: [this.parameterArn(`/roadmap2u/${stage}/user-pool-id`)],
+          }),
+        ],
+      }),
+    );
+    return role;
+  }
+
   private markerReadArns(stage: DeploymentStage, repo: 'backend' | 'frontend'): string[] {
     const own = [
       this.parameterArn(`/roadmap2u/${stage}/${repo}-release-sha`),
@@ -556,6 +773,23 @@ export class RoadmapCiBootstrapStack extends Stack {
     ];
   }
 
+  private publicConfigArns(stage: DeploymentStage): string[] {
+    return [
+      'region',
+      'user-pool-id',
+      'user-pool-client-id',
+      'api-base-url',
+      'frontend-bucket',
+      'cloudfront-distribution-id',
+      'frontend-url',
+      'contract-hash',
+    ].map((name) => this.parameterArn(`/roadmap2u/${stage}/${name}`));
+  }
+
+  private backendReleaseManifestArn(stage: DeploymentStage): string {
+    return this.parameterArn(`/roadmap2u/${stage}/backend-release-manifests/*`);
+  }
+
   private createBackendRole(
     providerArn: string,
     stage: DeploymentStage,
@@ -568,17 +802,21 @@ export class RoadmapCiBootstrapStack extends Stack {
       assumedBy: this.githubPrincipal(
         providerArn,
         props.githubOwner,
+        props.githubOwnerId,
         props.backendRepository,
+        props.backendRepositoryId,
         stage,
       ),
+      path: `/roadmap2u/${stage}/`,
       maxSessionDuration: Duration.hours(1),
     });
+    Tags.of(role).add('roadmap2u-stage', stage);
 
     role.addToPolicy(
       new iam.PolicyStatement({
         sid: 'UseCdkBootstrapRoles',
         actions: ['sts:AssumeRole'],
-        resources: ['deploy', 'file-publishing', 'image-publishing', 'lookup'].map(
+        resources: ['deploy', 'file-publishing'].map(
           (purpose) =>
             `arn:${Aws.PARTITION}:iam::${this.account}:role/cdk-${bootstrapQualifier}-${purpose}-role-${this.account}-us-east-1`,
         ),
@@ -592,25 +830,39 @@ export class RoadmapCiBootstrapStack extends Stack {
           'cloudformation:DescribeStackEvents',
           'cloudformation:GetTemplate',
         ],
-        resources: ['*'],
+        resources: ['Backend', 'Hosting'].map(
+          (stackType) =>
+            `arn:${Aws.PARTITION}:cloudformation:us-east-1:${this.account}:stack/Roadmap-${stage}-${stackType}/*`,
+        ),
       }),
     );
     role.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'ReadReleaseProofAndPublicConfig',
+        sid: `ReadReleaseProofAndPublicConfig${stage}`,
         actions: ['ssm:GetParameter', 'ssm:GetParameters'],
         resources: [
-          this.parameterArn(`/roadmap2u/${stage}/*`),
+          ...this.publicConfigArns(stage),
           ...this.markerReadArns(stage, 'backend'),
+          this.backendReleaseManifestArn(stage),
           this.parameterArn(`/cdk-bootstrap/${bootstrapQualifier}/version`),
         ],
       }),
     );
     role.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'WriteBackendReleaseProof',
+        sid: `WriteBackendReleaseProof${stage}`,
         actions: ['ssm:PutParameter'],
-        resources: this.markerWriteArns(stage, 'backend'),
+        resources: [
+          ...this.markerWriteArns(stage, 'backend'),
+          this.backendReleaseManifestArn(stage),
+        ],
+      }),
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: `InspectStageLogRetention${stage}`,
+        actions: ['logs:DescribeLogGroups'],
+        resources: ['*'],
       }),
     );
     return role;
@@ -624,11 +876,15 @@ export class RoadmapCiBootstrapStack extends Stack {
       assumedBy: this.githubPrincipal(
         providerArn,
         props.githubOwner,
+        props.githubOwnerId,
         props.backendRepository,
+        props.backendRepositoryId,
         'prod-dns-cutover',
       ),
+      path: '/roadmap2u/prod/',
       maxSessionDuration: Duration.hours(1),
     });
+    Tags.of(role).add('roadmap2u-stage', 'prod');
     const hostedZoneArn = `arn:${Aws.PARTITION}:route53:::hostedzone/${props.hostedZoneId}`;
 
     role.addToPolicy(
@@ -680,11 +936,15 @@ export class RoadmapCiBootstrapStack extends Stack {
       assumedBy: this.githubPrincipal(
         providerArn,
         props.githubOwner,
+        props.githubOwnerId,
         props.backendRepository,
+        props.backendRepositoryId,
         'prod',
       ),
+      path: '/roadmap2u/prod/',
       maxSessionDuration: Duration.hours(1),
     });
+    Tags.of(role).add('roadmap2u-stage', 'prod');
     const hostedZoneArn = `arn:${Aws.PARTITION}:route53:::hostedzone/${props.hostedZoneId}`;
 
     role.addToPolicy(
@@ -746,20 +1006,27 @@ export class RoadmapCiBootstrapStack extends Stack {
       assumedBy: this.githubPrincipal(
         providerArn,
         props.githubOwner,
+        props.githubOwnerId,
         props.frontendRepository,
+        props.frontendRepositoryId,
         stage,
       ),
+      path: `/roadmap2u/${stage}/`,
       maxSessionDuration: Duration.hours(1),
     });
+    Tags.of(role).add('roadmap2u-stage', stage);
     const bucketArn = `arn:${Aws.PARTITION}:s3:::roadmap2u-${stage}-${this.account}`;
 
     role.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'ReadFrontendConfigAndReleaseProof',
+        sid: `ReadFrontendConfigAndReleaseProof${stage}`,
         actions: ['ssm:GetParameter', 'ssm:GetParameters'],
         resources: [
-          this.parameterArn(`/roadmap2u/${stage}/*`),
+          ...this.publicConfigArns(stage),
           ...this.markerReadArns(stage, 'frontend'),
+          this.parameterArn(`/roadmap2u/${stage}/backend-release-sha`),
+          this.parameterArn(`/roadmap2u/${stage}/backend-releases/*`),
+          this.backendReleaseManifestArn(stage),
         ],
       }),
     );
