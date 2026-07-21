@@ -319,6 +319,23 @@ jobs:
             ALLOWED_ORIGINS=("https://$STAGE.roadmap2u.com" "http://localhost:4200" "http://localhost:8826")
           fi
 
+          API_TLS_READY=false
+          for ATTEMPT in {1..36}; do
+            if curl --silent --output /dev/null --connect-timeout 2 --max-time 4 \
+              "${API_BASE_URL}/v1/me"; then
+              API_TLS_READY=true
+              break
+            fi
+            echo "Waiting for API custom-domain TLS propagation (${ATTEMPT}/36)." >&2
+            sleep 5
+          done
+          if ! test "$API_TLS_READY" = "true"; then
+            curl --silent --show-error --output /dev/null --connect-timeout 2 --max-time 4 \
+              "${API_BASE_URL}/v1/me" || true
+            echo "API custom-domain TLS did not become ready after 36 attempts." >&2
+            exit 1
+          fi
+
           for ORIGIN in "${ALLOWED_ORIGINS[@]}"; do
             STATUS="$(curl --silent --show-error --output /dev/null --dump-header preflight.headers --write-out '%{http_code}' \
               --request OPTIONS \
