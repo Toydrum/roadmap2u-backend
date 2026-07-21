@@ -59,6 +59,30 @@ describe('backend GitHub Actions', () => {
     );
   });
 
+  it('waits for custom-domain TLS propagation before CORS smoke checks', () => {
+    const contents = workflow('deploy.yml');
+    const smoke = contents.indexOf('Smoke-test protected API and exact CORS allowlist');
+    const wait = contents.indexOf('API_TLS_READY=false', smoke);
+    const cors = contents.indexOf('for ORIGIN in "${ALLOWED_ORIGINS[@]}"', smoke);
+
+    expect(smoke).toBeGreaterThan(-1);
+    expect(wait).toBeGreaterThan(smoke);
+    expect(wait).toBeLessThan(cors);
+
+    const waitBlock = contents.slice(wait, cors);
+    expect(waitBlock).toContain('for ATTEMPT in {1..36}');
+    expect(waitBlock).toContain('--connect-timeout 2');
+    expect(waitBlock).toContain('--max-time 4');
+    expect(waitBlock).toContain('API_TLS_READY=true');
+    expect(waitBlock).toContain('break');
+    expect(waitBlock).toContain('sleep 5');
+    expect(waitBlock).toContain('test "$API_TLS_READY" = "true"');
+    expect(waitBlock).toContain('exit 1');
+    expect(waitBlock).toContain('"${API_BASE_URL}/v1/me"');
+    expect(waitBlock).not.toContain('--insecure');
+    expect(waitBlock).not.toMatch(/(^|\s)-k(\s|$)/);
+  });
+
   it('supports a manual exact-main dev deploy and enforces exclusive deploy and rollback gates', () => {
     const contents = workflow('deploy.yml');
     expect(contents).toContain('options: [deploy, promote, rollback]');
