@@ -144,6 +144,27 @@ function Exit-BootstrapOperatorSession([hashtable]$Previous) {
   $env:AWS_CA_BUNDLE = $Previous.CaBundle
 }
 
+function Remove-FailedControlPlaneStack {
+  $recoverableControlPlaneStates = @('ROLLBACK_COMPLETE', 'ROLLBACK_FAILED')
+  $stackStatus = & $awsCli cloudformation list-stacks `
+    --region $Region `
+    --stack-status-filter $recoverableControlPlaneStates `
+    --query "StackSummaries[?StackName=='Roadmap-CiBootstrap'] | [0].StackStatus" `
+    --output text
+  Assert-LastCommand 'Checking Roadmap-CiBootstrap recovery state'
+
+  if ($stackStatus -in $recoverableControlPlaneStates) {
+    & $awsCli cloudformation delete-stack `
+      --region $Region `
+      --stack-name 'Roadmap-CiBootstrap'
+    Assert-LastCommand 'Starting failed Roadmap-CiBootstrap recovery deletion'
+    & $awsCli cloudformation wait stack-delete-complete `
+      --region $Region `
+      --stack-name 'Roadmap-CiBootstrap'
+    Assert-LastCommand 'Waiting for failed Roadmap-CiBootstrap recovery deletion'
+  }
+}
+
 if ($Phase -eq 'create-operator') {
   & $awsCli cloudformation deploy `
     --profile $AdminProfile `
@@ -184,6 +205,7 @@ if ($Phase -in @('deploy-control-plane', 'deploy-all')) {
 $previousCredentials = Enter-BootstrapOperatorSession
 try {
   if ($Phase -in @('deploy-control-plane', 'deploy-all')) {
+    Remove-FailedControlPlaneStack
     $npxCommand = Get-Command npx.cmd -ErrorAction SilentlyContinue
     if (-not $npxCommand) {
       $npxCommand = Get-Command npx -ErrorAction Stop

@@ -276,6 +276,76 @@ describe('custom stage CDK bootstrap template', () => {
     expect(JSON.stringify(roleManagement.Resource)).not.toContain('/roadmap2u/bootstrap/');
   });
 
+  it('manages CloudFormation role-name lookups only for the twelve exact control-plane roles', () => {
+    const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
+    const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
+      .PolicyDocument.Statement;
+    const namedRoleManagement = statements.find(
+      (statement: any) => statement.Sid === 'ManageOnlyExactRoadMap2URoleNames',
+    );
+
+    expect(namedRoleManagement.Action).toEqual([
+      'iam:DeleteRole',
+      'iam:DeleteRolePolicy',
+      'iam:GetRole',
+      'iam:GetRolePolicy',
+      'iam:ListAttachedRolePolicies',
+      'iam:ListRolePolicies',
+      'iam:ListRoleTags',
+      'iam:PutRolePolicy',
+      'iam:TagRole',
+      'iam:UntagRole',
+      'iam:UpdateAssumeRolePolicy',
+      'iam:UpdateRole',
+      'iam:UpdateRoleDescription',
+    ]);
+    expect(namedRoleManagement.Action).not.toContain('iam:CreateRole');
+    expect(namedRoleManagement.Resource).toEqual([
+      'arn:aws:iam::765932874577:role/roadmap2u-dev-backend-deploy',
+      'arn:aws:iam::765932874577:role/roadmap2u-dev-frontend-deploy',
+      'arn:aws:iam::765932874577:role/roadmap2u-dev-smoke-cleanup',
+      'arn:aws:iam::765932874577:role/roadmap2u-test-backend-deploy',
+      'arn:aws:iam::765932874577:role/roadmap2u-test-frontend-deploy',
+      'arn:aws:iam::765932874577:role/roadmap2u-test-smoke-cleanup',
+      'arn:aws:iam::765932874577:role/roadmap2u-prod-backend-deploy',
+      'arn:aws:iam::765932874577:role/roadmap2u-prod-frontend-deploy',
+      'arn:aws:iam::765932874577:role/roadmap2u-prod-smoke-cleanup',
+      'arn:aws:iam::765932874577:role/roadmap2u-prod-dns-plan',
+      'arn:aws:iam::765932874577:role/roadmap2u-prod-dns-cutover',
+      'arn:aws:iam::765932874577:role/roadmap2u-nonprod-break-glass',
+    ]);
+
+    const pathScopedCreation = statements.find(
+      (statement: any) => statement.Sid === 'CreateAndManageRoadMap2URoles',
+    );
+    expect(pathScopedCreation.Action).toContain('iam:CreateRole');
+    expect(pathScopedCreation.Action).toContain('iam:ListRoleTags');
+    expect(pathScopedCreation.Resource).not.toEqual(
+      expect.arrayContaining(namedRoleManagement.Resource),
+    );
+  });
+
+  it('allows recovery deletion only for the control-plane stack', () => {
+    const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
+    const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
+      .PolicyDocument.Statement;
+    const recovery = statements.find(
+      (statement: any) => statement.Sid === 'RecoverOnlyRoadMap2UControlPlane',
+    );
+
+    expect(recovery).toEqual({
+      Sid: 'RecoverOnlyRoadMap2UControlPlane',
+      Effect: 'Allow',
+      Action: 'cloudformation:DeleteStack',
+      Resource:
+        'arn:aws:cloudformation:us-east-1:765932874577:stack/Roadmap-CiBootstrap/*',
+    });
+    const ordinaryStackOperations = statements.find(
+      (statement: any) => statement.Sid === 'OperateOnlyRoadMap2UBootstrapStacks',
+    );
+    expect(ordinaryStackOperations.Action).not.toContain('cloudformation:DeleteStack');
+  });
+
   it('stages the large control-plane template in one private temporary bucket prefix', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
     const bucket = template.Resources.ControlPlaneTemplateBucket.Properties;
@@ -409,6 +479,13 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).toContain('$caller.Arn -cne $HectorAdminPrincipalArn');
     expect(script.indexOf('sts get-caller-identity')).toBeLessThan(
       script.indexOf("if ($Phase -eq 'create-operator')"),
+    );
+    expect(script).toContain("$recoverableControlPlaneStates = @('ROLLBACK_COMPLETE', 'ROLLBACK_FAILED')");
+    expect(script.match(/Remove-FailedControlPlaneStack/g)).toHaveLength(2);
+    expect(script).toContain('--stack-status-filter $recoverableControlPlaneStates');
+    expect(script).toContain("--stack-name 'Roadmap-CiBootstrap'");
+    expect(script.lastIndexOf('Remove-FailedControlPlaneStack')).toBeLessThan(
+      script.indexOf("Assert-LastCommand 'Deploying Roadmap-CiBootstrap directly with CloudFormation'"),
     );
   });
 
