@@ -96,8 +96,8 @@ function lambdaLogArns(stack: Stack, stage: PolicyStage): string[] {
   return lambdaLogGroupArns(stack, stage).map((arn) => `${arn}:*`);
 }
 
-function apiLogGroupArn(stack: Stack, stage: PolicyStage): string {
-  return Arn.format(
+function apiAccessLogArn(stack: Stack, stage: PolicyStage): string {
+  return `${Arn.format(
     {
       partition: Aws.PARTITION,
       service: 'logs',
@@ -108,11 +108,7 @@ function apiLogGroupArn(stack: Stack, stage: PolicyStage): string {
       arnFormat: ArnFormat.COLON_RESOURCE_NAME,
     },
     stack,
-  );
-}
-
-function apiLogArn(stack: Stack, stage: PolicyStage): string {
-  return `${apiLogGroupArn(stack, stage)}:*`;
+  )}:*`;
 }
 
 function tableArns(stack: Stack, stage: PolicyStage): string[] {
@@ -447,12 +443,12 @@ function createCorePolicies(
           'logs:PutRetentionPolicy',
           'logs:TagResource',
         ],
-        resources: [...lambdaLogArns(stack, stage), apiLogArn(stack, stage)],
+        resources: lambdaLogArns(stack, stage),
       }),
       new iam.PolicyStatement({
         sid: 'ManageOnlyStageLogGroupTags',
         actions: ['logs:ListTagsForResource', 'logs:TagResource', 'logs:UntagResource'],
-        resources: [...lambdaLogGroupArns(stack, stage), apiLogGroupArn(stack, stage)],
+        resources: lambdaLogGroupArns(stack, stage),
       }),
       new iam.PolicyStatement({
         sid: 'InspectLogGroupsForCloudFormation',
@@ -541,6 +537,26 @@ function createCorePolicies(
           'contract-hash',
         ].map((name) => resourceArn(stack, 'ssm', 'parameter', `roadmap2u/${stage}/${name}`)),
       }),
+      new iam.PolicyStatement({
+        // The protected stage toolkit pre-provisions the exact resource-scoped log policy.
+        // The five delivery actions are permission-only and cannot be resource-scoped; this
+        // role can inspect that policy but cannot create, replace, or delete it.
+        sid: 'ManageHttpApiAccessLogDelivery',
+        actions: [
+          'logs:CreateLogDelivery',
+          'logs:DeleteLogDelivery',
+          'logs:DescribeResourcePolicies',
+          'logs:GetLogDelivery',
+          'logs:ListLogDeliveries',
+          'logs:UpdateLogDelivery',
+        ],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            'aws:RequestedRegion': stack.region,
+          },
+        },
+      }),
     ],
   });
 
@@ -573,7 +589,12 @@ function createCorePolicies(
           'apigateway:PUT',
         ],
         resources: [resourceArn(stack, 'apigateway', '/apis/*', undefined, { account: '' })],
-        conditions: stageTagConditions(stage),
+        conditions: {
+          ...stageTagConditions(stage),
+          StringEqualsIfExists: {
+            'apigateway:Request/AccessLoggingDestination': apiAccessLogArn(stack, stage),
+          },
+        },
       }),
       new iam.PolicyStatement({
         // The AWS::ApiGatewayV2::Stage provider invokes this literal dependent action on create.

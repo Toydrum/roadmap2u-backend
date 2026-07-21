@@ -273,6 +273,52 @@
                   ]
                 },
                 {
+                  "Sid": "ManageOnlyRoadMap2UToolkitApiLogGroupResources",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:DeleteLogGroup",
+                    "logs:PutRetentionPolicy",
+                    "logs:TagResource"
+                  ],
+                  "Resource": [
+                    "arn:aws:logs:us-east-1:765932874577:log-group:/aws/apigateway/roadmap-api-dev:*",
+                    "arn:aws:logs:us-east-1:765932874577:log-group:/aws/apigateway/roadmap-api-test:*",
+                    "arn:aws:logs:us-east-1:765932874577:log-group:/aws/apigateway/roadmap-api-prod:*"
+                  ]
+                },
+                {
+                  "Sid": "ManageOnlyRoadMap2UToolkitApiLogGroupTags",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:ListTagsForResource",
+                    "logs:TagResource",
+                    "logs:UntagResource"
+                  ],
+                  "Resource": [
+                    "arn:aws:logs:us-east-1:765932874577:log-group:/aws/apigateway/roadmap-api-dev",
+                    "arn:aws:logs:us-east-1:765932874577:log-group:/aws/apigateway/roadmap-api-test",
+                    "arn:aws:logs:us-east-1:765932874577:log-group:/aws/apigateway/roadmap-api-prod"
+                  ]
+                },
+                {
+                  "Sid": "ManageToolkitApiLogResourcePolicies",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogDelivery",
+                    "logs:DeleteResourcePolicy",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeResourcePolicies",
+                    "logs:PutResourcePolicy"
+                  ],
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:RequestedRegion": "us-east-1"
+                    }
+                  }
+                },
+                {
                   "Sid": "CreateToolkitOriginAccessControls",
                   "Effect": "Allow",
                   "Action": "cloudfront:CreateOriginAccessControl",

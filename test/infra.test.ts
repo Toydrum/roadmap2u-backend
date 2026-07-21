@@ -106,7 +106,7 @@ describe('stage backend infrastructure', () => {
     ['dev', 7],
     ['test', 14],
     ['prod', 30],
-  ] as const)('retains %s Lambda and HTTP API logs for %d days without sensitive fields', (stage, days) => {
+  ] as const)('retains %s Lambda logs for %d days and imports protected API logs', (stage, days) => {
     const template = backendTemplate(stage).toJSON();
     const logGroups = Object.values(template.Resources).filter(
       (resource: any) => resource.Type === 'AWS::Logs::LogGroup',
@@ -119,13 +119,19 @@ describe('stage backend infrastructure', () => {
     );
 
     expect(lambdaLogs).toHaveLength(3);
-    expect(apiLogs).toHaveLength(1);
+    expect(apiLogs).toHaveLength(0);
     expect(logGroups.every((resource) => resource.Properties.RetentionInDays === days)).toBe(true);
 
     const apiStage = Object.values(template.Resources).find(
       (resource: any) => resource.Type === 'AWS::ApiGatewayV2::Stage',
     ) as any;
+    const destination = apiStage.Properties.AccessLogSettings.DestinationArn;
     const accessLogs = JSON.stringify(apiStage.Properties.AccessLogSettings);
+    const serializedDestination = JSON.stringify(destination);
+    expect(serializedDestination).toContain(`RoadMap2U-${stage}-ApiAccessLogGroupName`);
+    expect(serializedDestination).not.toContain('ApiAccessLogGroupArn');
+    expect(serializedDestination.match(/:\\u002a|:\*/g) ?? []).toHaveLength(1);
+    expect(serializedDestination).not.toContain(':*:*');
     expect(accessLogs).toContain('$context.requestId');
     expect(accessLogs).toContain('$context.status');
     expect(accessLogs).not.toMatch(/authorization|identity|requestbody|header/i);

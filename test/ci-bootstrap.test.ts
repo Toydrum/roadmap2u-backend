@@ -226,7 +226,6 @@ describe('GitHub OIDC bootstrap', () => {
       expect(serialized).toContain(`roadmap2u-stage`);
       expect(serialized).not.toContain('AdministratorAccess');
       expect(serialized).not.toMatch(/ses:\*/i);
-      expect(serialized).not.toContain('logs:PutResourcePolicy');
 
       const core = stagePolicies.find(
         (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-core`,
@@ -274,7 +273,7 @@ describe('GitHub OIDC bootstrap', () => {
     expect(prodActions).not.toContain('cognito-idp:DeleteUserPool');
   });
 
-  it('keeps every customer-managed policy document within the IAM 6144-character limit', () => {
+  it('keeps policy-size headroom below the IAM 6144-character limit', () => {
     const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
     ) as any[];
@@ -282,7 +281,7 @@ describe('GitHub OIDC bootstrap', () => {
       expect(
         JSON.stringify(policy.Properties.PolicyDocument).length,
         policy.Properties.ManagedPolicyName,
-      ).toBeLessThanOrEqual(6144);
+      ).toBeLessThanOrEqual(6000);
     }
   });
 
@@ -328,11 +327,79 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
-  it('uses valid CloudWatch Logs ARNs in stage policies', () => {
+  it('uses valid CloudWatch Logs ARN formatting in stage policies', () => {
     const rendered = JSON.stringify(bootstrapTemplate().toJSON());
     expect(rendered).toContain(':log-group:/aws/lambda/roadmap-');
-    expect(rendered).toContain(':log-group:/aws/apigateway/roadmap-api-');
     expect(rendered).not.toContain(':log-group//aws/');
+  });
+
+  it('keeps account policy mutation out of stage roles after toolkit log bootstrap', () => {
+    const managedPolicies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+    const expectedActions = [
+      'logs:CreateLogDelivery',
+      'logs:DeleteLogDelivery',
+      'logs:DescribeResourcePolicies',
+      'logs:GetLogDelivery',
+      'logs:ListLogDeliveries',
+      'logs:UpdateLogDelivery',
+    ];
+    const expectedStatement = {
+      Action: expectedActions,
+      Condition: {
+        StringEquals: {
+          'aws:RequestedRegion': 'us-east-1',
+        },
+      },
+      Effect: 'Allow',
+      Resource: '*',
+      Sid: 'ManageHttpApiAccessLogDelivery',
+    };
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const stagePolicies = managedPolicies.filter(
+        (policy) => policy.Properties.Path === `/roadmap2u/${stage}/`,
+      );
+      const allStatements = stagePolicies.flatMap(
+        (policy) => policy.Properties.PolicyDocument.Statement,
+      );
+      const matchingStatements = allStatements.filter((statement: any) =>
+        (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).some(
+          (action: string) => expectedActions.includes(action),
+        ),
+      );
+      const allActions = allStatements.flatMap((statement: any) =>
+        Array.isArray(statement.Action) ? statement.Action : [statement.Action],
+      );
+      const apiPolicy = stagePolicies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-api`,
+      );
+      const dataPolicy = stagePolicies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-data`,
+      );
+
+      for (const forbiddenAction of [
+        'logs:*',
+        'logs:DeleteAccountPolicy',
+        'logs:DeleteResourcePolicy',
+        'logs:PutAccountPolicy',
+        'logs:PutResourcePolicy',
+      ]) {
+        expect(allActions).not.toContain(forbiddenAction);
+      }
+      expect(
+        dataPolicy.Properties.PolicyDocument.Statement.find(
+          (statement: any) => statement.Sid === 'ManageHttpApiAccessLogDelivery',
+        ),
+      ).toEqual(expectedStatement);
+      expect(
+        apiPolicy.Properties.PolicyDocument.Statement.find(
+          (statement: any) => statement.Sid === 'ManageHttpApiAccessLogDelivery',
+        ),
+      ).toBeUndefined();
+      expect(matchingStatements).toEqual([expectedStatement]);
+    }
   });
 
   it('allows both CloudFormation log-tag ARN forms while every mutation stays stage-scoped', () => {
@@ -368,14 +435,14 @@ describe('GitHub OIDC bootstrap', () => {
         'logs:PutRetentionPolicy',
         'logs:TagResource',
       ]);
-      expect(mutation.Resource).toHaveLength(4);
+      expect(mutation.Resource).toHaveLength(3);
       expect(mutation.Resource).not.toContain('*');
       expect(tagging.Action).toEqual([
         'logs:ListTagsForResource',
         'logs:TagResource',
         'logs:UntagResource',
       ]);
-      expect(tagging.Resource).toHaveLength(4);
+      expect(tagging.Resource).toHaveLength(3);
       expect(tagging.Resource).not.toContain('*');
 
       const mutationResources = JSON.stringify(mutation.Resource);
@@ -384,12 +451,13 @@ describe('GitHub OIDC bootstrap', () => {
         `/aws/lambda/roadmap-pre-signup-${stage}`,
         `/aws/lambda/roadmap-post-confirmation-${stage}`,
         `/aws/lambda/roadmap-router-${stage}`,
-        `/aws/apigateway/roadmap-api-${stage}`,
       ]) {
         expect(mutationResources).toContain(`${logGroupName}:*`);
         expect(taggingResources).toContain(logGroupName);
         expect(taggingResources).not.toContain(`${logGroupName}:*`);
       }
+      expect(mutationResources).not.toContain('/aws/apigateway/');
+      expect(taggingResources).not.toContain('/aws/apigateway/');
       for (const otherStage of ['dev', 'test', 'prod'].filter((value) => value !== stage)) {
         expect(mutationResources).not.toContain(`-${otherStage}:*`);
         expect(taggingResources).not.toContain(`-${otherStage}`);
@@ -685,6 +753,13 @@ describe('GitHub OIDC bootstrap', () => {
         'aws:ResourceTag/roadmap2u-project': 'RoadMap2U',
         'aws:ResourceTag/roadmap2u-stage': stage,
       });
+      expect(
+        JSON.stringify(
+          manageApi.Condition.StringEqualsIfExists[
+            'apigateway:Request/AccessLoggingDestination'
+          ],
+        ),
+      ).toContain(`:log-group:/aws/apigateway/roadmap-api-${stage}:*`);
       expect(manageApi.Action).not.toEqual(
         expect.arrayContaining(['apigateway:TagResource', 'apigateway:UntagResource']),
       );
