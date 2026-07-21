@@ -914,6 +914,8 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).toContain("':expectedUserId' = @{ S = $UserId }");
     expect(script).toContain('--exclusive-start-key');
     expect(script).toContain("'--consistent-read'");
+    expect(script).toContain('return $items');
+    expect(script).not.toContain('return ,$items');
     expect(script).toContain('dynamodb delete-item');
     expect(script).not.toContain('batch-write-item');
     expect(script).not.toContain('PutRequest');

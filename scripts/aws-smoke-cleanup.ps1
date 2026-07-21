@@ -123,7 +123,7 @@ function Get-UserPartitionItems(
     $exclusiveStartKey.PSObject.Properties.Count -gt 0
   )
 
-  return ,$items
+  return $items
 }
 
 function Remove-UserPartitionItems(
