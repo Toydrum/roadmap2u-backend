@@ -71,10 +71,16 @@ function Assert-LastCommand([string]$Description) {
 
 function Test-BucketExists([string]$BucketName, [string]$TemporaryDirectory) {
   $errorPath = Join-Path $TemporaryDirectory 'head-bucket.err'
-  & $awsCli s3api head-bucket `
-    --region $Region `
-    --bucket $BucketName 2> $errorPath
-  $exitCode = $LASTEXITCODE
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & $awsCli s3api head-bucket `
+      --region $Region `
+      --bucket $BucketName 2> $errorPath
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
   if ($exitCode -eq 0) {
     return $true
   }
@@ -134,12 +140,18 @@ function Clear-VersionedBucket([string]$BucketName, [string]$TemporaryDirectory)
 function Test-StackExists([string]$StackName, [string]$TemporaryDirectory) {
   $safeName = $StackName -replace '[^A-Za-z0-9-]', '_'
   $errorPath = Join-Path $TemporaryDirectory "$safeName.err"
-  & $awsCli cloudformation describe-stacks `
-    --region $Region `
-    --stack-name $StackName `
-    --query 'Stacks[0].StackStatus' `
-    --output text 2> $errorPath | Out-Null
-  $exitCode = $LASTEXITCODE
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & $awsCli cloudformation describe-stacks `
+      --region $Region `
+      --stack-name $StackName `
+      --query 'Stacks[0].StackStatus' `
+      --output text 2> $errorPath | Out-Null
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
   if ($exitCode -eq 0) {
     return $true
   }
