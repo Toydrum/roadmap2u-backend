@@ -146,6 +146,11 @@ function apiDomain(stage: PolicyStage): string {
   return stage === 'prod' ? `api.${ROOT_DOMAIN}` : `api.${stage}.${ROOT_DOMAIN}`;
 }
 
+function apiDomainTagArn(stack: Stack, stage: PolicyStage): string {
+  const region = stack.region;
+  return `arn:${Aws.PARTITION}:apigateway:${region}::/tags/arn%3A${Aws.PARTITION}%3Aapigateway%3A${region}%3A%3A%2Fdomainnames%2F${apiDomain(stage)}`;
+}
+
 function frontendDomain(stage: PolicyStage): string {
   return stage === 'prod' ? ROOT_DOMAIN : `${stage}.${ROOT_DOMAIN}`;
 }
@@ -454,6 +459,17 @@ function createCorePolicies(
         actions: ['logs:DescribeLogGroups'],
         resources: ['*'],
       }),
+      route53Statement(stack, stage, hostedZoneId, 'core'),
+      new iam.PolicyStatement({
+        sid: 'ReadStageZoneAndDnsChanges',
+        actions: ['route53:GetHostedZone'],
+        resources: [`arn:${Aws.PARTITION}:route53:::hostedzone/${hostedZoneId}`],
+      }),
+      new iam.PolicyStatement({
+        sid: 'WaitForStageDnsChanges',
+        actions: ['route53:GetChange'],
+        resources: [`arn:${Aws.PARTITION}:route53:::change/*`],
+      }),
     ],
   });
 
@@ -573,6 +589,20 @@ function createCorePolicies(
         },
       }),
       new iam.PolicyStatement({
+        sid: 'TagOnlyCreatingStageApiDomain',
+        actions: ['apigateway:PUT'],
+        resources: [apiDomainTagArn(stack, stage)],
+        conditions: {
+          ...requestTagConditions(stage),
+          'ForAllValues:StringEquals': {
+            'aws:TagKeys': CLOUDFORMATION_API_TAG_KEYS,
+          },
+          Null: {
+            'aws:TagKeys': 'false',
+          },
+        },
+      }),
+      new iam.PolicyStatement({
         sid: 'ManageOnlyStageApiDomain',
         actions: [
           'apigateway:AddCertificateToDomain',
@@ -595,17 +625,6 @@ function createCorePolicies(
         conditions: stageTagConditions(stage),
       }),
       ...certificateStatements(stack, stage),
-      route53Statement(stack, stage, hostedZoneId, 'core'),
-      new iam.PolicyStatement({
-        sid: 'ReadStageZoneAndDnsChanges',
-        actions: ['route53:GetHostedZone'],
-        resources: [`arn:${Aws.PARTITION}:route53:::hostedzone/${hostedZoneId}`],
-      }),
-      new iam.PolicyStatement({
-        sid: 'WaitForStageDnsChanges',
-        actions: ['route53:GetChange'],
-        resources: [`arn:${Aws.PARTITION}:route53:::change/*`],
-      }),
     ],
   });
   return { core, api: apiPolicy, data: dataPolicy };
