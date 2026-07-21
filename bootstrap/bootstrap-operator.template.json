@@ -114,6 +114,12 @@
                   "Resource": "*"
                 },
                 {
+                  "Sid": "RecoverOnlyRoadMap2UControlPlane",
+                  "Effect": "Allow",
+                  "Action": "cloudformation:DeleteStack",
+                  "Resource": "arn:aws:cloudformation:us-east-1:765932874577:stack/Roadmap-CiBootstrap/*"
+                },
+                {
                   "Sid": "CreateAndManageRoadMap2URoles",
                   "Effect": "Allow",
                   "Action": [
@@ -124,6 +130,7 @@
                     "iam:GetRolePolicy",
                     "iam:ListAttachedRolePolicies",
                     "iam:ListRolePolicies",
+                    "iam:ListRoleTags",
                     "iam:PutRolePolicy",
                     "iam:TagRole",
                     "iam:UntagRole",
@@ -139,6 +146,39 @@
                     "arn:aws:iam::765932874577:role/cdk-rmap2udev-*",
                     "arn:aws:iam::765932874577:role/cdk-rmap2utst-*",
                     "arn:aws:iam::765932874577:role/cdk-rmap2uprd-*"
+                  ]
+                },
+                {
+                  "Sid": "ManageOnlyExactRoadMap2URoleNames",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:DeleteRole",
+                    "iam:DeleteRolePolicy",
+                    "iam:GetRole",
+                    "iam:GetRolePolicy",
+                    "iam:ListAttachedRolePolicies",
+                    "iam:ListRolePolicies",
+                    "iam:ListRoleTags",
+                    "iam:PutRolePolicy",
+                    "iam:TagRole",
+                    "iam:UntagRole",
+                    "iam:UpdateAssumeRolePolicy",
+                    "iam:UpdateRole",
+                    "iam:UpdateRoleDescription"
+                  ],
+                  "Resource": [
+                    "arn:aws:iam::765932874577:role/roadmap2u-dev-backend-deploy",
+                    "arn:aws:iam::765932874577:role/roadmap2u-dev-frontend-deploy",
+                    "arn:aws:iam::765932874577:role/roadmap2u-dev-smoke-cleanup",
+                    "arn:aws:iam::765932874577:role/roadmap2u-test-backend-deploy",
+                    "arn:aws:iam::765932874577:role/roadmap2u-test-frontend-deploy",
+                    "arn:aws:iam::765932874577:role/roadmap2u-test-smoke-cleanup",
+                    "arn:aws:iam::765932874577:role/roadmap2u-prod-backend-deploy",
+                    "arn:aws:iam::765932874577:role/roadmap2u-prod-frontend-deploy",
+                    "arn:aws:iam::765932874577:role/roadmap2u-prod-smoke-cleanup",
+                    "arn:aws:iam::765932874577:role/roadmap2u-prod-dns-plan",
+                    "arn:aws:iam::765932874577:role/roadmap2u-prod-dns-cutover",
+                    "arn:aws:iam::765932874577:role/roadmap2u-nonprod-break-glass"
                   ]
                 },
                 {
