@@ -41,6 +41,27 @@ $awsVersion = & $awsCli --version 2>&1
 if ($LASTEXITCODE -ne 0 -or "$awsVersion" -notmatch '^aws-cli/2\.') {
   throw "RoadMap2U break-glass requires AWS CLI v2; found: $awsVersion"
 }
+$effectiveCaBundle = $env:AWS_CA_BUNDLE
+if ([string]::IsNullOrWhiteSpace("$effectiveCaBundle")) {
+  $profileCaBundle = & $awsCli configure get ca_bundle --profile $AdminProfile
+  $profileCaBundleExitCode = $LASTEXITCODE
+  if (
+    $profileCaBundleExitCode -notin @(0, 1) -or
+    ($profileCaBundleExitCode -eq 1 -and -not [string]::IsNullOrWhiteSpace("$profileCaBundle"))
+  ) {
+    throw "Reading the AWS CA bundle for profile $AdminProfile failed with exit code $profileCaBundleExitCode."
+  }
+  $effectiveCaBundle = $profileCaBundle
+}
+if (-not [string]::IsNullOrWhiteSpace("$effectiveCaBundle")) {
+  $effectiveCaBundle = [Environment]::ExpandEnvironmentVariables("$effectiveCaBundle".Trim())
+  if (-not (Test-Path -LiteralPath $effectiveCaBundle -PathType Leaf)) {
+    throw "The effective AWS CA bundle does not exist: $effectiveCaBundle"
+  }
+  $effectiveCaBundle = (Resolve-Path -LiteralPath $effectiveCaBundle).Path
+} else {
+  $effectiveCaBundle = $null
+}
 
 function Assert-LastCommand([string]$Description) {
   if ($LASTEXITCODE -ne 0) {
@@ -153,6 +174,7 @@ $previous = @{
   SecretKey = $env:AWS_SECRET_ACCESS_KEY
   SessionToken = $env:AWS_SESSION_TOKEN
   Region = $env:AWS_REGION
+  CaBundle = $env:AWS_CA_BUNDLE
 }
 $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) (
   'roadmap2u-break-glass-' + [Guid]::NewGuid()
@@ -162,6 +184,7 @@ $env:AWS_ACCESS_KEY_ID = $credentials.AccessKeyId
 $env:AWS_SECRET_ACCESS_KEY = $credentials.SecretAccessKey
 $env:AWS_SESSION_TOKEN = $credentials.SessionToken
 $env:AWS_REGION = $Region
+$env:AWS_CA_BUNDLE = $effectiveCaBundle
 
 try {
   $callerAccount = & $awsCli sts get-caller-identity --query Account --output text
@@ -196,6 +219,7 @@ try {
   $env:AWS_SECRET_ACCESS_KEY = $previous.SecretKey
   $env:AWS_SESSION_TOKEN = $previous.SessionToken
   $env:AWS_REGION = $previous.Region
+  $env:AWS_CA_BUNDLE = $previous.CaBundle
 
   if (Test-Path -LiteralPath $temporaryDirectory) {
     $resolvedTemporaryPath = (Resolve-Path -LiteralPath $temporaryDirectory).Path

@@ -98,6 +98,117 @@ exit 2
   }
 }
 
+function runBreakGlassWithFakeAws() {
+  const fakeDirectory = mkdtempSync(join(tmpdir(), 'roadmap2u-fake-break-glass-'));
+  const windows = process.platform === 'win32';
+  const fakeAwsPath = join(fakeDirectory, windows ? 'aws.cmd' : 'aws');
+  const caBundlePath = join(fakeDirectory, 'trusted-ca.pem');
+  const fakeAws = windows
+    ? `@echo off
+if "%~1"=="--version" (
+  echo aws-cli/2.36.4 Python/3.13 Windows/11 exe/AMD64
+  exit /b 0
+)
+if "%~1"=="configure" (
+  echo %FAKE_PROFILE_CA_BUNDLE%
+  exit /b 0
+)
+if "%~1"=="sts" (
+  if "%~2"=="assume-role" (
+    echo {"AccessKeyId":"ASIATEST","SecretAccessKey":"secret","SessionToken":"token"}
+    exit /b 0
+  )
+  if /I not "%AWS_CA_BUNDLE%"=="%FAKE_PROFILE_CA_BUNDLE%" (
+    echo temporary session did not inherit AWS_CA_BUNDLE 1>&2
+    exit /b 7
+  )
+  echo 765932874577
+  exit /b 0
+)
+if "%~1"=="s3api" (
+  if "%~2"=="list-object-versions" echo {"Versions":[],"DeleteMarkers":[]}
+  exit /b 0
+)
+if "%~1"=="cloudformation" (
+  if "%~2"=="describe-stacks" echo ROLLBACK_COMPLETE
+  exit /b 0
+)
+exit /b 2
+`
+    : `#!/usr/bin/env bash
+if [[ "$1" == "--version" ]]; then
+  echo "aws-cli/2.36.4 Python/3.13 Linux/amd64"
+  exit 0
+fi
+if [[ "$1" == "configure" ]]; then
+  echo "$FAKE_PROFILE_CA_BUNDLE"
+  exit 0
+fi
+if [[ "$1" == "sts" ]]; then
+  if [[ "$2" == "assume-role" ]]; then
+    echo '{"AccessKeyId":"ASIATEST","SecretAccessKey":"secret","SessionToken":"token"}'
+    exit 0
+  fi
+  if [[ "$AWS_CA_BUNDLE" != "$FAKE_PROFILE_CA_BUNDLE" ]]; then
+    echo 'temporary session did not inherit AWS_CA_BUNDLE' >&2
+    exit 7
+  fi
+  echo '765932874577'
+  exit 0
+fi
+if [[ "$1" == "s3api" ]]; then
+  [[ "$2" == "list-object-versions" ]] && echo '{"Versions":[],"DeleteMarkers":[]}'
+  exit 0
+fi
+if [[ "$1" == "cloudformation" ]]; then
+  [[ "$2" == "describe-stacks" ]] && echo 'ROLLBACK_COMPLETE'
+  exit 0
+fi
+exit 2
+`;
+
+  try {
+    writeFileSync(fakeAwsPath, fakeAws, 'utf8');
+    writeFileSync(caBundlePath, 'test-ca', 'utf8');
+    if (!windows) chmodSync(fakeAwsPath, 0o755);
+
+    const environment = { ...process.env };
+    const pathKey = Object.keys(environment).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH';
+    environment[pathKey] = `${fakeDirectory}${delimiter}${environment[pathKey] ?? ''}`;
+    environment.FAKE_PROFILE_CA_BUNDLE = caBundlePath;
+    delete environment.AWS_CA_BUNDLE;
+
+    const result = spawnSync(windows ? 'powershell.exe' : 'pwsh', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      breakGlassScriptPath,
+      '-Stage',
+      'dev',
+      '-Confirmation',
+      'DESTROY dev',
+      '-MfaCode',
+      '123456',
+      '-AdminProfile',
+      'mock-profile',
+    ], {
+      encoding: 'utf8',
+      env: environment,
+      timeout: 15_000,
+    });
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      error: result.error?.message,
+    };
+  } finally {
+    rmSync(fakeDirectory, { recursive: true, force: true });
+  }
+}
+
 describe('custom stage CDK bootstrap template', () => {
   it('is versioned and parameterized for the three fixed stage qualifiers', () => {
     expect(existsSync(templatePath)).toBe(true);
@@ -539,6 +650,16 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).not.toContain('Roadmap-prod-');
   });
 
+  it(
+    'propagates the profile CA bundle into the break-glass temporary session',
+    () => {
+      const result = runBreakGlassWithFakeAws();
+
+      expect(result, JSON.stringify(result)).toMatchObject({ status: 0, error: undefined });
+    },
+    20_000,
+  );
+
   it('provides a stage-checked MFA smoke cleanup with paginated delete-only DynamoDB access', () => {
     expect(existsSync(smokeCleanupScriptPath)).toBe(true);
     const script = readFileSync(smokeCleanupScriptPath, 'utf8');
@@ -547,6 +668,11 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).toContain("[ValidatePattern('^smoke_[a-z0-9_]{1,14}$')]");
     expect(script).toContain('roadmap2u-$Stage-smoke-cleanup');
     expect(script).toContain('--serial-number $HectorMfaArn');
+    expect(script).toContain('$effectiveCaBundle = $env:AWS_CA_BUNDLE');
+    expect(script).toContain('configure get ca_bundle --profile $AdminProfile');
+    expect(script).toContain('CaBundle = $env:AWS_CA_BUNDLE');
+    expect(script).toContain('$env:AWS_CA_BUNDLE = $effectiveCaBundle');
+    expect(script).toContain('$env:AWS_CA_BUNDLE = $previous.CaBundle');
     expect(script).toContain('/roadmap2u/$Stage/user-pool-id');
     expect(script).toContain('admin-get-user');
     expect(script).toContain('admin-delete-user');
