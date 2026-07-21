@@ -29,7 +29,7 @@ El diseño detallado está en [docs/architecture.md](docs/architecture.md).
 Requisitos:
 
 - Node.js 22 (véase `.nvmrc`).
-- npm 10.
+- npm 10.9.8 (véase `packageManager` en `package.json`).
 - Un checkout del frontend `RoadMap2U` junto a este repositorio para validar la paridad contractual.
 - Credenciales AWS solo cuando un operador autorizado vaya a consultar o desplegar; no son necesarias para typecheck ni tests unitarios.
 

@@ -12,10 +12,16 @@ describe('backend GitHub Actions', () => {
   it('runs reproducible contract, type, test and three-stage synth checks', () => {
     const contents = workflow('ci.yml');
     expect(contents).toContain('pull_request:');
-    expect(contents).toContain('npm ci');
+    expect(contents).toContain(
+      'npm install --global npm@10.9.8 --ignore-scripts --no-audit --no-fund',
+    );
+    expect(contents).toContain('test "$(npm --version)" = "10.9.8"');
+    expect(contents).toContain('npm ci --ignore-scripts --no-audit --no-fund');
     expect(contents).toContain('npm run contracts:check');
     expect(contents).toContain('npm run typecheck');
     expect(contents).toContain('npm test');
+    expect(contents).toContain('npx --no-install cdk synth');
+    expect(contents).not.toMatch(/uses:\s+\S+@v\d/);
     for (const stage of ['dev', 'test', 'prod']) {
       expect(contents).toContain(`stage=${stage}`);
     }
@@ -23,6 +29,12 @@ describe('backend GitHub Actions', () => {
 
   it('deploys only an exact SHA with OIDC and release-marker promotion proof', () => {
     const contents = workflow('deploy.yml');
+    expect(contents.match(/id-token: write/g) ?? []).toHaveLength(1);
+    expect(contents.indexOf('id-token: write')).toBeGreaterThan(contents.indexOf('\n  deploy:\n'));
+    expect(contents).toContain('npm ci --ignore-scripts --no-audit --no-fund');
+    expect(contents).toContain('npx --no-install cdk diff');
+    expect(contents).toContain('npx --no-install cdk deploy');
+    expect(contents).not.toMatch(/uses:\s+\S+@v\d/);
     expect(contents).toContain("vars.AWS_DEPLOY_ENABLED == 'true'");
     expect(contents).toContain('allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}');
     expect(contents).toContain('^[0-9a-f]{40}$');
@@ -45,6 +57,7 @@ describe('backend GitHub Actions', () => {
     const contents = workflow('dns-cutover.yml');
     expect(contents).toContain('workflow_dispatch:');
     expect(contents).not.toContain('push:');
+    expect(contents).not.toMatch(/uses:\s+\S+@v\d/);
     expect(contents).toContain("vars.AWS_DEPLOY_ENABLED == 'true'");
     expect(contents).toContain("vars.DNS_CUTOVER_ENABLED == 'true'");
     expect(contents).toContain('CUTOVER roadmap2u.com');

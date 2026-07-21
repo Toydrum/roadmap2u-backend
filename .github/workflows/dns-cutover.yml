@@ -52,7 +52,7 @@ jobs:
           esac
 
       - name: Configure read and plan credentials through the DNS OIDC role
-        uses: aws-actions/configure-aws-credentials@v6.1.1
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
           role-to-assume: ${{ vars.DNS_PLAN_ROLE_ARN }}
           role-session-name: production-dns-plan-${{ github.run_id }}
@@ -288,7 +288,7 @@ jobs:
 
       - name: Upload immutable DNS plan
         id: upload-plan
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: production-dns-plan-${{ inputs.operation }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: dns-plan/
@@ -334,7 +334,7 @@ jobs:
           test -n "$EXPECTED_ARTIFACT_DIGEST"
 
       - name: Download exactly the planned artifact by immutable ID
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ needs.plan.outputs.artifact-id }}
           path: approved-plan
@@ -364,7 +364,7 @@ jobs:
           jq -e '.Changes | type == "array" and length > 0' rollback-batch.json >/dev/null
 
       - name: Configure apply credentials through the DNS OIDC role
-        uses: aws-actions/configure-aws-credentials@v6.1.1
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
           role-to-assume: ${{ vars.DNS_CUTOVER_ROLE_ARN }}
           role-session-name: production-dns-apply-${{ github.run_id }}
@@ -443,7 +443,7 @@ jobs:
 
       - name: Preserve apply evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: production-dns-apply-${{ inputs.operation }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: apply-result/

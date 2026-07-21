@@ -22,7 +22,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   prepare:
@@ -64,6 +63,9 @@ jobs:
           echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
 
   deploy:
+    permissions:
+      contents: read
+      id-token: write
     needs: prepare
     if: ${{ needs.prepare.result == 'success' && vars.AWS_DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-24.04
@@ -90,7 +92,7 @@ jobs:
         working-directory: .
 
       - name: Checkout immutable backend release
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           fetch-depth: 0
@@ -98,7 +100,7 @@ jobs:
 
       - name: Checkout frontend contract source
         if: ${{ needs.prepare.outputs.operation == 'deploy' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: Toydrum/RoadMap2U
           path: RoadMap2U
@@ -111,7 +113,7 @@ jobs:
           git cat-file -e "${SHA}^{commit}"
 
       - name: Use Node.js 22
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
           cache: npm
@@ -120,7 +122,7 @@ jobs:
       - name: Validate release
         run: |
           set -euo pipefail
-          npm ci
+          npm ci --ignore-scripts --no-audit --no-fund
           npm run typecheck
           if [[ "$OPERATION" != "deploy" ]]; then
             npm test -- --exclude test/contracts-parity.test.ts
@@ -130,7 +132,7 @@ jobs:
           fi
 
       - name: Configure AWS credentials through OIDC
-        uses: aws-actions/configure-aws-credentials@v6.1.1
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           role-session-name: backend-${{ needs.prepare.outputs.stage }}-${{ github.run_id }}
@@ -154,7 +156,7 @@ jobs:
 
       - name: Review CDK diff
         run: >-
-          npx cdk diff
+          npx --no-install cdk diff
           "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"
           --fail=false
           -c stage="${STAGE}"
@@ -163,7 +165,7 @@ jobs:
 
       - name: Deploy selected stage
         run: >-
-          npx cdk deploy
+          npx --no-install cdk deploy
           "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"
           --require-approval never
           -c stage="${STAGE}"

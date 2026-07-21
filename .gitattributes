@@ -1,0 +1,2 @@
+# GitHub Actions and embedded Bash must remain byte-stable on every workstation.
+*.yml text eol=lf
