@@ -286,6 +286,33 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
+  it('keeps Cognito lifecycle permissions in the attached data policy to preserve API policy headroom', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const api = policies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-api`,
+      );
+      const data = policies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-data`,
+      );
+      const apiStatements = api.Properties.PolicyDocument.Statement;
+      const dataStatements = data.Properties.PolicyDocument.Statement;
+
+      expect(
+        dataStatements.find((statement: any) => statement.Sid === 'CreateOnlyTaggedStageUserPools'),
+      ).toBeDefined();
+      expect(
+        dataStatements.find((statement: any) => statement.Sid === 'ManageOnlyTaggedStageUserPools'),
+      ).toBeDefined();
+      expect(
+        apiStatements.some((statement: any) => statement.Sid.includes('StageUserPools')),
+      ).toBe(false);
+    }
+  });
+
   it('uses valid CloudWatch Logs ARNs in stage policies', () => {
     const rendered = JSON.stringify(bootstrapTemplate().toJSON());
     expect(rendered).toContain(':log-group:/aws/lambda/roadmap-');
@@ -573,6 +600,9 @@ describe('GitHub OIDC bootstrap', () => {
       const initialDomainTag = statements.find(
         (statement: any) => statement.Sid === 'TagOnlyCreatingStageApiDomain',
       );
+      const initialStageTag = statements.find(
+        (statement: any) => statement.Sid === 'TagOnlyCreatingStageApiStage',
+      );
 
       expect(createApi.Action).toBe('apigateway:POST');
       expect(createApi.Condition.StringEquals).toMatchObject({
@@ -615,6 +645,28 @@ describe('GitHub OIDC bootstrap', () => {
       );
       expect(initialDomainTag.Condition.Null).toEqual({ 'aws:TagKeys': 'false' });
       expect(JSON.stringify(initialDomainTag.Condition)).not.toContain('aws:ResourceTag');
+      expect(initialStageTag).toBeDefined();
+      expect(initialStageTag.Action).toBe('apigateway:TagResource');
+      expect(JSON.stringify(initialStageTag.Resource)).toContain(
+        ':apigateway:us-east-1::/apis/*/stages',
+      );
+      expect(JSON.stringify(initialStageTag.Resource)).not.toContain('/tags/*');
+      expect(initialStageTag.Condition.StringEquals).toEqual({
+        'aws:ResourceTag/roadmap2u-project': 'RoadMap2U',
+        'aws:ResourceTag/roadmap2u-stage': stage,
+        'aws:RequestTag/roadmap2u-project': 'RoadMap2U',
+        'aws:RequestTag/roadmap2u-stage': stage,
+      });
+      expect(initialStageTag.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(
+        cloudFormationApiTagKeys,
+      );
+      expect(initialStageTag.Condition.Null).toEqual({ 'aws:TagKeys': 'false' });
+      const literalStageTagStatements = statements.filter((statement: any) =>
+        (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).includes(
+          'apigateway:TagResource',
+        ),
+      );
+      expect(literalStageTagStatements).toEqual([initialStageTag]);
       expect(manageApi.Condition.StringEquals).toMatchObject({
         'aws:ResourceTag/roadmap2u-project': 'RoadMap2U',
         'aws:ResourceTag/roadmap2u-stage': stage,
@@ -698,10 +750,10 @@ describe('GitHub OIDC bootstrap', () => {
     expect(distributionManage.Action).toContain('cloudfront:ListTagsForResource');
   });
 
-  it('uses IAM action names accepted by API Gateway and S3', () => {
+  it('uses IAM action names exercised by CloudFormation for API Gateway and S3', () => {
     const template = bootstrapTemplate().toJSON();
     const rendered = JSON.stringify(template);
-    expect(rendered).not.toContain('apigateway:TagResource');
+    expect(rendered).toContain('apigateway:TagResource');
     expect(rendered).not.toContain('apigateway:UntagResource');
     expect(rendered).not.toContain('s3:GetBucketEncryption');
     expect(rendered).not.toContain('s3:PutBucketEncryption');
