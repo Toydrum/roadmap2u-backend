@@ -351,6 +351,18 @@ function createCorePolicies(
         ],
       }),
       new iam.PolicyStatement({
+        sid: 'ReadOnlySelectedBootstrapVersion',
+        actions: ['ssm:GetParameters'],
+        resources: [
+          resourceArn(
+            stack,
+            'ssm',
+            'parameter',
+            `cdk-bootstrap/${BOOTSTRAP_QUALIFIERS[stage]}/version`,
+          ),
+        ],
+      }),
+      new iam.PolicyStatement({
         sid: 'ManageOnlyStageLogGroups',
         actions: [
           'logs:CreateLogGroup',
