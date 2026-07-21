@@ -44,4 +44,4 @@ export function handleEvent(event: PreSignUpTriggerEvent): PreSignUpTriggerEvent
   return event;
 }
 
-export const handler = (event: PreSignUpTriggerEvent) => handleEvent(event);
+export const handler = async (event: PreSignUpTriggerEvent) => handleEvent(event);

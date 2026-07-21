@@ -1,6 +1,6 @@
 import type { PreSignUpTriggerEvent } from 'aws-lambda';
 import { describe, expect, it } from 'vitest';
-import { handleEvent } from '../lambda/pre-signup';
+import { handleEvent, handler } from '../lambda/pre-signup';
 
 function eventOf(
   userName: string,
@@ -34,6 +34,15 @@ function eventOf(
 }
 
 describe('Cognito PreSignUp contract', () => {
+  it('returns the trigger event through an asynchronous Lambda handler', async () => {
+    const event = eventOf('smoke_adult', 'adult+signup@example.com');
+
+    const invocation = handler(event);
+
+    expect(invocation).toBeInstanceOf(Promise);
+    await expect(invocation).resolves.toBe(event);
+  });
+
   it.each(['abc', 'a_9', 'abcdefghijklmnopqrst'])(
     'accepts the canonical username %s without rewriting it',
     (username) => {
