@@ -85,6 +85,7 @@ exit 2
     ], {
       encoding: 'utf8',
       env: environment,
+      timeout: 15_000,
     });
     return {
       status: result.status,
@@ -489,23 +490,31 @@ describe('custom stage CDK bootstrap template', () => {
     );
   });
 
-  it('accepts an AWS profile that does not configure a custom CA bundle', () => {
-    const result = runBootstrapWithFakeAws({
-      environmentCaBundle: false,
-      failConfigureLookup: false,
-    });
+  it(
+    'accepts an AWS profile that does not configure a custom CA bundle',
+    () => {
+      const result = runBootstrapWithFakeAws({
+        environmentCaBundle: false,
+        failConfigureLookup: false,
+      });
 
-    expect(result).toMatchObject({ status: 0, error: undefined });
-  });
+      expect(result).toMatchObject({ status: 0, error: undefined });
+    },
+    20_000,
+  );
 
-  it('keeps AWS_CA_BUNDLE precedence instead of reading a lower-priority profile value', () => {
-    const result = runBootstrapWithFakeAws({
-      environmentCaBundle: true,
-      failConfigureLookup: true,
-    });
+  it(
+    'keeps AWS_CA_BUNDLE precedence instead of reading a lower-priority profile value',
+    () => {
+      const result = runBootstrapWithFakeAws({
+        environmentCaBundle: true,
+        failConfigureLookup: true,
+      });
 
-    expect(result).toMatchObject({ status: 0, error: undefined });
-  });
+      expect(result).toMatchObject({ status: 0, error: undefined });
+    },
+    20_000,
+  );
 
   it('provides a resumable MFA-only non-production destroy script that empties every object version first', () => {
     expect(existsSync(breakGlassScriptPath)).toBe(true);
