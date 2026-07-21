@@ -1,0 +1,9 @@
+node_modules/
+cdk.out/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+cdk.context.json
+cdk-outputs*.json

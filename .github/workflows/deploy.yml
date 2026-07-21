@@ -1,0 +1,253 @@
+name: Backend deploy and promotion
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Target GitHub Environment
+        required: true
+        type: choice
+        options: [dev, test, prod]
+      sha:
+        description: Exact 40-character backend commit SHA already proven in the previous stage
+        required: true
+        type: string
+      operation:
+        description: Promote from the previous stage or redeploy a same-stage release for rollback
+        required: true
+        type: choice
+        options: [promote, rollback]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      stage: ${{ steps.release.outputs.stage }}
+      sha: ${{ steps.release.outputs.sha }}
+      operation: ${{ steps.release.outputs.operation }}
+    steps:
+      - id: release
+        name: Resolve immutable release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          INPUT_STAGE: ${{ inputs.stage }}
+          INPUT_SHA: ${{ inputs.sha }}
+          INPUT_OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            STAGE=dev
+            SHA="$EVENT_SHA"
+            OPERATION=deploy
+          else
+            STAGE="$INPUT_STAGE"
+            SHA="${INPUT_SHA,,}"
+            OPERATION="$INPUT_OPERATION"
+          fi
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "A full 40-character commit SHA is required; branches such as main are forbidden." >&2
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$STAGE" == "dev" && "$OPERATION" != "rollback" ]]; then
+            echo "dev receives new releases only from a push to main; manual dev runs are rollback-only." >&2
+            exit 1
+          fi
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: prepare
+    if: ${{ needs.prepare.result == 'success' && vars.AWS_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: ${{ needs.prepare.outputs.stage }}
+    concurrency:
+      group: backend-${{ needs.prepare.outputs.stage }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: roadmap2u-backend
+    env:
+      AWS_REGION: us-east-1
+      STAGE: ${{ needs.prepare.outputs.stage }}
+      SHA: ${{ needs.prepare.outputs.sha }}
+      OPERATION: ${{ needs.prepare.outputs.operation }}
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      HOSTED_ZONE_ID: ${{ vars.HOSTED_ZONE_ID }}
+    steps:
+      - name: Confirm deployment gate
+        env:
+          AWS_DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED }}
+        run: test "$AWS_DEPLOY_ENABLED" = "true"
+        working-directory: .
+
+      - name: Checkout immutable backend release
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+          path: roadmap2u-backend
+
+      - name: Checkout frontend contract source
+        if: ${{ needs.prepare.outputs.operation == 'deploy' }}
+        uses: actions/checkout@v6
+        with:
+          repository: Toydrum/RoadMap2U
+          path: RoadMap2U
+
+      - name: Verify checked-out SHA
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$SHA"
+          git cat-file -e "${SHA}^{commit}"
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: roadmap2u-backend/package-lock.json
+
+      - name: Validate release
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run typecheck
+          if [[ "$OPERATION" != "deploy" ]]; then
+            npm test -- --exclude test/contracts-parity.test.ts
+          else
+            npm run contracts:check
+            ROADMAP2U_FRONTEND_PATH="${GITHUB_WORKSPACE}/RoadMap2U" npm test
+          fi
+
+      - name: Configure AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@v6.1.1
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: backend-${{ needs.prepare.outputs.stage }}-${{ github.run_id }}
+          aws-region: us-east-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - name: Verify AWS account and promotion proof
+        run: |
+          set -euo pipefail
+          ACTUAL_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          test "$ACTUAL_ACCOUNT" = "$AWS_ACCOUNT_ID"
+
+          if [[ "$OPERATION" == "promote" ]]; then
+            if [[ "$STAGE" == "test" ]]; then PREVIOUS=dev; else PREVIOUS=test; fi
+            PROOF="$(aws ssm get-parameter --name "/roadmap2u/${PREVIOUS}/backend-releases/${SHA}" --query Parameter.Value --output text)"
+            test "$PROOF" = "$SHA"
+          elif [[ "$OPERATION" == "rollback" ]]; then
+            PROOF="$(aws ssm get-parameter --name "/roadmap2u/${STAGE}/backend-releases/${SHA}" --query Parameter.Value --output text)"
+            test "$PROOF" = "$SHA"
+          fi
+
+      - name: Review CDK diff
+        run: >-
+          npx cdk diff
+          "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"
+          --fail=false
+          -c stage="${STAGE}"
+          -c AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}"
+          -c HOSTED_ZONE_ID="${HOSTED_ZONE_ID}"
+
+      - name: Deploy selected stage
+        run: >-
+          npx cdk deploy
+          "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"
+          --require-approval never
+          -c stage="${STAGE}"
+          -c AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}"
+          -c HOSTED_ZONE_ID="${HOSTED_ZONE_ID}"
+
+      - name: Validate deployed stacks and public configuration
+        run: |
+          set -euo pipefail
+          for STACK in "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"; do
+            STATUS="$(aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].StackStatus' --output text)"
+            [[ "$STATUS" == *_COMPLETE ]]
+            aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].Outputs[].{Key:OutputKey,Value:OutputValue}' --output table
+          done
+
+          aws ssm get-parameters --names \
+            "/roadmap2u/${STAGE}/region" \
+            "/roadmap2u/${STAGE}/user-pool-id" \
+            "/roadmap2u/${STAGE}/user-pool-client-id" \
+            "/roadmap2u/${STAGE}/api-base-url" \
+            "/roadmap2u/${STAGE}/frontend-bucket" \
+            "/roadmap2u/${STAGE}/cloudfront-distribution-id" \
+            "/roadmap2u/${STAGE}/frontend-url" \
+            "/roadmap2u/${STAGE}/contract-hash" \
+            --output json > deployed-config.json
+          jq -e '
+            (.InvalidParameters | length) == 0 and
+            (.Parameters | length) == 8 and
+            all(.Parameters[]; (.Value | type) == "string" and (.Value | length) > 0)
+          ' deployed-config.json >/dev/null
+
+          parameter() {
+            jq -r --arg name "/roadmap2u/${STAGE}/$1" '.Parameters[] | select(.Name == $name) | .Value' deployed-config.json
+          }
+          test "$(parameter region)" = "us-east-1"
+          API_BASE_URL="$(parameter api-base-url)"
+          FRONTEND_URL="$(parameter frontend-url)"
+          test "${API_BASE_URL%/v1}" = "$API_BASE_URL"
+          test "$API_BASE_URL" = "https://$([[ $STAGE == prod ]] && echo api.roadmap2u.com || echo api.$STAGE.roadmap2u.com)"
+          test "$FRONTEND_URL" = "https://$([[ $STAGE == prod ]] && echo roadmap2u.com || echo $STAGE.roadmap2u.com)"
+          test "$(parameter frontend-bucket)" = "roadmap2u-${STAGE}-${AWS_ACCOUNT_ID}"
+          test "$(parameter contract-hash)" = "$(npm run --silent contracts:hash)"
+          jq -r '.Parameters[] | [.Name, .Value] | @tsv' deployed-config.json
+
+      - name: Smoke-test protected API and exact CORS allowlist
+        run: |
+          set -euo pipefail
+          API_BASE_URL="$(jq -r --arg name "/roadmap2u/${STAGE}/api-base-url" '.Parameters[] | select(.Name == $name) | .Value' deployed-config.json)"
+          if [[ "$STAGE" == prod ]]; then
+            ALLOWED_ORIGINS=("https://roadmap2u.com")
+          else
+            ALLOWED_ORIGINS=("https://$STAGE.roadmap2u.com" "http://localhost:4200" "http://localhost:8826")
+          fi
+
+          for ORIGIN in "${ALLOWED_ORIGINS[@]}"; do
+            STATUS="$(curl --silent --show-error --output /dev/null --dump-header preflight.headers --write-out '%{http_code}' \
+              --request OPTIONS \
+              --header "Origin: $ORIGIN" \
+              --header 'Access-Control-Request-Method: GET' \
+              "${API_BASE_URL}/v1/me")"
+            test "$STATUS" = "204"
+            tr -d '\r' < preflight.headers |
+              grep --ignore-case --fixed-strings --line-regexp --quiet "access-control-allow-origin: $ORIGIN"
+          done
+
+          curl --silent --show-error --output /dev/null --dump-header rejected.headers \
+            --request OPTIONS \
+            --header 'Origin: https://not-roadmap2u.example' \
+            --header 'Access-Control-Request-Method: GET' \
+            "${API_BASE_URL}/v1/me"
+          ! grep --ignore-case --quiet '^access-control-allow-origin:' rejected.headers
+
+          PRIMARY_ORIGIN="${ALLOWED_ORIGINS[0]}"
+          STATUS="$(curl --silent --show-error --output response.json --dump-header response.headers --write-out '%{http_code}' \
+            --header "Origin: $PRIMARY_ORIGIN" \
+            "${API_BASE_URL}/v1/me")"
+          test "$STATUS" = "401"
+          grep --ignore-case --quiet '^content-type: application/json' response.headers
+          tr -d '\r' < response.headers |
+            grep --ignore-case --fixed-strings --line-regexp --quiet "access-control-allow-origin: $PRIMARY_ORIGIN"
+          jq -e '.message | type == "string"' response.json >/dev/null
+
+      - name: Record exact successful backend SHA
+        run: |
+          set -euo pipefail
+          aws ssm put-parameter --name "/roadmap2u/${STAGE}/backend-releases/${SHA}" --type String --value "$SHA" --overwrite
+          aws ssm put-parameter --name "/roadmap2u/${STAGE}/backend-release-sha" --type String --value "$SHA" --overwrite

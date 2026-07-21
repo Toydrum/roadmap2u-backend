@@ -1,0 +1,60 @@
+name: Backend CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: roadmap2u-backend
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v6
+        with:
+          path: roadmap2u-backend
+
+      - name: Checkout frontend contract source
+        uses: actions/checkout@v6
+        with:
+          repository: Toydrum/RoadMap2U
+          path: RoadMap2U
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: roadmap2u-backend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify vendored contracts
+        run: npm run contracts:check
+        env:
+          ROADMAP2U_FRONTEND_PATH: ${{ github.workspace }}/RoadMap2U
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+        env:
+          ROADMAP2U_FRONTEND_PATH: ${{ github.workspace }}/RoadMap2U
+
+      - name: Synthesize dev
+        run: npx cdk synth --quiet -c stage=dev -c AWS_ACCOUNT_ID=000000000000 -c HOSTED_ZONE_ID=Z0000000000000
+
+      - name: Synthesize test
+        run: npx cdk synth --quiet -c stage=test -c AWS_ACCOUNT_ID=000000000000 -c HOSTED_ZONE_ID=Z0000000000000
+
+      - name: Synthesize prod
+        run: npx cdk synth --quiet -c stage=prod -c AWS_ACCOUNT_ID=000000000000 -c HOSTED_ZONE_ID=Z0000000000000

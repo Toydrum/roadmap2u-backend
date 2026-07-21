@@ -1,0 +1,451 @@
+name: Future production DNS cutover
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Plan and then apply a CloudFront cutover or an exact DNS rollback
+        required: true
+        type: choice
+        options: [cutover, rollback]
+      confirmation:
+        description: Type CUTOVER roadmap2u.com or ROLLBACK roadmap2u.com exactly
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-dns-cutover
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: ${{ vars.AWS_DEPLOY_ENABLED == 'true' && vars.DNS_CUTOVER_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: prod
+    outputs:
+      artifact-id: ${{ steps.upload-plan.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload-plan.outputs.artifact-digest }}
+    env:
+      AWS_REGION: us-east-1
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      HOSTED_ZONE_ID: ${{ vars.HOSTED_ZONE_ID }}
+      OPERATION: ${{ inputs.operation }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - name: Confirm both safety gates and typed intent
+        env:
+          AWS_DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED }}
+          DNS_CUTOVER_ENABLED: ${{ vars.DNS_CUTOVER_ENABLED }}
+        run: |
+          set -euo pipefail
+          test "$AWS_DEPLOY_ENABLED" = "true"
+          test "$DNS_CUTOVER_ENABLED" = "true"
+          case "$OPERATION" in
+            cutover) test "$CONFIRMATION" = "CUTOVER roadmap2u.com" ;;
+            rollback) test "$CONFIRMATION" = "ROLLBACK roadmap2u.com" ;;
+            *) exit 2 ;;
+          esac
+
+      - name: Configure read and plan credentials through the DNS OIDC role
+        uses: aws-actions/configure-aws-credentials@v6.1.1
+        with:
+          role-to-assume: ${{ vars.DNS_PLAN_ROLE_ARN }}
+          role-session-name: production-dns-plan-${{ github.run_id }}
+          aws-region: us-east-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - name: Verify AWS account
+        run: |
+          set -euo pipefail
+          ACTUAL_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          test "$ACTUAL_ACCOUNT" = "$AWS_ACCOUNT_ID"
+
+      - name: Verify releases and prepared CloudFront distribution
+        run: |
+          set -euo pipefail
+          mkdir -p dns-plan
+          BACKEND_RELEASE_SHA="$(aws ssm get-parameter \
+            --name '/roadmap2u/prod/backend-release-sha' \
+            --query Parameter.Value \
+            --output text)"
+          FRONTEND_RELEASE_SHA="$(aws ssm get-parameter \
+            --name '/roadmap2u/prod/frontend-release-sha' \
+            --query Parameter.Value \
+            --output text)"
+          [[ "$BACKEND_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$FRONTEND_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          jq -n \
+            --arg backend "$BACKEND_RELEASE_SHA" \
+            --arg frontend "$FRONTEND_RELEASE_SHA" \
+            '{backend:$backend,frontend:$frontend}' > dns-plan/release-markers.json
+
+          DISTRIBUTION_ID="$(aws ssm get-parameter \
+            --name '/roadmap2u/prod/cloudfront-distribution-id' \
+            --query Parameter.Value \
+            --output text)"
+          aws cloudfront get-distribution \
+            --id "$DISTRIBUTION_ID" \
+            --output json > dns-plan/distribution.json
+          jq -e '
+            .Distribution.Status == "Deployed" and
+            .Distribution.DistributionConfig.Enabled == true and
+            (.Distribution.DistributionConfig.Aliases.Items // [] | index("roadmap2u.com") != null) and
+            (.Distribution.DistributionConfig.Aliases.Items // [] | index("www.roadmap2u.com") != null)
+          ' dns-plan/distribution.json >/dev/null
+          DISTRIBUTION_DOMAIN="$(jq -r '.Distribution.DomainName' dns-plan/distribution.json)"
+          test -n "$DISTRIBUTION_DOMAIN"
+          curl --fail --silent --show-error --location \
+            --output /dev/null "https://$DISTRIBUTION_DOMAIN/"
+
+          CERTIFICATE_ARN="$(jq -r '.Distribution.DistributionConfig.ViewerCertificate.ACMCertificateArn' dns-plan/distribution.json)"
+          [[ "$CERTIFICATE_ARN" == arn:aws:acm:us-east-1:* ]]
+          aws acm describe-certificate \
+            --certificate-arn "$CERTIFICATE_ARN" \
+            --output json > dns-plan/certificate.json
+          jq -e '
+            .Certificate.Status == "ISSUED" and
+            (([.Certificate.DomainName] + (.Certificate.SubjectAlternativeNames // [])) | index("roadmap2u.com") != null) and
+            (([.Certificate.DomainName] + (.Certificate.SubjectAlternativeNames // [])) | index("www.roadmap2u.com") != null)
+          ' dns-plan/certificate.json >/dev/null
+
+      - name: Capture the complete current apex and www snapshot
+        run: |
+          set -euo pipefail
+          aws route53 get-hosted-zone \
+            --id "$HOSTED_ZONE_ID" \
+            --output json > dns-plan/hosted-zone.json
+          aws route53 list-resource-record-sets \
+            --hosted-zone-id "$HOSTED_ZONE_ID" \
+            --query "ResourceRecordSets[?Name=='roadmap2u.com.' || Name=='www.roadmap2u.com.']" \
+            --output json > dns-plan/current-records.json
+          jq -e 'type == "array" and length > 0' dns-plan/current-records.json >/dev/null
+          {
+            for RESOLVER in 1.1.1.1 8.8.8.8; do
+              for NAME in roadmap2u.com www.roadmap2u.com; do
+                for TYPE in A AAAA CNAME; do
+                  echo "# resolver=$RESOLVER name=$NAME type=$TYPE"
+                  dig +time=5 +tries=1 +noall +answer "@$RESOLVER" "$NAME" "$TYPE"
+                done
+              done
+            done
+          } > dns-plan/resolver-observations.txt
+          test -s dns-plan/resolver-observations.txt
+
+      - name: Load and validate the exact legacy snapshot
+        run: |
+          set -euo pipefail
+          if [[ "$OPERATION" == "cutover" ]]; then
+            cp dns-plan/current-records.json dns-plan/original-records.json
+          else
+            aws ssm get-parameter \
+              --name '/roadmap2u/prod/dns-cutover-backup' \
+              --query Parameter.Value \
+              --output text > dns-plan/original-records.compact.json
+            jq . dns-plan/original-records.compact.json > dns-plan/original-records.json
+            rm dns-plan/original-records.compact.json
+          fi
+
+          jq -e '
+            type == "array" and
+            all(.[];
+              .Name == "roadmap2u.com." or .Name == "www.roadmap2u.com."
+            ) and
+            ([.[] | select(.Type == "A" or .Type == "AAAA" or .Type == "CNAME")] | length) == 2 and
+            any(.[]; .Name == "roadmap2u.com." and .Type == "A" and
+              any(.ResourceRecords[]?; .Value == "162.241.62.201")) and
+            any(.[]; .Name == "www.roadmap2u.com." and .Type == "CNAME" and
+              any(.ResourceRecords[]?; .Value == "roadmap2u.com" or .Value == "roadmap2u.com.")) and
+            all(.[] | select(.Type == "A" or .Type == "AAAA" or .Type == "CNAME");
+              has("SetIdentifier") | not)
+          ' dns-plan/original-records.json >/dev/null
+
+      - name: Generate forward and rollback batches without applying them
+        run: |
+          set -euo pipefail
+          DISTRIBUTION_DOMAIN="$(jq -r '.Distribution.DomainName' dns-plan/distribution.json)"
+          jq -n --arg domain "$DISTRIBUTION_DOMAIN" '[
+            {Name:"roadmap2u.com.",Type:"A",AliasTarget:{HostedZoneId:"Z2FDTNDATAQYW2",DNSName:$domain,EvaluateTargetHealth:false}},
+            {Name:"roadmap2u.com.",Type:"AAAA",AliasTarget:{HostedZoneId:"Z2FDTNDATAQYW2",DNSName:$domain,EvaluateTargetHealth:false}},
+            {Name:"www.roadmap2u.com.",Type:"A",AliasTarget:{HostedZoneId:"Z2FDTNDATAQYW2",DNSName:$domain,EvaluateTargetHealth:false}},
+            {Name:"www.roadmap2u.com.",Type:"AAAA",AliasTarget:{HostedZoneId:"Z2FDTNDATAQYW2",DNSName:$domain,EvaluateTargetHealth:false}}
+          ]' > dns-plan/cloudfront-records.json
+
+          if [[ "$OPERATION" == "cutover" ]]; then
+            jq -e '
+              [.[] | select(.Type == "A" or .Type == "AAAA" or .Type == "CNAME")] as $managed |
+              ($managed | length) == 2
+            ' dns-plan/current-records.json >/dev/null
+            cp dns-plan/cloudfront-records.json dns-plan/rollback-source-records.json
+          else
+            jq -e --arg domain "$DISTRIBUTION_DOMAIN" '
+              [.[] | select(.Type == "A" or .Type == "AAAA" or .Type == "CNAME")] as $managed |
+              ($managed | length) == 4 and
+              all($managed[];
+                .AliasTarget.HostedZoneId == "Z2FDTNDATAQYW2" and
+                (.AliasTarget.DNSName | rtrimstr(".")) == ($domain | rtrimstr(".")))
+            ' dns-plan/current-records.json >/dev/null
+            cp dns-plan/current-records.json dns-plan/rollback-source-records.json
+          fi
+
+          jq -n \
+            --slurpfile from dns-plan/original-records.json \
+            --slurpfile to dns-plan/cloudfront-records.json '
+            def managed: map(select(.Type == "A" or .Type == "AAAA" or .Type == "CNAME"));
+            ($from[0] | managed) as $fromRecords |
+            ($to[0] | managed) as $toRecords |
+            ($toRecords | map(.Name + "|" + .Type)) as $toKeys |
+            {
+              Comment:"RoadMap2U approved CloudFront cutover",
+              Changes:
+                (($fromRecords
+                  | map(select((.Name + "|" + .Type) as $key | ($toKeys | index($key)) == null))
+                  | map({Action:"DELETE",ResourceRecordSet:.}))
+                + ($toRecords | map({Action:"UPSERT",ResourceRecordSet:.})))
+            }
+          ' > dns-plan/forward-batch.json
+
+          jq -n \
+            --slurpfile from dns-plan/rollback-source-records.json \
+            --slurpfile to dns-plan/original-records.json '
+            def managed: map(select(.Type == "A" or .Type == "AAAA" or .Type == "CNAME"));
+            ($from[0] | managed) as $fromRecords |
+            ($to[0] | managed) as $toRecords |
+            ($toRecords | map(.Name + "|" + .Type)) as $toKeys |
+            {
+              Comment:"RoadMap2U exact DNS rollback",
+              Changes:
+                (($fromRecords
+                  | map(select((.Name + "|" + .Type) as $key | ($toKeys | index($key)) == null))
+                  | map({Action:"DELETE",ResourceRecordSet:.}))
+                + ($toRecords | map({Action:"UPSERT",ResourceRecordSet:.})))
+            }
+          ' > dns-plan/rollback-batch.json
+
+          jq -e '.Changes | type == "array" and length > 0' dns-plan/forward-batch.json >/dev/null
+          jq -e '.Changes | type == "array" and length > 0' dns-plan/rollback-batch.json >/dev/null
+
+      - name: Build human-readable plan and integrity manifest
+        run: |
+          set -euo pipefail
+          GENERATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          jq -n \
+            --arg generatedAt "$GENERATED_AT" \
+            --arg accountId "$AWS_ACCOUNT_ID" \
+            --arg hostedZoneId "$HOSTED_ZONE_ID" \
+            --arg operation "$OPERATION" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflowSha "$GITHUB_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg actor "$GITHUB_ACTOR" \
+            '{
+              generatedAt:$generatedAt,
+              accountId:$accountId,
+              hostedZoneId:$hostedZoneId,
+              operation:$operation,
+              repository:$repository,
+              workflowSha:$workflowSha,
+              runId:$runId,
+              runAttempt:$runAttempt,
+              actor:$actor
+            }' > dns-plan/metadata.json
+
+          {
+            echo "# RoadMap2U production DNS plan"
+            echo
+            echo "- Operation: $OPERATION"
+            echo "- Generated at: $GENERATED_AT"
+            echo "- Repository SHA: $GITHUB_SHA"
+            echo "- Workflow run: $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            echo "- AWS account: $AWS_ACCOUNT_ID"
+            echo "- Hosted zone: $HOSTED_ZONE_ID"
+            echo
+            echo "## Complete current apex/www snapshot"
+            echo
+            jq . dns-plan/current-records.json
+            echo
+            echo "## Forward batch"
+            echo
+            jq . dns-plan/forward-batch.json
+            echo
+            echo "## Rollback batch"
+            echo
+            jq . dns-plan/rollback-batch.json
+          } > dns-plan/plan.md
+
+          (
+            cd dns-plan
+            find . -type f ! -name SHA256SUMS -print0 |
+              sort -z |
+              xargs -0 sha256sum > SHA256SUMS
+          )
+          cat dns-plan/plan.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable DNS plan
+        id: upload-plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-dns-plan-${{ inputs.operation }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dns-plan/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Link the exact artifact awaiting approval
+        run: |
+          {
+            echo
+            echo "Artifact ID: ${{ steps.upload-plan.outputs.artifact-id }}"
+            echo "Artifact digest: ${{ steps.upload-plan.outputs.artifact-digest }}"
+            echo "Approve the prod-dns-cutover environment only after reviewing plan.md and both batches."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && vars.AWS_DEPLOY_ENABLED == 'true' && vars.DNS_CUTOVER_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: prod-dns-cutover
+    env:
+      AWS_REGION: us-east-1
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      HOSTED_ZONE_ID: ${{ vars.HOSTED_ZONE_ID }}
+      OPERATION: ${{ inputs.operation }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      EXPECTED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.artifact-digest }}
+    steps:
+      - name: Confirm both safety gates and typed intent again
+        env:
+          AWS_DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED }}
+          DNS_CUTOVER_ENABLED: ${{ vars.DNS_CUTOVER_ENABLED }}
+        run: |
+          set -euo pipefail
+          test "$AWS_DEPLOY_ENABLED" = "true"
+          test "$DNS_CUTOVER_ENABLED" = "true"
+          case "$OPERATION" in
+            cutover) test "$CONFIRMATION" = "CUTOVER roadmap2u.com" ;;
+            rollback) test "$CONFIRMATION" = "ROLLBACK roadmap2u.com" ;;
+            *) exit 2 ;;
+          esac
+          test -n "$EXPECTED_ARTIFACT_DIGEST"
+
+      - name: Download exactly the planned artifact by immutable ID
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.plan.outputs.artifact-id }}
+          path: approved-plan
+
+      - name: Verify plan integrity and bind it to this workflow run
+        run: |
+          set -euo pipefail
+          cd approved-plan
+          sha256sum --check SHA256SUMS
+          jq -e \
+            --arg accountId "$AWS_ACCOUNT_ID" \
+            --arg hostedZoneId "$HOSTED_ZONE_ID" \
+            --arg operation "$OPERATION" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflowSha "$GITHUB_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" '
+              .accountId == $accountId and
+              .hostedZoneId == $hostedZoneId and
+              .operation == $operation and
+              .repository == $repository and
+              .workflowSha == $workflowSha and
+              .runId == $runId and
+              .runAttempt == $runAttempt
+            ' metadata.json >/dev/null
+          jq -e '.Changes | type == "array" and length > 0' forward-batch.json >/dev/null
+          jq -e '.Changes | type == "array" and length > 0' rollback-batch.json >/dev/null
+
+      - name: Configure apply credentials through the DNS OIDC role
+        uses: aws-actions/configure-aws-credentials@v6.1.1
+        with:
+          role-to-assume: ${{ vars.DNS_CUTOVER_ROLE_ARN }}
+          role-session-name: production-dns-apply-${{ github.run_id }}
+          aws-region: us-east-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - name: Verify account and reject DNS drift since planning
+        run: |
+          set -euo pipefail
+          mkdir -p apply-result
+          ACTUAL_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          test "$ACTUAL_ACCOUNT" = "$AWS_ACCOUNT_ID"
+          aws route53 list-resource-record-sets \
+            --hosted-zone-id "$HOSTED_ZONE_ID" \
+            --query "ResourceRecordSets[?Name=='roadmap2u.com.' || Name=='www.roadmap2u.com.']" \
+            --output json > apply-result/live-before.json
+          jq -S '
+            map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
+            sort_by(.Name,.Type,(.SetIdentifier // ""))
+          ' approved-plan/current-records.json > apply-result/planned-normalized.json
+          jq -S '
+            map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
+            sort_by(.Name,.Type,(.SetIdentifier // ""))
+          ' apply-result/live-before.json > apply-result/live-normalized.json
+          diff -u apply-result/planned-normalized.json apply-result/live-normalized.json
+
+      - name: Apply the exact reviewed batch and wait for INSYNC
+        run: |
+          set -euo pipefail
+          if [[ "$OPERATION" == "cutover" ]]; then
+            jq -c . approved-plan/current-records.json > apply-result/backup.compact.json
+            BACKUP_BYTES="$(wc -c < apply-result/backup.compact.json)"
+            test "$BACKUP_BYTES" -le 4096
+            BACKUP="$(cat apply-result/backup.compact.json)"
+            aws ssm put-parameter \
+              --name '/roadmap2u/prod/dns-cutover-backup' \
+              --type String \
+              --value "$BACKUP" \
+              --overwrite
+            BATCH_FILE='forward-batch.json'
+          else
+            BATCH_FILE='rollback-batch.json'
+          fi
+
+          cp "approved-plan/$BATCH_FILE" apply-result/applied-batch.json
+          aws route53 change-resource-record-sets \
+            --hosted-zone-id "$HOSTED_ZONE_ID" \
+            --change-batch file://apply-result/applied-batch.json > apply-result/change-info.json
+          CHANGE_ID="$(jq -r '.ChangeInfo.Id' apply-result/change-info.json)"
+          test -n "$CHANGE_ID"
+          aws route53 wait resource-record-sets-changed --id "$CHANGE_ID"
+
+      - name: Capture and validate the applied Route 53 state
+        run: |
+          set -euo pipefail
+          aws route53 list-resource-record-sets \
+            --hosted-zone-id "$HOSTED_ZONE_ID" \
+            --query "ResourceRecordSets[?Name=='roadmap2u.com.' || Name=='www.roadmap2u.com.']" \
+            --output json > apply-result/live-after.json
+          if [[ "$OPERATION" == "cutover" ]]; then
+            EXPECTED='approved-plan/cloudfront-records.json'
+          else
+            EXPECTED='approved-plan/original-records.json'
+          fi
+          jq -S '
+            map(select(.Type == "A" or .Type == "AAAA" or .Type == "CNAME")) |
+            map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
+            sort_by(.Name,.Type,(.SetIdentifier // ""))
+          ' "$EXPECTED" > apply-result/expected-managed.json
+          jq -S '
+            map(select(.Type == "A" or .Type == "AAAA" or .Type == "CNAME")) |
+            map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
+            sort_by(.Name,.Type,(.SetIdentifier // ""))
+          ' apply-result/live-after.json > apply-result/live-managed.json
+          diff -u apply-result/expected-managed.json apply-result/live-managed.json
+
+      - name: Preserve apply evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-dns-apply-${{ inputs.operation }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apply-result/
+          if-no-files-found: warn
+          retention-days: 90
