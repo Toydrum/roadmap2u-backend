@@ -358,6 +358,63 @@ describe('custom stage CDK bootstrap template', () => {
     });
   });
 
+  it('owns a retained resource-scoped HTTP API access log group in each protected toolkit', () => {
+    const template = JSON.parse(readFileSync(templatePath, 'utf8'));
+    const logGroup = template.Resources.ApiAccessLogGroup;
+
+    expect(template.Mappings.StageConfiguration).toEqual({
+      dev: { LogRetentionDays: 7 },
+      test: { LogRetentionDays: 14 },
+      prod: { LogRetentionDays: 30 },
+    });
+    expect(logGroup).toMatchObject({
+      Type: 'AWS::Logs::LogGroup',
+      DeletionPolicy: 'Retain',
+      UpdateReplacePolicy: 'Retain',
+      Properties: {
+        LogGroupName: { 'Fn::Sub': '/aws/apigateway/roadmap-api-${Stage}' },
+        RetentionInDays: {
+          'Fn::FindInMap': ['StageConfiguration', { Ref: 'Stage' }, 'LogRetentionDays'],
+        },
+        Tags: [
+          { Key: 'roadmap2u-project', Value: 'RoadMap2U' },
+          { Key: 'roadmap2u-stage', Value: { Ref: 'Stage' } },
+        ],
+      },
+    });
+    expect(logGroup.Properties.ResourcePolicyDocument).toEqual({
+      Version: '2012-10-17',
+      Statement: [
+        {
+          Sid: 'AllowOnlySameAccountLogDelivery',
+          Effect: 'Allow',
+          Principal: { Service: 'delivery.logs.amazonaws.com' },
+          Action: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+          Resource: {
+            'Fn::Sub':
+              'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/roadmap-api-${Stage}:log-stream:*',
+          },
+          Condition: {
+            StringEquals: { 'aws:SourceAccount': { Ref: 'AWS::AccountId' } },
+            ArnLike: {
+              'aws:SourceArn': {
+                'Fn::Sub':
+                  'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*',
+              },
+            },
+          },
+        },
+      ],
+    });
+    expect(template.Outputs.ApiAccessLogGroupName).toEqual({
+      Value: { Ref: 'ApiAccessLogGroup' },
+      Export: {
+        Name: { 'Fn::Sub': 'RoadMap2U-${Stage}-ApiAccessLogGroupName' },
+      },
+    });
+    expect(template.Outputs.ApiAccessLogGroupArn).toBeUndefined();
+  });
+
   it.each([
     ['dev', 'rmap2udev', 'RoadMap2U-CDK-dev'],
     ['test', 'rmap2utst', 'RoadMap2U-CDK-test'],
@@ -417,6 +474,7 @@ describe('custom stage CDK bootstrap template', () => {
     expect(rendered).not.toContain('s3:PutBucketEncryption');
     expect(rendered).toContain('s3:GetEncryptionConfiguration');
     expect(rendered).toContain('s3:PutEncryptionConfiguration');
+    expect(JSON.stringify(role.Policies[0].PolicyDocument).length).toBeLessThanOrEqual(10240);
     expect(template.Outputs.BootstrapOperatorRoleArn).toBeDefined();
   });
 
@@ -459,6 +517,63 @@ describe('custom stage CDK bootstrap template', () => {
       'arn:aws:iam::765932874577:role/roadmap2u/*',
     );
     expect(JSON.stringify(roleManagement.Resource)).not.toContain('/roadmap2u/bootstrap/');
+  });
+
+  it('limits toolkit access-log policy mutation to the temporary MFA operator', () => {
+    const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
+    const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
+      .PolicyDocument.Statement;
+    const logGroupMutations = statements.find(
+      (statement: any) =>
+        statement.Sid === 'ManageOnlyRoadMap2UToolkitApiLogGroupResources',
+    );
+    const logGroupTags = statements.find(
+      (statement: any) => statement.Sid === 'ManageOnlyRoadMap2UToolkitApiLogGroupTags',
+    );
+    const logPolicies = statements.find(
+      (statement: any) => statement.Sid === 'ManageToolkitApiLogResourcePolicies',
+    );
+
+    expect(logGroupMutations.Action).toEqual([
+      'logs:CreateLogGroup',
+      'logs:DeleteLogGroup',
+      'logs:PutRetentionPolicy',
+      'logs:TagResource',
+    ]);
+    expect(logGroupMutations.Resource).toEqual(
+      ['dev', 'test', 'prod'].map(
+        (stage) =>
+          `arn:aws:logs:us-east-1:765932874577:log-group:/aws/apigateway/roadmap-api-${stage}:*`,
+      ),
+    );
+    expect(logGroupTags.Action).toEqual([
+      'logs:ListTagsForResource',
+      'logs:TagResource',
+      'logs:UntagResource',
+    ]);
+    expect(logGroupTags.Resource).toEqual(
+      ['dev', 'test', 'prod'].map(
+        (stage) =>
+          `arn:aws:logs:us-east-1:765932874577:log-group:/aws/apigateway/roadmap-api-${stage}`,
+      ),
+    );
+    expect(logPolicies).toEqual({
+      Sid: 'ManageToolkitApiLogResourcePolicies',
+      Effect: 'Allow',
+      Action: [
+        'logs:CreateLogDelivery',
+        'logs:DeleteResourcePolicy',
+        'logs:DescribeLogGroups',
+        'logs:DescribeResourcePolicies',
+        'logs:PutResourcePolicy',
+      ],
+      Resource: '*',
+      Condition: {
+        StringEquals: {
+          'aws:RequestedRegion': 'us-east-1',
+        },
+      },
+    });
   });
 
   it('manages CloudFormation role-name lookups only for the twelve exact control-plane roles', () => {

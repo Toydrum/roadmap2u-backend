@@ -391,11 +391,11 @@ export class RoadmapStack extends Stack {
       integration: new HttpLambdaIntegration('RouterIntegration', router),
       authorizer,
     });
-    const apiLogGroup = new logs.LogGroup(this, 'ApiAccessLogs', {
-      logGroupName: `/aws/apigateway/roadmap-api-${stage}`,
-      retention: logRetentionFor(stage),
-      removalPolicy,
-    });
+    const apiLogGroup = logs.LogGroup.fromLogGroupName(
+      this,
+      'ApiAccessLogs',
+      Fn.importValue(`RoadMap2U-${stage}-ApiAccessLogGroupName`),
+    );
     new apigatewayv2.HttpStage(this, 'DefaultStage', {
       httpApi: api,
       stageName: '$default',

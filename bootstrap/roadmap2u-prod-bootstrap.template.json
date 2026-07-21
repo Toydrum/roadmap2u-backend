@@ -92,6 +92,19 @@
       ]
     }
   },
+  "Mappings": {
+    "StageConfiguration": {
+      "dev": {
+        "LogRetentionDays": 7
+      },
+      "test": {
+        "LogRetentionDays": 14
+      },
+      "prod": {
+        "LogRetentionDays": 30
+      }
+    }
+  },
   "Resources": {
     "StagingBucket": {
       "Type": "AWS::S3::Bucket",
@@ -184,6 +197,68 @@
           "SigningBehavior": "always",
           "SigningProtocol": "sigv4"
         }
+      }
+    },
+    "ApiAccessLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/apigateway/roadmap-api-${Stage}"
+        },
+        "RetentionInDays": {
+          "Fn::FindInMap": [
+            "StageConfiguration",
+            {
+              "Ref": "Stage"
+            },
+            "LogRetentionDays"
+          ]
+        },
+        "ResourcePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowOnlySameAccountLogDelivery",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "delivery.logs.amazonaws.com"
+              },
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/roadmap-api-${Stage}:log-stream:*"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "roadmap2u-project",
+            "Value": "RoadMap2U"
+          },
+          {
+            "Key": "roadmap2u-stage",
+            "Value": {
+              "Ref": "Stage"
+            }
+          }
+        ]
       }
     },
     "CloudFormationExecutionRole": {
@@ -542,6 +617,16 @@
       "Export": {
         "Name": {
           "Fn::Sub": "RoadMap2U-${Stage}-SiteOacId"
+        }
+      }
+    },
+    "ApiAccessLogGroupName": {
+      "Value": {
+        "Ref": "ApiAccessLogGroup"
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "RoadMap2U-${Stage}-ApiAccessLogGroupName"
         }
       }
     },
