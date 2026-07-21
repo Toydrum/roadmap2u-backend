@@ -476,8 +476,31 @@ function createCorePolicies(
   const dataPolicy = new iam.ManagedPolicy(stack, `CfnDataPolicy${stage}`, {
     managedPolicyName: `roadmap2u-${stage}-cfn-data`,
     path: `/roadmap2u/${stage}/`,
-    description: `CloudFormation data-service permissions for RoadMap2U ${stage}`,
+    description: `CloudFormation data and identity-service permissions for RoadMap2U ${stage}`,
     statements: [
+      new iam.PolicyStatement({
+        sid: 'CreateOnlyTaggedStageUserPools',
+        actions: ['cognito-idp:CreateUserPool'],
+        resources: ['*'],
+        conditions: requestTagConditions(stage),
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyTaggedStageUserPools',
+        actions: [
+          'cognito-idp:CreateUserPoolClient',
+          'cognito-idp:DeleteUserPoolClient',
+          'cognito-idp:DescribeUserPool',
+          'cognito-idp:DescribeUserPoolClient',
+          'cognito-idp:ListTagsForResource',
+          'cognito-idp:TagResource',
+          'cognito-idp:UntagResource',
+          'cognito-idp:UpdateUserPool',
+          'cognito-idp:UpdateUserPoolClient',
+          ...destructivePoolActions,
+        ],
+        resources: [userPoolArn(stack)],
+        conditions: stageTagConditions(stage),
+      }),
       new iam.PolicyStatement({
         sid: 'ManageOnlyStageTable',
         actions: [
@@ -526,29 +549,6 @@ function createCorePolicies(
     description: `CloudFormation API-service permissions for RoadMap2U ${stage}`,
     statements: [
       new iam.PolicyStatement({
-        sid: 'CreateOnlyTaggedStageUserPools',
-        actions: ['cognito-idp:CreateUserPool'],
-        resources: ['*'],
-        conditions: requestTagConditions(stage),
-      }),
-      new iam.PolicyStatement({
-        sid: 'ManageOnlyTaggedStageUserPools',
-        actions: [
-          'cognito-idp:CreateUserPoolClient',
-          'cognito-idp:DeleteUserPoolClient',
-          'cognito-idp:DescribeUserPool',
-          'cognito-idp:DescribeUserPoolClient',
-          'cognito-idp:ListTagsForResource',
-          'cognito-idp:TagResource',
-          'cognito-idp:UntagResource',
-          'cognito-idp:UpdateUserPool',
-          'cognito-idp:UpdateUserPoolClient',
-          ...destructivePoolActions,
-        ],
-        resources: [userPoolArn(stack)],
-        conditions: stageTagConditions(stage),
-      }),
-      new iam.PolicyStatement({
         sid: 'CreateTaggedStageHttpApi',
         actions: ['apigateway:POST'],
         resources: [resourceArn(stack, 'apigateway', '/apis', undefined, { account: '' })],
@@ -573,6 +573,27 @@ function createCorePolicies(
         ],
         resources: [resourceArn(stack, 'apigateway', '/apis/*', undefined, { account: '' })],
         conditions: stageTagConditions(stage),
+      }),
+      new iam.PolicyStatement({
+        // The AWS::ApiGatewayV2::Stage provider invokes this literal dependent action on create.
+        // Access Analyzer can lag the CloudFormation provider schema and report INVALID_ACTION.
+        sid: 'TagOnlyCreatingStageApiStage',
+        actions: ['apigateway:TagResource'],
+        resources: [
+          resourceArn(stack, 'apigateway', '/apis/*/stages', undefined, { account: '' }),
+        ],
+        conditions: {
+          StringEquals: {
+            ...stageTagConditions(stage).StringEquals,
+            ...requestTagConditions(stage).StringEquals,
+          },
+          'ForAllValues:StringEquals': {
+            'aws:TagKeys': CLOUDFORMATION_API_TAG_KEYS,
+          },
+          Null: {
+            'aws:TagKeys': 'false',
+          },
+        },
       }),
       new iam.PolicyStatement({
         sid: 'CreateTaggedStageApiDomain',
