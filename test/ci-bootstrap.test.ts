@@ -362,6 +362,42 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
+  it('lets CloudFormation resolve only its selected toolkit bootstrap version', () => {
+    const template = bootstrapTemplate().toJSON();
+    const qualifiers = { dev: 'rmap2udev', test: 'rmap2utst', prod: 'rmap2uprd' } as const;
+    const policies = Object.values(template.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+
+    for (const [stage, qualifier] of Object.entries(qualifiers)) {
+      const core = policies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-core`,
+      );
+      const statement = core.Properties.PolicyDocument.Statement.find(
+        (candidate: any) => candidate.Sid === 'ReadOnlySelectedBootstrapVersion',
+      );
+
+      expect(statement).toEqual({
+        Action: 'ssm:GetParameters',
+        Effect: 'Allow',
+        Resource: {
+          'Fn::Join': [
+            '',
+            [
+              'arn:',
+              { Ref: 'AWS::Partition' },
+              `:ssm:us-east-1:${ACCOUNT}:parameter/cdk-bootstrap/${qualifier}/version`,
+            ],
+          ],
+        },
+        Sid: 'ReadOnlySelectedBootstrapVersion',
+      });
+      for (const other of Object.values(qualifiers).filter((value) => value !== qualifier)) {
+        expect(JSON.stringify(statement.Resource)).not.toContain(`/cdk-bootstrap/${other}/`);
+      }
+    }
+  });
+
   it('limits Route 53 and IAM mutations to the selected stage', () => {
     const managedPolicies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
