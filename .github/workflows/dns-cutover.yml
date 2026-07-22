@@ -545,12 +545,20 @@ jobs:
           fi
           jq -S '
             map(select(.Type == "A" or .Type == "AAAA" or .Type == "CNAME")) |
-            map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
+            map(
+              if .ResourceRecords then .ResourceRecords |= sort_by(.Value)
+              elif .AliasTarget then .AliasTarget.DNSName |= rtrimstr(".")
+              else . end
+            ) |
             sort_by(.Name,.Type,(.SetIdentifier // ""))
           ' "$EXPECTED" > apply-result/expected-managed.json
           jq -S '
             map(select(.Type == "A" or .Type == "AAAA" or .Type == "CNAME")) |
-            map(if .ResourceRecords then .ResourceRecords |= sort_by(.Value) else . end) |
+            map(
+              if .ResourceRecords then .ResourceRecords |= sort_by(.Value)
+              elif .AliasTarget then .AliasTarget.DNSName |= rtrimstr(".")
+              else . end
+            ) |
             sort_by(.Name,.Type,(.SetIdentifier // ""))
           ' apply-result/live-after.json > apply-result/live-managed.json
           diff -u apply-result/expected-managed.json apply-result/live-managed.json
