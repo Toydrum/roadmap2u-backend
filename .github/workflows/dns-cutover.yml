@@ -126,6 +126,21 @@ jobs:
           curl --fail --silent --show-error --location \
             --output /dev/null "https://$DISTRIBUTION_DOMAIN/"
 
+          EDGE_IP="$(dig +short "$DISTRIBUTION_DOMAIN" A | head -n 1)"
+          test -n "$EDGE_IP"
+          WWW_REDIRECT_URL='https://www.roadmap2u.com/account?volver=%2Fahora'
+          EXPECTED_LOCATION='https://roadmap2u.com/account?volver=%2Fahora'
+          REDIRECT_STATUS="$(curl --silent --show-error --head \
+            --resolve "www.roadmap2u.com:443:$EDGE_IP" \
+            --dump-header dns-plan/www-redirect-headers.txt \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            "$WWW_REDIRECT_URL")"
+          test "$REDIRECT_STATUS" = '301'
+          ACTUAL_LOCATION="$(awk 'BEGIN{IGNORECASE=1} /^location:/ {sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print}' \
+            dns-plan/www-redirect-headers.txt | tail -n 1)"
+          test "$ACTUAL_LOCATION" = "$EXPECTED_LOCATION"
+
           CERTIFICATE_ARN="$(jq -r '.Distribution.DistributionConfig.ViewerCertificate.ACMCertificateArn' dns-plan/distribution.json)"
           [[ "$CERTIFICATE_ARN" == arn:aws:acm:us-east-1:* ]]
           aws acm describe-certificate \

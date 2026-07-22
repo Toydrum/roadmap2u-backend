@@ -237,6 +237,8 @@ describe('backend GitHub Actions', () => {
     expect(contents).toContain('Action:"DELETE"');
     expect(contents).toContain('.Distribution.Status == "Deployed"');
     expect(contents).toContain('.Distribution.DistributionConfig.IsIPV6Enabled == true');
+    expect(contents).toContain('www.roadmap2u.com:443:$EDGE_IP');
+    expect(contents).toContain('https://roadmap2u.com/account?volver=%2Fahora');
     expect(contents.indexOf('IsIPV6Enabled == true')).toBeLessThan(
       contents.indexOf('Type:"AAAA"'),
     );

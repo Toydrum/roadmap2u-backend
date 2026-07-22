@@ -173,9 +173,9 @@ export function cloudFrontRequestRouterCode(stage: DeploymentStage): string {
   assertDeploymentStage(stage);
   const redirect =
     stage === 'prod'
-      ? `if(host==='www.${ROOT_DOMAIN}'){return {statusCode:301,statusDescription:'Moved Permanently',headers:{location:{value:'https://${ROOT_DOMAIN}'+request.uri+querySuffix(request.querystring)}}};}`
+      ? `if(host==='www.${ROOT_DOMAIN}'){return {statusCode:301,statusDescription:'Moved Permanently',headers:{location:{value:'https://${ROOT_DOMAIN}'+request.uri+querySuffix(request)}}};}`
       : '';
-  return `function querySuffix(query){var parts=[];for(var key in query){var item=query[key];var values=item.multiValue||[item];for(var i=0;i<values.length;i++){parts.push(encodeURIComponent(key)+'='+encodeURIComponent(values[i].value||''));}}return parts.length?'?'+parts.join('&'):'';}function handler(event){var request=event.request;var host=request.headers.host?request.headers.host.value:'';${redirect}var uri=request.uri;var leaf=uri.substring(uri.lastIndexOf('/')+1);if(uri==='/'||uri.endsWith('/')||leaf.indexOf('.')===-1){request.uri='/index.html';}return request;}`;
+  return `function querySuffix(request){var raw=request.rawQueryString();return raw===undefined?'':'?'+raw;}function handler(event){var request=event.request;var host=request.headers.host?request.headers.host.value:'';${redirect}var uri=request.uri;var leaf=uri.substring(uri.lastIndexOf('/')+1);if(uri==='/'||uri.endsWith('/')||leaf.indexOf('.')===-1){request.uri='/index.html';}return request;}`;
 }
 
 /** Backend resources for one explicitly selected deployment stage. */

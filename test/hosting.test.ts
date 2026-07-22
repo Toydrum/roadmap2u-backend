@@ -143,11 +143,29 @@ describe('private PWA hosting', () => {
         uri: '/welcome',
         headers: { host: { value: 'www.roadmap2u.com' } },
         querystring: { invite: { value: 'ABC 123' } },
+        rawQueryString: () => 'invite=ABC%20123',
       },
     });
     expect(redirect.statusCode).toBe(301);
     expect(redirect.headers.location.value).toBe(
       'https://roadmap2u.com/welcome?invite=ABC%20123',
+    );
+  });
+
+  it('preserves already encoded query values in production www redirects', () => {
+    const handler = new Function(`${requestRouterCode('prod')};return handler;`)();
+    const redirect = handler({
+      request: {
+        uri: '/account',
+        headers: { host: { value: 'www.roadmap2u.com' } },
+        querystring: { volver: { value: '%2Fahora' } },
+        rawQueryString: () => 'volver=%2Fahora',
+      },
+    });
+
+    expect(redirect.statusCode).toBe(301);
+    expect(redirect.headers.location.value).toBe(
+      'https://roadmap2u.com/account?volver=%2Fahora',
     );
   });
 
