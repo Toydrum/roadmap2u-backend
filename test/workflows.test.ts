@@ -239,6 +239,9 @@ describe('backend GitHub Actions', () => {
     expect(contents).toContain('.Distribution.DistributionConfig.IsIPV6Enabled == true');
     expect(contents).toContain('www.roadmap2u.com:443:$EDGE_IP');
     expect(contents).toContain('https://roadmap2u.com/account?volver=%2Fahora');
+    expect(
+      contents.match(/\.AliasTarget\.DNSName \|= rtrimstr\("\."\)/g) ?? [],
+    ).toHaveLength(2);
     expect(contents.indexOf('IsIPV6Enabled == true')).toBeLessThan(
       contents.indexOf('Type:"AAAA"'),
     );
