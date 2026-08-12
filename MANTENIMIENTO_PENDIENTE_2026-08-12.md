@@ -8,11 +8,12 @@ estaban publicados se conservaron.
 
 ## Bloqueador de validación local
 
-`npm ci --ignore-scripts` se intentó dos veces con Node 22.17.1 y npm 10.9.2.
-Ambos intentos terminaron con el error interno de npm `Exit handler never
-called` durante la fase `reify`; la instalación parcial no dejó disponibles
-los binarios locales de TypeScript/Vitest. El primer intento también registró
-un fallo de certificado al consultar el endpoint de auditoría de npm.
+`npm ci --ignore-scripts` se intentó en tres ejecuciones con Node 22.17.1 y npm
+10.9.2 (dos estándar y una con `--no-audit`). Todas terminaron con el error
+interno de npm `Exit handler never called` durante la fase `reify`; la
+instalación parcial no dejó disponibles los binarios locales de
+TypeScript/Vitest. Una ejecución también registró un fallo de certificado al
+consultar el endpoint de auditoría de npm.
 
 No se desactivó la validación TLS y no se ejecutaron despliegues ni comandos
 contra AWS.
