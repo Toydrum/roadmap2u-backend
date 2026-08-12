@@ -24,11 +24,18 @@ una exclusión estrecha para un escaneo local. No modifica TypeScript,
 CloudFormation, contratos, workflows ni dependencias. Aun así, la suite local
 no pudo volver a ejecutarse en esta computadora.
 
+## Bloqueador de publicación
+
+GitHub rechazó el push directo a `main`: la rama protegida exige una pull
+request y el check requerido `validate`. Los commits se publicaron en
+`codex/local-analysis-maintenance-2026-08-12`; no se abrió ninguna PR.
+
 ## Próxima acción
 
 1. Ejecutar en un checkout local (no en unidad de red) con Node 22 y npm 10.
 2. Configurar correctamente la CA corporativa si el proxy TLS sigue
    interceptando `registry.npmjs.org`; no usar `strict-ssl=false`.
 3. Ejecutar `npm ci --ignore-scripts`, `npm run typecheck` y `npm test`.
-4. Confirmar el workflow de CI de este commit antes de promover cualquier
-   stage. No desplegar AWS como parte de esta comprobación.
+4. Abrir o autorizar una PR desde la rama publicada hacia `main` y confirmar
+   el check `validate` antes de promover cualquier stage. No desplegar AWS como
+   parte de esta comprobación.
