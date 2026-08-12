@@ -1,0 +1,34 @@
+# Mantenimiento pendiente — 2026-08-12
+
+## Estado
+
+La rama local se avanzó de forma lineal hasta `origin/main` antes de preparar
+este mantenimiento. Los siete documentos canónicos de `docs/codebase/` que ya
+estaban publicados se conservaron.
+
+## Bloqueador de validación local
+
+`npm ci --ignore-scripts` se intentó dos veces con Node 22.17.1 y npm 10.9.2.
+Ambos intentos terminaron con el error interno de npm `Exit handler never
+called` durante la fase `reify`; la instalación parcial no dejó disponibles
+los binarios locales de TypeScript/Vitest. El primer intento también registró
+un fallo de certificado al consultar el endpoint de auditoría de npm.
+
+No se desactivó la validación TLS y no se ejecutaron despliegues ni comandos
+contra AWS.
+
+## Riesgo
+
+Este commit solo añade documentación de mantenimiento, notas de onboarding y
+una exclusión estrecha para un escaneo local. No modifica TypeScript,
+CloudFormation, contratos, workflows ni dependencias. Aun así, la suite local
+no pudo volver a ejecutarse en esta computadora.
+
+## Próxima acción
+
+1. Ejecutar en un checkout local (no en unidad de red) con Node 22 y npm 10.
+2. Configurar correctamente la CA corporativa si el proxy TLS sigue
+   interceptando `registry.npmjs.org`; no usar `strict-ssl=false`.
+3. Ejecutar `npm ci --ignore-scripts`, `npm run typecheck` y `npm test`.
+4. Confirmar el workflow de CI de este commit antes de promover cualquier
+   stage. No desplegar AWS como parte de esta comprobación.

@@ -9,3 +9,9 @@ coverage/
 !.env.example
 cdk.context.json
 cdk-outputs*.json
+
+# Local codebase-analysis scratch output
+/docs/codebase/.codebase-scan.txt
+
+# Local agent session notes
+/Codex.md
