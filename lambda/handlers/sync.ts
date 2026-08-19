@@ -9,6 +9,7 @@
 } from '@app/api/contracts';
 import { SCHEMA_VERSION, SyncBase } from '@app/db/schema';
 import { Ctx, requireGuardianOf } from '../authz';
+import { validateSyncBatch } from '../commercial/sync-validation';
 import { K, PutCommand, QueryCommand, RecordItem, getItem } from '../db';
 
 const STORES: ReadonlySet<string> = new Set<SyncStore>([
@@ -40,6 +41,21 @@ async function pushInto(ctx: Ctx, ownerId: string, req: SyncPushRequest): Promis
   if (typeof req.schemaVersion !== 'number' || req.schemaVersion > SCHEMA_VERSION) {
     throw new ApiError('SYNC_TOO_OLD');
   }
+
+  await validateSyncBatch({
+    ownerId,
+    entries: req.records,
+    heartPolicy: 'compatible',
+    loadRecord: async (validatedOwnerId, store, id) => {
+      const stored = await getItem<RecordItem>(ctx.deps, K.rec(validatedOwnerId, store, id));
+      if (!stored) return undefined;
+      return {
+        owner: stored.owner,
+        store: stored.store,
+        record: stored.record as unknown as Record<string, unknown>,
+      };
+    },
+  });
 
   const applied: string[] = [];
   const rejected: { id: string; reason: 'STALE_REV' }[] = [];

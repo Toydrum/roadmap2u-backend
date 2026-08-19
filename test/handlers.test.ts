@@ -234,7 +234,10 @@ describe('pushSync — rev LWW', () => {
       }
       return {};
     });
-    ddbMock.on(GetCommand).resolves({ Item: winner });
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      return key.pk === winner.pk && key.sk === winner.sk ? { Item: winner } : {};
+    });
 
     const result = await pushSync(ctxOf(profile('rocio')), {
       schemaVersion: 3,
@@ -258,6 +261,25 @@ describe('pushSync — rev LWW', () => {
     ).rejects.toMatchObject({ code: 'LIMIT_EXCEEDED' });
   });
 
+  it('rejects an invalid commercial record before the first DynamoDB write', async () => {
+    ddbMock.on(PutCommand).resolves({});
+    const injectedTree = { ...tree('t-injected'), injectedOwner: 'another-user' };
+
+    await expect(
+      pushSync(ctxOf(profile('rocio')), {
+        schemaVersion: SCHEMA_VERSION,
+        records: [
+          {
+            store: 'trees',
+            record: injectedTree,
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION' });
+
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
   it('rejects clients newer than the server schema', async () => {
     await expect(
       pushSync(ctxOf(profile('rocio')), { schemaVersion: SCHEMA_VERSION + 1, records: [] }),
@@ -267,6 +289,14 @@ describe('pushSync — rev LWW', () => {
 
   it('accepts harvest and preserve records as first-class sync stores', async () => {
     ddbMock.on(PutCommand).resolves({});
+    const related = [
+      recordItem('rocio', 'trees', tree('t1')),
+      recordItem('rocio', 'nodes', node('n1', 't1')),
+    ];
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      return { Item: related.find((item) => item.pk === key.pk && item.sk === key.sk) };
+    });
     const records: SyncRecord[] = [
       { store: 'harvests', record: harvest('h:n1') },
       { store: 'preserves', record: preserve('p1') },
