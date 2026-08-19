@@ -56,6 +56,18 @@ describe('stage backend infrastructure', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       TableName: `roadmap-${stage}`,
     });
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      TableName: `roadmap-access-audit-${stage}`,
+      BillingMode: 'PAY_PER_REQUEST',
+      AttributeDefinitions: [
+        { AttributeName: 'pk', AttributeType: 'S' },
+        { AttributeName: 'sk', AttributeType: 'S' },
+      ],
+      KeySchema: [
+        { AttributeName: 'pk', KeyType: 'HASH' },
+        { AttributeName: 'sk', KeyType: 'RANGE' },
+      ],
+    });
     template.hasResourceProperties('AWS::Cognito::UserPool', {
       UserPoolName: `roadmap-users-${stage}`,
     });
@@ -73,7 +85,14 @@ describe('stage backend infrastructure', () => {
       (resource: any) => resource.Type === 'AWS::Cognito::UserPool',
     ) as any;
     const table = Object.values(template.Resources).find(
-      (resource: any) => resource.Type === 'AWS::DynamoDB::Table',
+      (resource: any) =>
+        resource.Type === 'AWS::DynamoDB::Table' &&
+        resource.Properties.TableName === 'roadmap-dev',
+    ) as any;
+    const auditTable = Object.values(template.Resources).find(
+      (resource: any) =>
+        resource.Type === 'AWS::DynamoDB::Table' &&
+        resource.Properties.TableName === 'roadmap-access-audit-dev',
     ) as any;
 
     expect(pool.Properties.AliasAttributes).toBeUndefined();
@@ -96,6 +115,11 @@ describe('stage backend infrastructure', () => {
     });
     expect(table.Properties.DeletionProtectionEnabled).toBe(false);
     expect(table.DeletionPolicy).toBe('Delete');
+    expect(auditTable.Properties.PointInTimeRecoverySpecification).toEqual({
+      PointInTimeRecoveryEnabled: false,
+    });
+    expect(auditTable.Properties.DeletionProtectionEnabled).toBe(false);
+    expect(auditTable.DeletionPolicy).toBe('Delete');
 
     const clients = Object.values(template.Resources).filter(
       (resource: any) => resource.Type === 'AWS::Cognito::UserPoolClient',
@@ -258,7 +282,14 @@ describe('stage backend infrastructure', () => {
       (resource: any) => resource.Type === 'AWS::Cognito::UserPool',
     ) as any;
     const table = Object.values(template.Resources).find(
-      (resource: any) => resource.Type === 'AWS::DynamoDB::Table',
+      (resource: any) =>
+        resource.Type === 'AWS::DynamoDB::Table' &&
+        resource.Properties.TableName === 'roadmap-prod',
+    ) as any;
+    const auditTable = Object.values(template.Resources).find(
+      (resource: any) =>
+        resource.Type === 'AWS::DynamoDB::Table' &&
+        resource.Properties.TableName === 'roadmap-access-audit-prod',
     ) as any;
 
     expect(pool.Properties.DeletionProtection).toBe('ACTIVE');
@@ -268,6 +299,12 @@ describe('stage backend infrastructure', () => {
     });
     expect(table.Properties.DeletionProtectionEnabled).toBe(true);
     expect(table.DeletionPolicy).toBe('Retain');
+    expect(auditTable.Properties.PointInTimeRecoverySpecification).toEqual({
+      PointInTimeRecoveryEnabled: true,
+    });
+    expect(auditTable.Properties.DeletionProtectionEnabled).toBe(true);
+    expect(auditTable.DeletionPolicy).toBe('Retain');
+    expect(auditTable.UpdateReplacePolicy).toBe('Retain');
   });
 
   it.each([

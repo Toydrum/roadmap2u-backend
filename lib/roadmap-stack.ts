@@ -289,6 +289,15 @@ export class RoadmapStack extends Stack {
       deletionProtection: production,
       removalPolicy,
     });
+    new dynamodb.Table(this, 'AccessAuditTable', {
+      tableName: `roadmap-access-audit-${stage}`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: production },
+      deletionProtection: production,
+      removalPolicy,
+    });
     table.addGlobalSecondaryIndex({
       indexName: 'gsi1',
       partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },

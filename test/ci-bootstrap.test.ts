@@ -273,6 +273,44 @@ describe('GitHub OIDC bootstrap', () => {
     expect(prodActions).not.toContain('cognito-idp:DeleteUserPool');
   });
 
+  it('limits runtime audit-table access to exact PutItem on the stage table', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const boundary = policies.find(
+        (policy) =>
+          policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-runtime-boundary`,
+      );
+      const statements = boundary.Properties.PolicyDocument.Statement;
+      const auditStatements = statements.filter((statement: any) =>
+        JSON.stringify(statement.Resource).includes(`table/roadmap-access-audit-${stage}`),
+      );
+
+      expect(auditStatements).toHaveLength(1);
+      expect(auditStatements[0].Sid).toBe('AppendOnlyAuditEvents');
+      expect(auditStatements[0].Action).toBe('dynamodb:PutItem');
+      expect(JSON.stringify(auditStatements[0].Resource)).not.toContain('/index/*');
+      expect(
+        JSON.stringify(
+          statements.find((statement: any) => statement.Sid === 'UseOnlyOwnStageTable')
+            .Resource,
+        ),
+      ).not.toContain('roadmap-access-audit');
+
+      const data = policies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-data`,
+      );
+      const managedTables = data.Properties.PolicyDocument.Statement.find(
+        (statement: any) => statement.Sid === 'ManageOnlyStageTable',
+      );
+      expect(JSON.stringify(managedTables.Resource)).toContain(
+        `table/roadmap-access-audit-${stage}`,
+      );
+    }
+  });
+
   it('keeps policy-size headroom below the IAM 6144-character limit', () => {
     const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',

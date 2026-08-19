@@ -111,9 +111,13 @@ function apiAccessLogArn(stack: Stack, stage: PolicyStage): string {
   )}:*`;
 }
 
-function tableArns(stack: Stack, stage: PolicyStage): string[] {
+function primaryTableArns(stack: Stack, stage: PolicyStage): string[] {
   const table = resourceArn(stack, 'dynamodb', 'table', `roadmap-${stage}`);
   return [table, `${table}/index/*`];
+}
+
+function auditTableArn(stack: Stack, stage: PolicyStage): string {
+  return resourceArn(stack, 'dynamodb', 'table', `roadmap-access-audit-${stage}`);
 }
 
 function userPoolArn(stack: Stack): string {
@@ -292,7 +296,12 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
           'dynamodb:Scan',
           'dynamodb:UpdateItem',
         ],
-        resources: tableArns(stack, stage),
+        resources: primaryTableArns(stack, stage),
+      }),
+      new iam.PolicyStatement({
+        sid: 'AppendOnlyAuditEvents',
+        actions: ['dynamodb:PutItem'],
+        resources: [auditTableArn(stack, stage)],
       }),
       new iam.PolicyStatement({
         sid: 'AdministerOnlyOwnTaggedUserPool',
@@ -516,7 +525,7 @@ function createCorePolicies(
           'dynamodb:UpdateTimeToLive',
           ...destructiveTableActions,
         ],
-        resources: tableArns(stack, stage),
+        resources: [...primaryTableArns(stack, stage), auditTableArn(stack, stage)],
       }),
       new iam.PolicyStatement({
         sid: 'ManageOnlyStageParameters',
