@@ -1,6 +1,8 @@
 ﻿import type { PostConfirmationTriggerEvent } from 'aws-lambda';
 import { AdminUpdateUserAttributesCommand } from '@aws-sdk/client-cognito-identity-provider';
+import type { Context } from 'aws-lambda';
 import { Deps, K, ProfileItem, TransactWriteCommand, realDeps } from './db';
+import { instrumentHandler } from './observability';
 
 /**
  * Cognito PostConfirmation → the DynamoDB profile item. Self-signup is always
@@ -98,4 +100,7 @@ export async function handleEvent(
   return event;
 }
 
-export const handler = (event: PostConfirmationTriggerEvent) => handleEvent(event);
+export const handler = instrumentHandler(
+  'post-confirmation',
+  (event: PostConfirmationTriggerEvent, _context?: Context) => handleEvent(event),
+);

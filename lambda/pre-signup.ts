@@ -1,5 +1,7 @@
 import type { PreSignUpTriggerEvent } from 'aws-lambda';
 import { USERNAME_PATTERN } from '@app/auth/auth-types';
+import type { Context } from 'aws-lambda';
+import { instrumentHandler } from './observability';
 
 const EMAIL_LOCAL_PATTERN = /^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+$/i;
 const EMAIL_DOMAIN_LABEL_PATTERN = /^[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?$/i;
@@ -44,4 +46,7 @@ export function handleEvent(event: PreSignUpTriggerEvent): PreSignUpTriggerEvent
   return event;
 }
 
-export const handler = async (event: PreSignUpTriggerEvent) => handleEvent(event);
+export const handler = instrumentHandler(
+  'pre-signup',
+  async (event: PreSignUpTriggerEvent, _context?: Context) => handleEvent(event),
+);
