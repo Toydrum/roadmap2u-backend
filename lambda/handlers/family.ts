@@ -35,7 +35,6 @@ import {
   toPublic,
 } from '../authz';
 import {
-  BatchWriteCommand,
   CodeItem,
   FriendItem,
   K,
@@ -44,6 +43,7 @@ import {
   RecordItem,
   TransactWriteCommand,
   UpdateCommand,
+  batchWriteAll,
   bumpBadAttempt,
   composite,
   deleteItem,
@@ -267,15 +267,10 @@ export async function deleteChild(ctx: Ctx, minorId: string): Promise<void> {
     K.uniqUsername(child.username),
   ];
   if (child.friendCode) keys.push(K.codeF(child.friendCode));
-  for (let i = 0; i < keys.length; i += 25) {
-    await ctx.deps.ddb.send(
-      new BatchWriteCommand({
-        RequestItems: {
-          [ctx.deps.table]: keys.slice(i, i + 25).map((key) => ({ DeleteRequest: { Key: key } })),
-        },
-      }),
-    );
-  }
+  await batchWriteAll(
+    ctx.deps,
+    keys.map((key) => ({ DeleteRequest: { Key: key } })),
+  );
   // Guardian invites for this minor expire via TTL (≤72 h) — acceptable orphan.
 }
 

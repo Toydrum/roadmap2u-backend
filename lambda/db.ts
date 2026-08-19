@@ -1,6 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   BatchWriteCommand,
+  type BatchWriteCommandInput,
   DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
@@ -173,38 +174,115 @@ export async function deleteItem(deps: Deps, key: { pk: string; sk: string }): P
   await deps.ddb.send(new DeleteCommand({ TableName: deps.table, Key: key }));
 }
 
-export async function queryPrefix<T>(
+export type DynamoKey = Record<string, unknown>;
+
+export interface QueryPrefixPageOptions {
+  index?: 'gsi1' | 'gsi2';
+  limit?: number;
+  exclusiveStartKey?: DynamoKey;
+  consistentRead?: boolean;
+}
+
+export interface QueryPage<T> {
+  items: T[];
+  lastEvaluatedKey?: DynamoKey;
+}
+
+export async function queryPrefixPage<T>(
   deps: Deps,
   pk: string,
   skPrefix: string,
-  opts?: { index?: 'gsi1' | 'gsi2'; limit?: number; after?: string },
-): Promise<T[]> {
+  opts?: QueryPrefixPageOptions,
+): Promise<QueryPage<T>> {
+  if (opts?.index && opts.consistentRead) {
+    throw new Error('ConsistentRead is not supported for a global secondary index');
+  }
   const pkName = opts?.index ? `${opts.index}pk` : 'pk';
   const skName = opts?.index ? `${opts.index}sk` : 'sk';
-  // '' = whole partition (deleteChild's purge). REAL DynamoDB rejects an
-  // empty string inside begins_with (0.0.115 S2) — the in-memory double
-  // accepted it, so the bug only fired in the cloud: pk-only query instead.
-  const condition = opts?.after
-    ? `#pk = :pk AND #sk > :after`
-    : skPrefix
-      ? `#pk = :pk AND begins_with(#sk, :prefix)`
-      : `#pk = :pk`;
-  const skUsed = Boolean(opts?.after) || Boolean(skPrefix);
+  const skUsed = Boolean(skPrefix);
   const out = await deps.ddb.send(
     new QueryCommand({
       TableName: deps.table,
       IndexName: opts?.index,
-      KeyConditionExpression: condition,
+      KeyConditionExpression: skPrefix ? '#pk = :pk AND begins_with(#sk, :prefix)' : '#pk = :pk',
       ExpressionAttributeNames: skUsed ? { '#pk': pkName, '#sk': skName } : { '#pk': pkName },
-      ExpressionAttributeValues: opts?.after
-        ? { ':pk': pk, ':after': opts.after }
-        : skPrefix
-          ? { ':pk': pk, ':prefix': skPrefix }
-          : { ':pk': pk },
+      ExpressionAttributeValues: skPrefix ? { ':pk': pk, ':prefix': skPrefix } : { ':pk': pk },
       Limit: opts?.limit,
+      ExclusiveStartKey: opts?.exclusiveStartKey,
+      ConsistentRead: opts?.consistentRead,
     }),
   );
-  return (out.Items ?? []) as T[];
+  return {
+    items: (out.Items ?? []) as T[],
+    lastEvaluatedKey: out.LastEvaluatedKey,
+  };
+}
+
+export async function queryPrefix<T>(
+  deps: Deps,
+  pk: string,
+  skPrefix: string,
+  opts?: Pick<QueryPrefixPageOptions, 'index'>,
+): Promise<T[]> {
+  const items: T[] = [];
+  let exclusiveStartKey: DynamoKey | undefined;
+  do {
+    const page = await queryPrefixPage<T>(deps, pk, skPrefix, {
+      index: opts?.index,
+      exclusiveStartKey,
+    });
+    items.push(...page.items);
+    exclusiveStartKey = page.lastEvaluatedKey;
+  } while (exclusiveStartKey);
+  return items;
+}
+
+export type BatchWriteRequest = NonNullable<BatchWriteCommandInput['RequestItems']>[string][number];
+
+const BATCH_WRITE_MAX_ATTEMPTS = 8;
+const BATCH_WRITE_BASE_DELAY_MS = 25;
+const BATCH_WRITE_MAX_DELAY_MS = 1000;
+
+export class BatchWriteUnprocessedItemsError extends Error {
+  readonly attempts: number;
+  readonly remainingCount: number;
+
+  constructor(attempts: number, remainingCount: number) {
+    super(`DynamoDB left ${remainingCount} unprocessed item(s) after ${attempts} attempts`);
+    this.name = 'BatchWriteUnprocessedItemsError';
+    this.attempts = attempts;
+    this.remainingCount = remainingCount;
+  }
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function batchWriteAll(deps: Deps, requests: BatchWriteRequest[]): Promise<void> {
+  for (let offset = 0; offset < requests.length; offset += 25) {
+    let pending = requests.slice(offset, offset + 25);
+    let attempts = 0;
+    while (pending.length) {
+      attempts += 1;
+      const out = await deps.ddb.send(
+        new BatchWriteCommand({
+          RequestItems: { [deps.table]: pending },
+        }),
+      );
+      pending = out.UnprocessedItems?.[deps.table] ?? [];
+      if (pending.length) {
+        if (attempts >= BATCH_WRITE_MAX_ATTEMPTS) {
+          throw new BatchWriteUnprocessedItemsError(attempts, pending.length);
+        }
+        const ceiling = Math.min(
+          BATCH_WRITE_MAX_DELAY_MS,
+          BATCH_WRITE_BASE_DELAY_MS * 2 ** (attempts - 1),
+        );
+        await wait(Math.floor(Math.random() * ceiling));
+      }
+    }
+  }
 }
 
 /** Code-guessing brake, shared by EVERY code redemption (friend requests +
