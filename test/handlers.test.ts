@@ -37,6 +37,7 @@ import {
   rotateFriendCode,
 } from '../lambda/handlers/friends';
 import { handleEvent as handlePostConfirmation } from '../lambda/post-confirmation';
+import { errorResponse } from '../lambda/http';
 
 const NOW = 1_800_000_000_000;
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -83,7 +84,16 @@ function link(guardianId: string, minorId: string, kind: LinkItem['kind']): Link
 }
 
 function tree(id: string): Tree {
-  return { ...newSyncBase(NOW - 100), id, name: id, accent: 'moss', order: 10, currentNodeId: null, archivedAt: null };
+  return {
+    ...newSyncBase(NOW - 100),
+    id,
+    name: id,
+    accent: 'moss',
+    order: 10,
+    currentNodeId: null,
+    heartId: null,
+    archivedAt: null,
+  };
 }
 
 function node(id: string, treeId: string): TreeNode {
@@ -665,5 +675,21 @@ describe('ApiError', () => {
     const error = new ApiError('LAST_GUARDIAN', 'x');
     expect(error instanceof ApiError).toBe(true);
     expect(error.code).toBe('LAST_GUARDIAN');
+  });
+
+  it.each([
+    ['QUOTA_EXCEEDED', 409],
+    ['CAPABILITY_REQUIRED', 403],
+    ['MUTATION_GROUP_INVALID', 400],
+    ['ACCESS_REVISION_CONFLICT', 409],
+    ['ACCESS_CODE_INVALID', 400],
+    ['ACCESS_CODE_RATE_LIMITED', 429],
+    ['ACCESS_CODE_ALREADY_REDEEMED', 409],
+    ['SYNC_SCHEMA_INVALID', 400],
+    ['SYNC_CLIENT_UPGRADE_REQUIRED', 426],
+    ['USAGE_MIGRATION_IN_PROGRESS', 409],
+    ['COMMERCIAL_CONFIGURATION_UNAVAILABLE', 503],
+  ] as const)('maps commercial error %s to HTTP %i', (code, status) => {
+    expect(errorResponse(new ApiError(code)).statusCode).toBe(status);
   });
 });

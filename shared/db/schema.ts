@@ -4,7 +4,12 @@
  * SCHEMA_VERSION: shape of the data (export envelope + migration pipeline).
  * DB_VERSION: IndexedDB structure (stores/indexes) — versioned separately.
  */
-/** v12: additive TreeNode.remindAt («la campanita» 0.0.111, owner + psych
+/** v13: additive Tree.heartId persists the one technical heart selected from
+ *  legacy visible roots by (order, createdAt, id). Unlike the earlier derived
+ *  heart, its identity survives tombstone/restore and is the sole node omitted
+ *  from commercial branch counts. The v12->v13 data migration is pure and
+ *  shared by live IndexedDB and backup import; DB_VERSION stays 3.
+ *  v12: additive TreeNode.remindAt («la campanita» 0.0.111, owner + psych
  *  override of the no-reminders law): an optional 'HH:MM' local time-of-day.
  *  The reminder re-speaks the USER'S OWN cuando-entonces phrase (or the
  *  branch title) once per day at that hour — the app still decides nothing.
@@ -58,7 +63,7 @@
  *  ordered path of pasitos).
  *  v2: additive TreeNode.trigger (optional — absent on old records ≡ null;
  *  no migration pass needed) + Settings.todayIntentions (merge-over-defaults). */
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 export const DB_VERSION = 3;
 /**
  * NAMING NOTE (2026-07-06): the app was renamed RodeMap2U → RoadMap2U and the
@@ -102,6 +107,10 @@ export interface Tree extends SyncBase {
   order: number;
   /** "Where I am" on this tree — moved by check-ins and branching. */
   currentNodeId: string | null;
+  /** Immutable technical heart. Exactly this node is excluded from the
+   *  commercial branch count. Legacy trees without a surviving root migrate
+   *  to null and are treated as drift until repaired. */
+  heartId: string | null;
   /** User-facing "put away" — recoverable, distinct from deletedAt. */
   archivedAt: number | null;
 }
@@ -380,6 +389,8 @@ export type TextSize = 'md' | 'lg' | 'xl';
  *                     (core/sync/sync.service.ts bookkeeping).
  *   'legacy.migratedAt' — the pre-rename DB question is settled for this
  *                     device (core/db/idb.ts, written WITH the copied rows).
+ *   'schema.version' — current data-shape version after the atomic migration
+ *                     pipeline (not IndexedDB's structural DB_VERSION).
  * Auth/sync keys are deliberately NOT part of ExportEnvelope: backups are
  * shared files, and identity/link state is device state, not forest data.
  */

@@ -61,6 +61,7 @@ function tree(id: string, rev = 1): Tree {
     accent: 'moss',
     order: 10,
     currentNodeId: null,
+    heartId: null,
     archivedAt: null,
   };
 }

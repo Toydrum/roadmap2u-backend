@@ -1,4 +1,12 @@
-import { CheckIn, ExportEnvelope, Harvest, Preserve, Tree, TreeNode, TimerSession } from '../db/schema';
+import {
+  CheckIn,
+  ExportEnvelope,
+  Harvest,
+  Preserve,
+  Tree,
+  TreeNode,
+  TimerSession,
+} from '../db/schema';
 
 /**
  * THE backend contract — normative and single-source. Three implementations
@@ -10,6 +18,106 @@ import { CheckIn, ExportEnvelope, Harvest, Preserve, Tree, TreeNode, TimerSessio
  * Angular-free on purpose: Lambda code must be able to import it.
  * Human-readable companion: docs/backend-contract.md.
  */
+
+// ── Commercial catalog & access ─────────────────────────────────────────────
+
+export type PlanKey = 'free' | 'premium';
+
+export interface PlanCatalog {
+  version: '2026-08-prepayment-v1';
+  pricingVersion: 'launch-2026';
+  currency: 'MXN';
+  taxInclusive: true;
+  paymentsEnabled: false;
+  plans: {
+    free: {
+      limits: { maxActiveTrees: 2; maxVisibleBranchesPerTree: 10 };
+      capabilities: { cloudSync: false; social: false; family: false };
+    };
+    premium: {
+      limits: { maxActiveTrees: null; maxVisibleBranchesPerTree: null };
+      capabilities: { cloudSync: true; social: true; family: false };
+      prices: {
+        month: { amountMinor: 9900 };
+        year: { amountMinor: 94900 };
+      };
+    };
+  };
+}
+
+/**
+ * The phase-one catalog is compiled data, not runtime payment configuration.
+ * In particular `paymentsEnabled` cannot be changed by a client or flag.
+ */
+export const PREPAYMENT_PLAN_CATALOG: PlanCatalog = Object.freeze({
+  version: '2026-08-prepayment-v1',
+  pricingVersion: 'launch-2026',
+  currency: 'MXN',
+  taxInclusive: true,
+  paymentsEnabled: false,
+  plans: Object.freeze({
+    free: Object.freeze({
+      limits: Object.freeze({ maxActiveTrees: 2, maxVisibleBranchesPerTree: 10 }),
+      capabilities: Object.freeze({ cloudSync: false, social: false, family: false }),
+    }),
+    premium: Object.freeze({
+      limits: Object.freeze({ maxActiveTrees: null, maxVisibleBranchesPerTree: null }),
+      capabilities: Object.freeze({ cloudSync: true, social: true, family: false }),
+      prices: Object.freeze({
+        month: Object.freeze({ amountMinor: 9900 }),
+        year: Object.freeze({ amountMinor: 94900 }),
+      }),
+    }),
+  }),
+});
+
+export interface AccessSource {
+  kind: 'default' | 'sponsored' | 'subscription';
+  sourceId: string;
+  planKey: PlanKey;
+  validUntil: number | null;
+}
+
+export interface AccessSummary {
+  effectivePlanKey: PlanKey;
+  catalogVersion: string;
+  status: 'active' | 'expired';
+  activeSources: AccessSource[];
+  limits: {
+    maxActiveTrees: number | null;
+    maxVisibleBranchesPerTree: number | null;
+  };
+  capabilities: {
+    cloudSync: boolean;
+    social: boolean;
+    family: boolean;
+  };
+  usage: {
+    activeTrees: number;
+    visibleBranchesByTree: Record<string, number>;
+  };
+  revision: number;
+  nextRecomputeAt: number | null;
+  offlineValidUntil: number;
+}
+
+export const ACCESS_OFFLINE_LEASE_MS = 24 * 60 * 60 * 1000;
+
+/** Missing access is always a bounded Free lease; it never guesses Premium. */
+export function createFreeAccessSummary(now: number = Date.now()): AccessSummary {
+  return {
+    effectivePlanKey: 'free',
+    catalogVersion: PREPAYMENT_PLAN_CATALOG.version,
+    status: 'active',
+    activeSources: [{ kind: 'default', sourceId: 'default', planKey: 'free', validUntil: null }],
+    limits: { ...PREPAYMENT_PLAN_CATALOG.plans.free.limits },
+    capabilities: { ...PREPAYMENT_PLAN_CATALOG.plans.free.capabilities },
+    usage: { activeTrees: 0, visibleBranchesByTree: {} },
+    revision: 0,
+    nextRecomputeAt: null,
+    offlineValidUntil: now + ACCESS_OFFLINE_LEASE_MS,
+  };
+}
 
 // ── Accounts ────────────────────────────────────────────────────────────────
 
@@ -83,14 +191,20 @@ export interface CreateChildResponse {
   tempPassword: string;
 }
 
+export type AccountClosureState = 'requested' | 'purging' | 'purgeComplete' | 'completed';
+
+export interface AccountClosureReceipt {
+  closureId: string;
+  state: AccountClosureState;
+}
+
 /**
  * coGuardian   — invite another adult to co-guard one of my minors.
  * linkExisting — invite an existing account to become my linked minor
  *                (kind 'invited'); consent = they redeem the code.
  */
 export type FamilyInviteRequest =
-  | { kind: 'coGuardian'; minorId: string }
-  | { kind: 'linkExisting' };
+  { kind: 'coGuardian'; minorId: string } | { kind: 'linkExisting' };
 
 /** Short-lived shareable code (family invites 72 h, friend codes 7 d). */
 export interface CodeGrant {
@@ -161,6 +275,29 @@ export interface SyncPushRequest {
   records: SyncRecord[];
 }
 
+/** Wire contract revision; independent from the local forest schemaVersion. */
+export const CONTRACT_VERSION = 2 as const;
+
+/** One all-or-nothing logical write; never larger than syncMutationGroupMax. */
+export interface SyncMutationGroup {
+  id: string;
+  expectedCount: number;
+  records: SyncRecord[];
+}
+
+/**
+ * Transaction-aware contract. `SyncPushRequest` deliberately remains the
+ * v12 flat payload so already-deployed clients and handlers stay typed.
+ */
+export interface SyncPushV2Request {
+  schemaVersion: number;
+  contractVersion: typeof CONTRACT_VERSION;
+  /** Sum of all records remains ≤ LIMITS.syncPushMax. */
+  mutationGroups: SyncMutationGroup[];
+}
+
+export type SyncPushPayload = SyncPushRequest | SyncPushV2Request;
+
 /**
  * THE one LWW ordering, shared verbatim by every implementation (client
  * repos, mock cloud, DynamoDB condition expression): higher rev wins; equal
@@ -208,22 +345,45 @@ export interface SyncChangesResponse {
  * lowercase codes are minted client-side by the transport (never on the wire).
  * `message` is for developers — the client maps `code` to i18n copy.
  */
-export type ApiErrorCode =
-  | 'UNAUTHENTICATED'
-  | 'FORBIDDEN'
-  | 'NOT_FOUND' // also every denied forest fetch — never 403, no existence oracle
-  | 'VALIDATION'
-  | 'CONFLICT'
-  | 'USERNAME_TAKEN'
-  | 'LAST_GUARDIAN' // the last active link on a minor cannot be removed
-  | 'CODE_INVALID'
-  | 'CODE_EXPIRED'
-  | 'LIMIT_EXCEEDED'
-  | 'RATE_LIMITED'
-  | 'SYNC_TOO_OLD' // client schemaVersion newer than the server understands
-  | 'offline'
-  | 'server'
-  | 'unknown';
+export const SERVER_API_ERROR_CODES = Object.freeze([
+  'UNAUTHENTICATED',
+  'FORBIDDEN',
+  'NOT_FOUND', // also every denied forest fetch — never 403, no existence oracle
+  'VALIDATION',
+  'CONFLICT',
+  'USERNAME_TAKEN',
+  'LAST_GUARDIAN', // the last active link on a minor cannot be removed
+  'CODE_INVALID',
+  'CODE_EXPIRED',
+  'LIMIT_EXCEEDED',
+  'RATE_LIMITED',
+  'SYNC_TOO_OLD', // client schemaVersion newer than the server understands
+  'QUOTA_EXCEEDED',
+  'CAPABILITY_REQUIRED',
+  'MUTATION_GROUP_INVALID',
+  'ACCESS_REVISION_CONFLICT',
+  'ACCESS_CODE_INVALID',
+  'ACCESS_CODE_RATE_LIMITED',
+  'ACCESS_CODE_ALREADY_REDEEMED',
+  'SYNC_SCHEMA_INVALID',
+  'SYNC_CLIENT_UPGRADE_REQUIRED',
+  'USAGE_MIGRATION_IN_PROGRESS',
+  'COMMERCIAL_CONFIGURATION_UNAVAILABLE',
+] as const);
+
+export type ServerApiErrorCode = (typeof SERVER_API_ERROR_CODES)[number];
+export type ClientApiErrorCode = 'offline' | 'server' | 'unknown';
+export type ApiErrorCode = ServerApiErrorCode | ClientApiErrorCode;
+
+const RETRYABLE_API_ERROR_CODES: ReadonlySet<ApiErrorCode> = new Set([
+  'ACCESS_REVISION_CONFLICT',
+  'USAGE_MIGRATION_IN_PROGRESS',
+]);
+
+/** Client policy only; retryability is not an extra field in the wire envelope. */
+export function isRetryableApiErrorCode(code: ApiErrorCode): boolean {
+  return RETRYABLE_API_ERROR_CODES.has(code);
+}
 
 export class ApiError extends Error {
   constructor(
@@ -233,6 +393,10 @@ export class ApiError extends Error {
     super(message ?? code);
     this.name = 'ApiError';
   }
+
+  get retryable(): boolean {
+    return isRetryableApiErrorCode(this.code);
+  }
 }
 
 /** Contract-level caps — the mock and the Lambdas enforce the same numbers. */
@@ -241,6 +405,7 @@ export const LIMITS = Object.freeze({
   maxGuardiansPerMinor: 2,
   maxChildrenPerGuardian: 8,
   syncPushMax: 100,
+  syncMutationGroupMax: 20,
   /** BAD code redemptions (invalid/expired) per hour before RATE_LIMITED —
    *  successful redemptions never count toward the brake. */
   codeAttemptsPerHour: 5,
@@ -249,9 +414,15 @@ export const LIMITS = Object.freeze({
 // ── The API surface ─────────────────────────────────────────────────────────
 
 export interface RoadmapApi {
+  // commercial access
+  getPlans(): Promise<PlanCatalog>;
+  getAccess(): Promise<AccessSummary>;
+  redeemAccessCode(code: string): Promise<AccessSummary>;
+
   // me
   getMe(): Promise<MeResponse>;
   patchMe(patch: { displayName?: string }): Promise<UserProfile>;
+  deleteMe(): Promise<AccountClosureReceipt>;
 
   // family
   createChild(req: CreateChildRequest): Promise<CreateChildResponse>;
@@ -288,14 +459,17 @@ export interface RoadmapApi {
   // forests & sync
   getForest(userId: string): Promise<ForestSnapshot>;
   getSyncChanges(cursor?: string): Promise<SyncChangesResponse>;
-  pushSync(req: SyncPushRequest): Promise<SyncPushResponse>;
+  pushSync(req: SyncPushPayload): Promise<SyncPushResponse>;
   /** Guardian write-through (co-gardening): records land in the minor's store;
    *  their devices pull them on the next sync. */
-  pushSyncFor(userId: string, req: SyncPushRequest): Promise<SyncPushResponse>;
+  pushSyncFor(userId: string, req: SyncPushPayload): Promise<SyncPushResponse>;
 }
 
 /** REST paths under `${apiBaseUrl}/v1` — HttpApi and the Lambda router share them. */
 export const API_PATHS = Object.freeze({
+  plans: '/plans',
+  access: '/access',
+  accessCodesRedeem: '/access-codes/redeem',
   me: '/me',
   familyChildren: '/family/children',
   familyChild: (id: string) => `/family/children/${id}`,
