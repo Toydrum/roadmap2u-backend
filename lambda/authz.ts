@@ -1,5 +1,15 @@
 ﻿import { ApiError, PublicProfile } from '@app/api/contracts';
-import { Deps, FriendItem, K, LinkItem, ProfileItem, getItem, queryPrefix } from './db';
+import { accountClosureKey } from './account-closure';
+import {
+  Deps,
+  FriendItem,
+  GetCommand,
+  K,
+  LinkItem,
+  ProfileItem,
+  getItem,
+  queryPrefix,
+} from './db';
 
 /**
  * Authorization primitives — every rule from the permissions matrix
@@ -21,6 +31,35 @@ export async function resolveCaller(deps: Deps, callerId: string): Promise<Ctx> 
 
 export async function profileOf(deps: Deps, userId: string): Promise<ProfileItem | null> {
   return getItem<ProfileItem>(deps, K.profile(userId));
+}
+
+/** Consistent preflight for every mutation owned by one account. */
+export async function requireWritableOwner(ctx: Ctx, ownerId: string): Promise<ProfileItem> {
+  const [profileResult, closureResult] = await Promise.all([
+    ctx.deps.ddb.send(
+      new GetCommand({
+        TableName: ctx.deps.table,
+        Key: K.profile(ownerId),
+        ConsistentRead: true,
+      }),
+    ),
+    ctx.deps.ddb.send(
+      new GetCommand({
+        TableName: ctx.deps.table,
+        Key: accountClosureKey(ownerId),
+        ConsistentRead: true,
+      }),
+    ),
+  ]);
+  const profile = profileResult.Item as (ProfileItem & { status?: string }) | undefined;
+  if (
+    !profile ||
+    (profile.status !== undefined && profile.status !== 'active') ||
+    closureResult.Item
+  ) {
+    throw new ApiError('CONFLICT', 'account closure is in progress');
+  }
+  return profile;
 }
 
 export function toPublic(profile: ProfileItem, includeSocial: boolean): PublicProfile {

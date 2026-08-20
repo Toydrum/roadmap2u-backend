@@ -21,12 +21,16 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventTargets from 'aws-cdk-lib/aws-events-targets';
 import { AccessLogFormat } from 'aws-cdk-lib/aws-apigateway';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import { ApiGatewayv2DomainProperties, CloudFrontTarget } from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -289,7 +293,7 @@ export class RoadmapStack extends Stack {
       deletionProtection: production,
       removalPolicy,
     });
-    new dynamodb.Table(this, 'AccessAuditTable', {
+    const accessAuditTable = new dynamodb.Table(this, 'AccessAuditTable', {
       tableName: `roadmap-access-audit-${stage}`,
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
@@ -307,6 +311,118 @@ export class RoadmapStack extends Stack {
       indexName: 'gsi2',
       partitionKey: { name: 'gsi2pk', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'gsi2sk', type: dynamodb.AttributeType.STRING },
+    });
+
+    const accountClosureDlq = new sqs.Queue(this, 'AccountClosureDlq', {
+      queueName: `roadmap-account-closure-dlq-${stage}`,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: Duration.days(14),
+      removalPolicy,
+    });
+    const accountClosureQueue = new sqs.Queue(this, 'AccountClosureQueue', {
+      queueName: `roadmap-account-closure-${stage}`,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: Duration.days(4),
+      visibilityTimeout: Duration.seconds(360),
+      deadLetterQueue: { queue: accountClosureDlq, maxReceiveCount: 5 },
+      removalPolicy,
+    });
+
+    const accountClosureWorkerName = `roadmap-account-closure-worker-${stage}`;
+    const accountClosureWorker = new NodejsFunction(this, 'AccountClosureWorker', {
+      functionName: accountClosureWorkerName,
+      entry: join(here, '../lambda/account-closure.ts'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 512,
+      timeout: Duration.seconds(60),
+      role: createRuntimeRole(this, 'AccountClosureWorkerRole', stage),
+      logGroup: createFunctionLogGroup(
+        this,
+        'AccountClosureWorkerLogs',
+        accountClosureWorkerName,
+        stage,
+      ),
+      environment: {
+        TABLE_NAME: table.tableName,
+        USER_POOL_ID: pool.userPoolId,
+        AUDIT_TABLE_NAME: accessAuditTable.tableName,
+        ACCOUNT_CLOSURE_QUEUE_URL: accountClosureQueue.queueUrl,
+      },
+      bundling: {
+        bundleAwsSDK: true,
+        format: OutputFormat.ESM,
+        tsconfig: join(here, '../tsconfig.json'),
+        target: 'node22',
+      },
+    });
+    accountClosureWorker.addEventSource(
+      new SqsEventSource(accountClosureQueue, {
+        batchSize: 1,
+        reportBatchItemFailures: true,
+      }),
+    );
+    accountClosureQueue.grantSendMessages(accountClosureWorker);
+    accountClosureWorker.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'dynamodb:BatchWriteItem',
+          'dynamodb:GetItem',
+          'dynamodb:Query',
+          'dynamodb:UpdateItem',
+        ],
+        resources: [table.tableArn, `${table.tableArn}/index/*`],
+      }),
+    );
+    accessAuditTable.grant(accountClosureWorker, 'dynamodb:PutItem');
+    accountClosureWorker.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminDeleteUser'],
+        resources: [pool.userPoolArn],
+      }),
+    );
+
+    const accountClosureReconcilerName = `roadmap-account-closure-reconciler-${stage}`;
+    const accountClosureReconciler = new NodejsFunction(
+      this,
+      'AccountClosureReconciler',
+      {
+        functionName: accountClosureReconcilerName,
+        entry: join(here, '../lambda/account-closure-reconciler.ts'),
+        runtime: lambda.Runtime.NODEJS_22_X,
+        memorySize: 256,
+        timeout: Duration.seconds(30),
+        role: createRuntimeRole(this, 'AccountClosureReconcilerRole', stage),
+        logGroup: createFunctionLogGroup(
+          this,
+          'AccountClosureReconcilerLogs',
+          accountClosureReconcilerName,
+          stage,
+        ),
+        environment: {
+          TABLE_NAME: table.tableName,
+          ACCOUNT_CLOSURE_QUEUE_URL: accountClosureQueue.queueUrl,
+        },
+        bundling: {
+          bundleAwsSDK: true,
+          format: OutputFormat.ESM,
+          tsconfig: join(here, '../tsconfig.json'),
+          target: 'node22',
+        },
+      },
+    );
+    accountClosureReconciler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [table.tableArn, `${table.tableArn}/index/gsi1`],
+      }),
+    );
+    accountClosureQueue.grantSendMessages(accountClosureReconciler);
+    new events.Rule(this, 'AccountClosureReconcileSchedule', {
+      ruleName: `roadmap-account-closure-reconciler-${stage}`,
+      schedule: events.Schedule.rate(Duration.minutes(5)),
+      targets: [new eventTargets.LambdaFunction(accountClosureReconciler)],
     });
 
     postConfirmation.addEnvironment('TABLE_NAME', table.tableName);

@@ -18,7 +18,13 @@ const REDACTED = '[REDACTED]';
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const JWT_PATTERN = /(?:^|\s)eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\s|$)/;
 const AUTHORIZATION_PATTERN = /^\s*(?:Bearer|Basic|Digest|HMAC|AWS4-HMAC-SHA256)\s+/i;
-const OBSERVED_SERVICES = ['router', 'post-confirmation', 'pre-signup'] as const;
+const OBSERVED_SERVICES = [
+  'router',
+  'post-confirmation',
+  'pre-signup',
+  'account-closure-worker',
+  'account-closure-reconciler',
+] as const;
 export type ObservedService = (typeof OBSERVED_SERVICES)[number];
 const METRIC_UNITS: Readonly<Record<string, string>> = {
   InvocationSucceeded: 'Count',

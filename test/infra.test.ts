@@ -44,7 +44,7 @@ describe('stage backend infrastructure', () => {
     expect(application.Properties.AuthorizationType).toBe('JWT');
     expect(application.Properties.AuthorizerId).toBeDefined();
     expect(preflight.Properties.Target).toEqual(application.Properties.Target);
-  });
+  }, 20_000);
 
   it.each([
     ['dev', ['https://dev.roadmap2u.com', 'http://localhost:4200', 'http://localhost:8826']],
@@ -77,7 +77,7 @@ describe('stage backend infrastructure', () => {
         AllowOrigins: origins,
       },
     });
-  });
+  }, 20_000);
 
   it('uses username-only Cognito and disposable dev data', () => {
     const template = backendTemplate('dev').toJSON();
@@ -163,7 +163,17 @@ describe('stage backend infrastructure', () => {
       JSON.stringify(resource.Properties.LogGroupName).includes('/aws/apigateway/'),
     );
 
-    expect(lambdaLogs).toHaveLength(3);
+    expect(
+      lambdaLogs.map((resource) => resource.Properties.LogGroupName).sort(),
+    ).toEqual(
+      [
+        `/aws/lambda/roadmap-account-closure-reconciler-${stage}`,
+        `/aws/lambda/roadmap-account-closure-worker-${stage}`,
+        `/aws/lambda/roadmap-post-confirmation-${stage}`,
+        `/aws/lambda/roadmap-pre-signup-${stage}`,
+        `/aws/lambda/roadmap-router-${stage}`,
+      ].sort(),
+    );
     expect(apiLogs).toHaveLength(0);
     expect(logGroups.every((resource) => resource.Properties.RetentionInDays === days)).toBe(true);
 
@@ -190,7 +200,15 @@ describe('stage backend infrastructure', () => {
         (resource: any) => resource.Type === 'AWS::Lambda::Function',
       ) as any[];
 
-      expect(functions).toHaveLength(3);
+      expect(functions.map((fn) => fn.Properties.FunctionName).sort()).toEqual(
+        [
+          `roadmap-account-closure-reconciler-${stage}`,
+          `roadmap-account-closure-worker-${stage}`,
+          `roadmap-post-confirmation-${stage}`,
+          `roadmap-pre-signup-${stage}`,
+          `roadmap-router-${stage}`,
+        ].sort(),
+      );
       for (const fn of functions) {
         const roleLogicalId = fn.Properties.Role['Fn::GetAtt'][0] as string;
         const role = template.Resources[roleLogicalId] as any;

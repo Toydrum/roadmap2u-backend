@@ -59,7 +59,12 @@ function roleArn(stack: Stack, stage: PolicyStage): string {
 }
 
 function functionArns(stack: Stack, stage: PolicyStage): string[] {
-  return ['pre-signup', 'post-confirmation', 'router'].map((name) =>
+  return [
+    'pre-signup',
+    'post-confirmation',
+    'router',
+    'account-closure-*',
+  ].map((name) =>
     Arn.format(
       {
         partition: Aws.PARTITION,
@@ -76,7 +81,12 @@ function functionArns(stack: Stack, stage: PolicyStage): string[] {
 }
 
 function lambdaLogGroupArns(stack: Stack, stage: PolicyStage): string[] {
-  return ['pre-signup', 'post-confirmation', 'router'].map((name) =>
+  return [
+    'pre-signup',
+    'post-confirmation',
+    'router',
+    'account-closure-*',
+  ].map((name) =>
     Arn.format(
       {
         partition: Aws.PARTITION,
@@ -118,6 +128,21 @@ function primaryTableArns(stack: Stack, stage: PolicyStage): string[] {
 
 function auditTableArn(stack: Stack, stage: PolicyStage): string {
   return resourceArn(stack, 'dynamodb', 'table', `roadmap-access-audit-${stage}`);
+}
+
+function accountClosureSourceQueueArn(stack: Stack, stage: PolicyStage): string {
+  return resourceArn(stack, 'sqs', `roadmap-account-closure-${stage}`);
+}
+
+function accountClosureQueueArns(stack: Stack, stage: PolicyStage): string[] {
+  return [
+    accountClosureSourceQueueArn(stack, stage),
+    resourceArn(stack, 'sqs', `roadmap-account-closure-dlq-${stage}`),
+  ];
+}
+
+function accountClosureReconcileRuleArn(stack: Stack, stage: PolicyStage): string {
+  return resourceArn(stack, 'events', 'rule', `roadmap-account-closure-reconciler-${stage}`);
 }
 
 function userPoolArn(stack: Stack): string {
@@ -304,6 +329,18 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         resources: [auditTableArn(stack, stage)],
       }),
       new iam.PolicyStatement({
+        sid: 'UseOnlyAccountClosureQueues',
+        actions: [
+          'sqs:ChangeMessageVisibility',
+          'sqs:DeleteMessage',
+          'sqs:GetQueueAttributes',
+          'sqs:GetQueueUrl',
+          'sqs:ReceiveMessage',
+          'sqs:SendMessage',
+        ],
+        resources: [accountClosureSourceQueueArn(stack, stage)],
+      }),
+      new iam.PolicyStatement({
         sid: 'AdministerOnlyOwnTaggedUserPool',
         actions: [
           'cognito-idp:AdminCreateUser',
@@ -329,6 +366,7 @@ function createCorePolicies(
 } {
   const destructiveTableActions = stage === 'prod' ? [] : ['dynamodb:DeleteTable'];
   const destructivePoolActions = stage === 'prod' ? [] : ['cognito-idp:DeleteUserPool'];
+  const destructiveQueueActions = stage === 'prod' ? [] : ['sqs:DeleteQueue'];
   const boundary = policyArn(stack, stage, `roadmap2u-${stage}-runtime-boundary`);
   const api = apiDomain(stage);
   const stagePathRole = roleArn(stack, stage);
@@ -526,6 +564,51 @@ function createCorePolicies(
           ...destructiveTableActions,
         ],
         resources: [...primaryTableArns(stack, stage), auditTableArn(stack, stage)],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyAccountClosureQueues',
+        actions: [
+          'sqs:CreateQueue',
+          'sqs:GetQueueAttributes',
+          'sqs:GetQueueUrl',
+          'sqs:ListQueueTags',
+          'sqs:SetQueueAttributes',
+          'sqs:TagQueue',
+          'sqs:UntagQueue',
+          ...destructiveQueueActions,
+        ],
+        resources: accountClosureQueueArns(stack, stage),
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageAccountClosureEventSourceMapping',
+        actions: [
+          'lambda:CreateEventSourceMapping',
+          'lambda:DeleteEventSourceMapping',
+          'lambda:GetEventSourceMapping',
+          'lambda:ListEventSourceMappings',
+          'lambda:UpdateEventSourceMapping',
+        ],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'aws:RequestedRegion': stack.region },
+        },
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageAccountClosureReconcileRule',
+        actions: [
+          'events:DeleteRule',
+          'events:DescribeRule',
+          'events:DisableRule',
+          'events:EnableRule',
+          'events:ListTagsForResource',
+          'events:ListTargetsByRule',
+          'events:PutRule',
+          'events:PutTargets',
+          'events:RemoveTargets',
+          'events:TagResource',
+          'events:UntagResource',
+        ],
+        resources: [accountClosureReconcileRuleArn(stack, stage)],
       }),
       new iam.PolicyStatement({
         sid: 'ManageOnlyStageParameters',

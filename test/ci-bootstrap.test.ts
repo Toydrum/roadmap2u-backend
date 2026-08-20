@@ -473,14 +473,14 @@ describe('GitHub OIDC bootstrap', () => {
         'logs:PutRetentionPolicy',
         'logs:TagResource',
       ]);
-      expect(mutation.Resource).toHaveLength(3);
+      expect(mutation.Resource).toHaveLength(4);
       expect(mutation.Resource).not.toContain('*');
       expect(tagging.Action).toEqual([
         'logs:ListTagsForResource',
         'logs:TagResource',
         'logs:UntagResource',
       ]);
-      expect(tagging.Resource).toHaveLength(3);
+      expect(tagging.Resource).toHaveLength(4);
       expect(tagging.Resource).not.toContain('*');
 
       const mutationResources = JSON.stringify(mutation.Resource);
@@ -494,6 +494,12 @@ describe('GitHub OIDC bootstrap', () => {
         expect(taggingResources).toContain(logGroupName);
         expect(taggingResources).not.toContain(`${logGroupName}:*`);
       }
+      expect(mutationResources).toContain(
+        `/aws/lambda/roadmap-account-closure-*-${stage}:*`,
+      );
+      expect(taggingResources).toContain(
+        `/aws/lambda/roadmap-account-closure-*-${stage}`,
+      );
       expect(mutationResources).not.toContain('/aws/apigateway/');
       expect(taggingResources).not.toContain('/aws/apigateway/');
       for (const otherStage of ['dev', 'test', 'prod'].filter((value) => value !== stage)) {
