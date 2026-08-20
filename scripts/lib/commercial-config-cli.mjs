@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 
 const ACCOUNT_ID = '765932874577';
@@ -49,6 +51,147 @@ const COMMON_OPTIONS = new Set([
 function sha256(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
+
+function isObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (isObject(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function buildCutoverEvidenceMirror({
+  stage,
+  commercialEntitlementsCutoverAt,
+  inventoryManifestHash,
+} = {}) {
+  if (!STAGES.has(stage)) throw new Error('evidence stage must be dev, test, or prod');
+  const timestamp = Date.parse(commercialEntitlementsCutoverAt);
+  if (
+    !Number.isFinite(timestamp) ||
+    new Date(timestamp).toISOString() !== commercialEntitlementsCutoverAt
+  ) {
+    throw new Error('evidence cutover timestamp must be canonical UTC ISO-8601');
+  }
+  if (!HASH_PATTERN.test(inventoryManifestHash)) {
+    throw new Error('evidence inventory manifest hash must be lowercase SHA-256');
+  }
+  const mirror = {
+    schemaVersion: 1,
+    evidenceKind: 'commercial-cutover',
+    stage,
+    commercialEntitlementsCutoverAt,
+    inventoryManifestHash,
+  };
+  return { ...mirror, mirrorHash: sha256(canonicalJson(mirror)) };
+}
+
+function validateCutoverEvidenceMirror(mirror, stage) {
+  if (
+    !isObject(mirror) ||
+    Object.keys(mirror).length !== 6 ||
+    mirror.schemaVersion !== 1 ||
+    mirror.evidenceKind !== 'commercial-cutover' ||
+    mirror.stage !== stage ||
+    !HASH_PATTERN.test(mirror.inventoryManifestHash) ||
+    !HASH_PATTERN.test(mirror.mirrorHash)
+  ) {
+    throw new Error('cutover evidence mirror is invalid');
+  }
+  const expected = buildCutoverEvidenceMirror({
+    stage: mirror.stage,
+    commercialEntitlementsCutoverAt: mirror.commercialEntitlementsCutoverAt,
+    inventoryManifestHash: mirror.inventoryManifestHash,
+  });
+  if (canonicalJson(expected) !== canonicalJson(mirror)) {
+    throw new Error('cutover evidence mirror hash does not match its contents');
+  }
+  return mirror;
+}
+
+function resolveEvidenceRoot(evidenceRoot, cwd) {
+  if (
+    typeof evidenceRoot !== 'string' ||
+    evidenceRoot.length === 0 ||
+    evidenceRoot !== evidenceRoot.trim() ||
+    !isAbsolute(evidenceRoot)
+  ) {
+    throw new Error('EVIDENCE_ROOT must be an absolute path');
+  }
+  const root = resolve(evidenceRoot);
+  const segments = root.toLocaleLowerCase('en-US').split(/[\\/]+/);
+  if (
+    segments.at(-2) !== 'evidence' ||
+    segments.at(-1) !== 'commercial-launch'
+  ) {
+    throw new Error('EVIDENCE_ROOT must end with evidence/commercial-launch');
+  }
+  const checkout = resolve(cwd);
+  const fromCheckout = relative(checkout, root);
+  if (
+    fromCheckout === '' ||
+    (!fromCheckout.startsWith(`..${sep}`) &&
+      fromCheckout !== '..' &&
+      !isAbsolute(fromCheckout))
+  ) {
+    throw new Error('EVIDENCE_ROOT must remain outside the backend checkout');
+  }
+  return root;
+}
+
+export function createCutoverEvidenceWriter({
+  makeDirectory = mkdir,
+  writeFile: writeEvidenceFile = writeFile,
+  readFile: readEvidenceFile = readFile,
+  cwd = process.cwd(),
+} = {}) {
+  if (
+    typeof makeDirectory !== 'function' ||
+    typeof writeEvidenceFile !== 'function' ||
+    typeof readEvidenceFile !== 'function'
+  ) {
+    throw new Error('evidence filesystem seams must be functions');
+  }
+  return async ({ evidenceRoot, stage, mirror } = {}) => {
+    const root = resolveEvidenceRoot(evidenceRoot, cwd);
+    validateCutoverEvidenceMirror(mirror, stage);
+    const directory = resolve(root, 'cutover', stage);
+    const path = resolve(directory, `${mirror.mirrorHash}.json`);
+    const content = `${canonicalJson(mirror)}\n`;
+    await makeDirectory(directory, { recursive: true });
+    try {
+      await writeEvidenceFile(path, content, {
+        encoding: 'utf8',
+        mode: 0o600,
+        flag: 'wx',
+      });
+      return { path, created: true };
+    } catch (error) {
+      if (!isObject(error) || error.code !== 'EEXIST') {
+        throw new Error('cutover evidence mirror could not be written');
+      }
+      let existing;
+      try {
+        existing = await readEvidenceFile(path, 'utf8');
+      } catch {
+        throw new Error('existing cutover evidence mirror is unreadable');
+      }
+      if (existing !== content) {
+        throw new Error('existing cutover evidence mirror has different contents');
+      }
+      return { path, created: false };
+    }
+  };
+}
+
+const writeCutoverEvidence = createCutoverEvidenceWriter();
 
 function hmac(key, value, encoding) {
   return createHmac('sha256', key).update(value, 'utf8').digest(encoding);
@@ -419,6 +562,27 @@ function safeResult(response, payload, write, command, stage) {
   }
 }
 
+function validateFreezeResponse(response, payload, requestBody) {
+  const expectedKeys = [
+    'command',
+    'commercialEntitlementsCutoverAt',
+    'idempotent',
+    'inventoryManifestHash',
+  ];
+  if (
+    !isObject(payload) ||
+    canonicalJson(Object.keys(payload).sort()) !== canonicalJson(expectedKeys) ||
+    payload.command !== 'freeze-cutover' ||
+    payload.commercialEntitlementsCutoverAt !==
+      requestBody.commercialEntitlementsCutoverAt ||
+    payload.inventoryManifestHash !== requestBody.inventoryManifestHash ||
+    typeof payload.idempotent !== 'boolean' ||
+    (payload.idempotent ? response.status !== 200 : response.status !== 201)
+  ) {
+    throw new Error('broker freeze response does not exactly match the request');
+  }
+}
+
 export async function runCommercialConfigCli({
   command,
   argv,
@@ -427,6 +591,8 @@ export async function runCommercialConfigCli({
   getCredentials = defaultCredentials,
   fetch: fetchRequest = globalThis.fetch,
   now = () => new Date(),
+  evidenceRoot = process.env.EVIDENCE_ROOT,
+  writeEvidenceMirror = writeCutoverEvidence,
 }) {
   if (!Array.isArray(argv)) throw new Error('argv must be an array');
   const options = parseOptions(argv, command);
@@ -450,6 +616,20 @@ export async function runCommercialConfigCli({
     throw new Error('confirmation hash does not match dry-run hash');
   }
 
+  let cutoverEvidence;
+  let resolvedEvidenceRoot;
+  if (command === 'freeze-cutover') {
+    if (typeof writeEvidenceMirror !== 'function') {
+      throw new Error('cutover evidence writer is unavailable');
+    }
+    resolvedEvidenceRoot = resolveEvidenceRoot(evidenceRoot, process.cwd());
+    cutoverEvidence = buildCutoverEvidenceMirror({
+      stage: shared.stage,
+      commercialEntitlementsCutoverAt: body.commercialEntitlementsCutoverAt,
+      inventoryManifestHash: body.inventoryManifestHash,
+    });
+  }
+
   const credentials = await getCredentials(shared.profile);
   const headers = signFunctionUrlRequest({
     url: shared.url,
@@ -469,6 +649,18 @@ export async function runCommercialConfigCli({
     payload = JSON.parse(rawResponse);
   } catch {
     throw new Error(`broker returned invalid JSON with status ${response.status}`);
+  }
+  if (!response.ok) {
+    safeResult(response, payload, write, command, shared.stage);
+  }
+  if (command === 'freeze-cutover') {
+    validateFreezeResponse(response, payload, body);
+    await writeEvidenceMirror({
+      evidenceRoot: resolvedEvidenceRoot,
+      stage: shared.stage,
+      mirror: cutoverEvidence,
+    });
+    write(`evidenceMirrorHash=${cutoverEvidence.mirrorHash}`);
   }
   safeResult(response, payload, write, command, shared.stage);
   return 0;
