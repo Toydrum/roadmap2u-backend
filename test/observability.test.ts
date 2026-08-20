@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  emitCommercialBrokerAvailabilityMetric,
+  emitCommercialMetric,
   emitMetric,
   instrumentHandler,
   resolveObservabilityContext,
@@ -148,6 +150,47 @@ describe('observability', () => {
         service: 'per-user-service-name',
       }),
     ).toThrow('metric dimension value is not allowlisted');
+  });
+
+  it('emits allowlisted commercial EMF without identifiers or personal data', () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+
+    emitCommercialMetric('ConfigurationDrift', 'dev');
+
+    const line = String(info.mock.calls[0]?.[0]);
+    expect(JSON.parse(line)).toEqual({
+      _aws: {
+        Timestamp: expect.any(Number),
+        CloudWatchMetrics: [
+          {
+            Namespace: 'RoadMap2U',
+            Dimensions: [['stage']],
+            Metrics: [{ Name: 'ConfigurationDrift', Unit: 'Count' }],
+          },
+        ],
+      },
+      stage: 'dev',
+      ConfigurationDrift: 1,
+    });
+    expect(line).not.toMatch(/requestId|correlationId|email|username|body|code|token/i);
+    expect(() => emitCommercialMetric('PerUserMetric' as never, 'dev')).toThrow(
+      'commercial metric is not allowlisted',
+    );
+    expect(() => emitCommercialMetric('ConfigurationDrift', 'preview' as never)).toThrow(
+      'commercial metric stage is not allowlisted',
+    );
+  });
+
+  it('emits unavailability only for a config broker 503 response', () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+
+    emitCommercialBrokerAvailabilityMetric(409, 'test');
+    emitCommercialBrokerAvailabilityMetric(503, 'test');
+
+    expect(info).toHaveBeenCalledOnce();
+    expect(String(info.mock.calls[0]?.[0])).toContain(
+      'CommercialConfigurationUnavailable',
+    );
   });
 
   it('derives a bounded correlation id and falls back to the request id', () => {

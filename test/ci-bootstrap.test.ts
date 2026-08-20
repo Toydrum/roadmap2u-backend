@@ -206,9 +206,9 @@ describe('GitHub OIDC bootstrap', () => {
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
     ) as any[];
 
-    expect(managedPolicies).toHaveLength(15);
+    expect(managedPolicies).toHaveLength(18);
     expect(new Set(managedPolicies.map((policy) => policy.Properties.ManagedPolicyName)).size).toBe(
-      15,
+      18,
     );
     for (const stage of ['dev', 'test', 'prod']) {
       const stagePolicies = managedPolicies.filter(
@@ -219,6 +219,7 @@ describe('GitHub OIDC bootstrap', () => {
         `roadmap2u-${stage}-cfn-core`,
         `roadmap2u-${stage}-cfn-data`,
         `roadmap2u-${stage}-cfn-edge`,
+        `roadmap2u-${stage}-cfn-observability`,
         `roadmap2u-${stage}-runtime-boundary`,
       ]);
 
@@ -274,6 +275,86 @@ describe('GitHub OIDC bootstrap', () => {
     expect(prodActions).not.toContain('s3:DeleteBucket');
     expect(prodActions).not.toContain('dynamodb:DeleteTable');
     expect(prodActions).not.toContain('cognito-idp:DeleteUserPool');
+  });
+
+  it('isolates observability provisioning in one bounded stage policy', () => {
+    const template = bootstrapTemplate().toJSON();
+    const managedPolicies = Object.values(template.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+    const roles = Object.values(template.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Role',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const policy = managedPolicies.find(
+        (candidate) =>
+          candidate.Properties.ManagedPolicyName ===
+          `roadmap2u-${stage}-cfn-observability`,
+      );
+      expect(policy).toBeDefined();
+      expect(policy.Properties.Path).toBe(`/roadmap2u/${stage}/`);
+      expect(JSON.stringify(policy.Properties.PolicyDocument).length).toBeLessThanOrEqual(6000);
+
+      const statements = policy.Properties.PolicyDocument.Statement;
+      expect(statements.every((statement: any) => statement.Resource !== '*')).toBe(true);
+      const actions = statements.flatMap((statement: any) =>
+        Array.isArray(statement.Action) ? statement.Action : [statement.Action],
+      );
+      expect(actions).toContain('sns:ListSubscriptionsByTopic');
+      expect(actions).not.toContain('sns:Publish');
+      expect(actions).not.toContain('cloudwatch:PutMetricData');
+      expect(JSON.stringify(statements)).toContain(`roadmap-commercial-alerts-${stage}`);
+      expect(JSON.stringify(statements)).toContain(`roadmap-commercial-${stage}-*`);
+
+      for (const role of roles) {
+        expect(JSON.stringify(role.Properties.ManagedPolicyArns ?? [])).not.toContain(
+          `roadmap2u-${stage}-cfn-observability`,
+        );
+      }
+      expect(template.Outputs).toHaveProperty(`${stage}CfnObservabilityPolicyArn`);
+    }
+  });
+
+  it('lets only the backend OIDC role inspect its topic and exercise its synthetic alarm', () => {
+    const template = bootstrapTemplate().toJSON();
+    const roles = Object.entries(template.Resources).filter(
+      ([, resource]: [string, any]) => resource.Type === 'AWS::IAM::Role',
+    ) as [string, any][];
+    const inlinePolicies = Object.values(template.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Policy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const [backendRoleId] = roles.find(
+        ([, role]) => role.Properties.RoleName === `roadmap2u-${stage}-backend-deploy`,
+      ) as [string, any];
+      const statements = inlinePolicies
+        .filter((policy) => JSON.stringify(policy.Properties.Roles).includes(backendRoleId))
+        .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+      const topicRead = statements.find(
+        (statement: any) => statement.Sid === `InspectCommercialAlarmTopic${stage}`,
+      );
+      const synthetic = statements.find(
+        (statement: any) => statement.Sid === `ExerciseCommercialSyntheticAlarm${stage}`,
+      );
+
+      expect(topicRead.Action).toBe('sns:ListSubscriptionsByTopic');
+      expect(JSON.stringify(topicRead.Resource)).toContain(
+        `:sns:us-east-1:${ACCOUNT}:roadmap-commercial-alerts-${stage}`,
+      );
+      expect(synthetic.Action).toEqual(['cloudwatch:DescribeAlarms', 'cloudwatch:SetAlarmState']);
+      expect(JSON.stringify(synthetic.Resource)).toContain(
+        `alarm:roadmap-commercial-${stage}-synthetic`,
+      );
+
+      const nonBackendPolicies = inlinePolicies.filter(
+        (policy) => !JSON.stringify(policy.Properties.Roles).includes(backendRoleId),
+      );
+      expect(JSON.stringify(nonBackendPolicies)).not.toContain(
+        `ExerciseCommercialSyntheticAlarm${stage}`,
+      );
+    }
   });
 
   it('creates stage-scoped commercial operators with MFA and broker-only config mutation', () => {

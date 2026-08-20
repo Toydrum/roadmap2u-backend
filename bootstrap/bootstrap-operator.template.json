@@ -201,14 +201,17 @@
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-api",
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-data",
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-edge",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-observability",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-core",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-api",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-data",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-edge",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-observability",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-core",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-api",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-data",
-                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-edge"
+                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-edge",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-observability"
                       ]
                     }
                   }

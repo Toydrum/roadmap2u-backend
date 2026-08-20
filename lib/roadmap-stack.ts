@@ -1,5 +1,6 @@
 import {
   Arn,
+  ArnFormat,
   Aws,
   BootstraplessSynthesizer,
   CfnOutput,
@@ -38,6 +39,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PASSWORD_POLICY } from '@app/auth/auth-types';
 import { createStageManagedPolicies } from './stage-policies';
+import { createCommercialObservability } from './commercial-observability';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT_DOMAIN = 'roadmap2u.com';
@@ -777,8 +779,61 @@ export class RoadmapStack extends Stack {
     new CfnOutput(this, 'CommercialConfigBrokerFunctionUrl', {
       value: commercialConfigBrokerUrl.url,
     });
+
+    const commercialObservability = createCommercialObservability(
+      this,
+      'CommercialObservability',
+      {
+        stage,
+        functions: [
+          {
+            key: 'pre-signup',
+            function: preSignUp,
+            durationWarningMilliseconds: 8_000,
+          },
+          {
+            key: 'post-confirmation',
+            function: postConfirmation,
+            durationWarningMilliseconds: 8_000,
+          },
+          {
+            key: 'config-broker',
+            function: commercialConfigBroker,
+            durationWarningMilliseconds: 8_000,
+          },
+          {
+            key: 'closure-worker',
+            function: accountClosureWorker,
+            durationWarningMilliseconds: 48_000,
+          },
+          {
+            key: 'closure-reconciler',
+            function: accountClosureReconciler,
+            durationWarningMilliseconds: 24_000,
+          },
+          {
+            key: 'router',
+            function: router,
+            durationWarningMilliseconds: 12_000,
+          },
+        ],
+        api,
+        tables: [
+          { key: 'primary', table },
+          { key: 'access-audit', table: accessAuditTable },
+        ],
+        accountClosureQueue,
+        accountClosureDlq,
+      },
+    );
     new CfnOutput(this, 'CommercialConfigBrokerFunctionArn', {
       value: commercialConfigBroker.functionArn,
+    });
+    new CfnOutput(this, 'CommercialAlarmTopicArn', {
+      value: commercialObservability.topic.topicArn,
+    });
+    new CfnOutput(this, 'CommercialSyntheticAlarmName', {
+      value: commercialObservability.syntheticAlarm.alarmName,
     });
   }
 }
@@ -952,6 +1007,9 @@ export class RoadmapCiBootstrapStack extends Stack {
       new CfnOutput(this, `${stage}CfnApiPolicyArn`, { value: policies.api.managedPolicyArn });
       new CfnOutput(this, `${stage}CfnDataPolicyArn`, { value: policies.data.managedPolicyArn });
       new CfnOutput(this, `${stage}CfnEdgePolicyArn`, { value: policies.edge.managedPolicyArn });
+      new CfnOutput(this, `${stage}CfnObservabilityPolicyArn`, {
+        value: policies.observability.managedPolicyArn,
+      });
       new CfnOutput(this, `${stage}RuntimeBoundaryArn`, {
         value: policies.runtimeBoundary.managedPolicyArn,
       });
@@ -1329,6 +1387,25 @@ export class RoadmapCiBootstrapStack extends Stack {
     return this.parameterArn(`/roadmap2u/${stage}/backend-release-manifests/*`);
   }
 
+  private commercialAlarmTopicArn(stage: DeploymentStage): string {
+    return `arn:${Aws.PARTITION}:sns:us-east-1:${this.account}:roadmap-commercial-alerts-${stage}`;
+  }
+
+  private commercialSyntheticAlarmArn(stage: DeploymentStage): string {
+    return Arn.format(
+      {
+        partition: Aws.PARTITION,
+        service: 'cloudwatch',
+        region: 'us-east-1',
+        account: this.account,
+        resource: 'alarm',
+        resourceName: `roadmap-commercial-${stage}-synthetic`,
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      },
+      this,
+    );
+  }
+
   private createBackendRole(
     providerArn: string,
     stage: DeploymentStage,
@@ -1402,6 +1479,20 @@ export class RoadmapCiBootstrapStack extends Stack {
         sid: `InspectStageLogRetention${stage}`,
         actions: ['logs:DescribeLogGroups'],
         resources: ['*'],
+      }),
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: `InspectCommercialAlarmTopic${stage}`,
+        actions: ['sns:ListSubscriptionsByTopic'],
+        resources: [this.commercialAlarmTopicArn(stage)],
+      }),
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: `ExerciseCommercialSyntheticAlarm${stage}`,
+        actions: ['cloudwatch:DescribeAlarms', 'cloudwatch:SetAlarmState'],
+        resources: [this.commercialSyntheticAlarmArn(stage)],
       }),
     );
     return role;

@@ -184,6 +184,17 @@ jobs:
             ROADMAP2U_FRONTEND_PATH="${GITHUB_WORKSPACE}/RoadMap2U" npm test
           fi
 
+      - name: Validate and mask alarm notification email
+        env:
+          ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$ALARM_NOTIFICATION_EMAIL" || ${#ALARM_NOTIFICATION_EMAIL} -gt 254 || ! "$ALARM_NOTIFICATION_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
+            echo "ALARM_NOTIFICATION_EMAIL is missing or invalid." >&2
+            exit 1
+          fi
+          echo "::add-mask::$ALARM_NOTIFICATION_EMAIL"
+
       - name: Configure AWS credentials through OIDC
         uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
@@ -231,6 +242,8 @@ jobs:
           done
 
       - name: Review CDK diff
+        env:
+          ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}
         run: >-
           npx --no-install cdk diff
           "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"
@@ -238,8 +251,11 @@ jobs:
           -c stage="${STAGE}"
           -c AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}"
           -c HOSTED_ZONE_ID="${HOSTED_ZONE_ID}"
+          --parameters "Roadmap-${STAGE}-Backend:AlarmNotificationEmail=${ALARM_NOTIFICATION_EMAIL}"
 
       - name: Deploy selected stage
+        env:
+          ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}
         run: >-
           npx --no-install cdk deploy
           "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"
@@ -247,6 +263,7 @@ jobs:
           -c stage="${STAGE}"
           -c AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}"
           -c HOSTED_ZONE_ID="${HOSTED_ZONE_ID}"
+          --parameters "Roadmap-${STAGE}-Backend:AlarmNotificationEmail=${ALARM_NOTIFICATION_EMAIL}"
 
       - name: Validate deployed stacks and public configuration
         run: |
@@ -319,6 +336,40 @@ jobs:
                 $matches[0].retentionInDays == $retention
               ' log-groups.json >/dev/null
           done
+
+      - name: Verify commercial alarm channel
+        env:
+          ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}
+        run: |
+          set -euo pipefail
+          TOPIC_ARN="arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:roadmap-commercial-alerts-${STAGE}"
+          ALARM_NAME="roadmap-commercial-${STAGE}-synthetic"
+          SUBSCRIPTIONS="$(aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN" --output json)"
+          jq -e --arg email "$ALARM_NOTIFICATION_EMAIL" '
+            (.Subscriptions | length) == 1 and
+            .Subscriptions[0].Protocol == "email" and
+            .Subscriptions[0].Endpoint == $email and
+            .Subscriptions[0].SubscriptionArn != "PendingConfirmation"
+          ' <<<"$SUBSCRIPTIONS" >/dev/null
+
+          aws cloudwatch set-alarm-state \
+            --alarm-name "$ALARM_NAME" \
+            --state-value ALARM \
+            --state-reason "RoadMap2U deployment synthetic notification check"
+          for ATTEMPT in {1..12}; do
+            STATE="$(aws cloudwatch describe-alarms \
+              --alarm-names "$ALARM_NAME" \
+              --query 'MetricAlarms[0].StateValue' \
+              --output text)"
+            if [[ "$STATE" == "ALARM" ]]; then break; fi
+            sleep 5
+          done
+          test "$STATE" = "ALARM"
+          sleep 15
+          aws cloudwatch set-alarm-state \
+            --alarm-name "$ALARM_NAME" \
+            --state-value OK \
+            --state-reason "RoadMap2U deployment synthetic notification check completed"
 
       - name: Smoke-test protected API and exact CORS allowlist
         run: |

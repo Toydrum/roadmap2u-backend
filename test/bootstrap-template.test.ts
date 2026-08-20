@@ -328,7 +328,7 @@ describe('custom stage CDK bootstrap template', () => {
     expect(operateStatement.Action).toContain('cloudformation:UpdateTerminationProtection');
   });
 
-  it('attaches only the selected stage core and edge policies to CloudFormation', () => {
+  it('attaches only the selected stage workload policies to CloudFormation', () => {
     expect(existsSync(templatePath)).toBe(true);
     const template = JSON.parse(readFileSync(templatePath, 'utf8'));
     const rendered = JSON.stringify(template.Resources.CloudFormationExecutionRole);
@@ -337,6 +337,12 @@ describe('custom stage CDK bootstrap template', () => {
     expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-api');
     expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-edge');
     expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-data');
+    expect(rendered).toContain(
+      'policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-observability',
+    );
+    expect(
+      template.Resources.CloudFormationExecutionRole.Properties.ManagedPolicyArns,
+    ).toHaveLength(5);
     expect(rendered).not.toContain('AdministratorAccess');
   });
 
@@ -478,7 +484,7 @@ describe('custom stage CDK bootstrap template', () => {
     expect(template.Outputs.BootstrapOperatorRoleArn).toBeDefined();
   });
 
-  it('lets the operator attach only the twelve stage control-plane policies', () => {
+  it('lets the operator attach only the fifteen stage control-plane policies', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
     const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
       .PolicyDocument.Statement;
@@ -501,14 +507,17 @@ describe('custom stage CDK bootstrap template', () => {
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-data',
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-edge',
+      'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-observability',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-core',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-data',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-edge',
+      'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-observability',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-core',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-data',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-edge',
+      'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-observability',
     ]);
     const roleManagement = statements.find(
       (statement: any) => statement.Sid === 'CreateAndManageRoadMap2URoles',

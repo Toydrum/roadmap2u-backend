@@ -18,7 +18,7 @@ Esta guía se usa durante las ventanas aprobadas del rollout. Mantén todos los 
 4. Designar a un operador con permisos acotados para el bootstrap inicial.
 5. Revisar las plantillas sintetizadas y políticas IAM antes de aplicarlas.
 
-El proveedor OIDC existente de la cuenta, con issuer `https://token.actions.githubusercontent.com` y audience `sts.amazonaws.com`, se reutiliza: este rollout no lo crea, reemplaza ni elimina. `Roadmap-CiBootstrap` usa `BootstraplessSynthesizer`, se sintetiza a una plantilla revisable y se aplica directamente mediante CloudFormation por el operador temporal. Así no depende del `CDKToolkit` compartido ni de sus permisos administrativos. Después se crean tres toolkits personalizados para las cargas de `dev`, `test` y `prod` a partir de plantillas derivadas del bootstrap canónico v32, fijadas en el repositorio y revisadas; actualizar CDK exige regenerar y revisar explícitamente esas plantillas.
+El proveedor OIDC existente de la cuenta, con issuer `https://token.actions.githubusercontent.com` y audience `sts.amazonaws.com`, se reutiliza: este rollout no lo crea, reemplaza ni elimina. `Roadmap-CiBootstrap` usa `BootstraplessSynthesizer`, se sintetiza a una plantilla revisable y se aplica directamente mediante CloudFormation por el operador temporal. Así no depende del `CDKToolkit` compartido ni de sus permisos administrativos. Después se crean tres toolkits personalizados para las cargas de `dev`, `test` y `prod` a partir de plantillas derivadas del bootstrap canónico v33, fijadas en el repositorio y revisadas; actualizar CDK exige regenerar y revisar explícitamente esas plantillas.
 
 Los toolkits de stage usan calificadores y nombres distintos:
 
@@ -29,6 +29,8 @@ Los toolkits de stage usan calificadores y nombres distintos:
 | `prod` | `rmap2uprd` | `RoadMap2U-CDK-prod` |
 
 Esto separa nombres de roles, buckets y assets y evita que un rol OIDC asuma los roles bootstrap de otro stage. No es por sí solo una frontera de permisos: en una misma cuenta, el alcance efectivo lo determina la política del `CloudFormationExecutionRole`. `AWS_DEPLOY_ENABLED` y `AWS_ROLLBACK_ENABLED` deben permanecer en `false` hasta que exista una managed policy revisada y de mínimo privilegio para cada stage. Nunca uses `AdministratorAccess` como policy de ejecución de estos toolkits.
+
+Cada `CloudFormationExecutionRole` adjunta las cinco policies de workload `cfn-core`, `cfn-api`, `cfn-data`, `cfn-edge` y `cfn-observability`; la sexta managed policy del stage es la `runtime-boundary` y nunca se adjunta como permiso de ejecución. `cfn-observability` queda separada, acotada a `roadmap-commercial-alerts-<stage>` y `roadmap-commercial-<stage>-*`, y no concede `sns:Publish`, `cloudwatch:PutMetricData` ni un `Resource: "*"`.
 
 Cada toolkit también posee el log group `/aws/apigateway/roadmap-api-<stage>`, su retención de 7/14/30 días y una `ResourcePolicyDocument` limitada al principal `delivery.logs.amazonaws.com`, a la cuenta y al ARN exacto del log group. El toolkit exporta el nombre y el backend construye desde él un único ARN con sufijo `:*`. Así, el operador temporal MFA realiza `logs:PutResourcePolicy` durante el bootstrap, mientras los `CloudFormationExecutionRole` ordinarios sólo conservan las autorizaciones regionales de entrega y lectura que API Gateway necesita. Además, `apigateway:Request/AccessLoggingDestination` fija cada `CreateStage`/`UpdateStage` al log group del mismo ambiente; un stack `dev` no puede reescribir la política ni redirigir los access logs hacia `test` o `prod`.
 
@@ -56,6 +58,8 @@ Los demás valores pueden variar entre repositorios porque cada uno usa un rol d
 | `AWS_ROLE_ARN` | `arn:aws:iam::<account>:role/<role>` | rol del repo y stage exactos |
 
 El frontend consume `AWS_ACCOUNT_ID` y `AWS_ROLE_ARN`; el ARN apunta al rol frontend del stage. El backend consume además `HOSTED_ZONE_ID` para synth/deploy. Los ARNs y IDs no son secretos; aun así, no deben hardcodearse porque pertenecen a una cuenta/ambiente concreto.
+
+En cada environment backend crea el secret `ALARM_NOTIFICATION_EMAIL`. El workflow lo valida y enmascara antes del diff, lo pasa a ambos comandos CDK como parámetro CloudFormation `AlarmNotificationEmail` con `NoEcho` y se detiene hasta que exista exactamente una suscripción email confirmada. El valor no forma parte del contexto CDK ni de los templates; no lo copies a variables, logs o evidencia.
 
 El environment backend `prod` recibe `DNS_PLAN_ROLE_ARN` desde el output `prodDnsPlanRoleArn`; ese rol solo puede leer la zona, distribución, certificado, marcadores y respaldo necesarios para generar el plan. El environment separado `prod-dns-cutover` recibe `DNS_CUTOVER_ROLE_ARN` desde `prodDnsCutoverRoleArn`; solo este rol puede mutar el apex/`www` y escribir el respaldo SSM tras la segunda aprobación. Ambos environments reciben `AWS_ACCOUNT_ID` y `HOSTED_ZONE_ID`. Mantén el gate de repositorio `DNS_CUTOVER_ENABLED` en `false` hasta la ventana formal de corte.
 

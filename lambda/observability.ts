@@ -35,6 +35,17 @@ const METRIC_DIMENSION_VALUES: Readonly<Record<string, ReadonlySet<string>>> = {
   service: new Set(OBSERVED_SERVICES),
   outcome: new Set(['success', 'failure']),
 };
+const COMMERCIAL_METRICS = new Set([
+  'ConfigurationDrift',
+  'CommercialConfigurationUnavailable',
+  'CommercialConfigurationStale',
+]);
+const COMMERCIAL_STAGES = new Set(['dev', 'test', 'prod']);
+export type CommercialEmfMetricName =
+  | 'ConfigurationDrift'
+  | 'CommercialConfigurationUnavailable'
+  | 'CommercialConfigurationStale';
+export type CommercialMetricStage = 'dev' | 'test' | 'prod';
 
 function isSensitiveKey(key: string): boolean {
   const normalized = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
@@ -162,6 +173,44 @@ export function emitMetric(
       correlationId: context.correlationId,
     }),
   );
+}
+
+/** Emits only bounded, stage-level commercial metrics; no request or user data is accepted. */
+export function emitCommercialMetric(
+  metricName: CommercialEmfMetricName,
+  stage: CommercialMetricStage,
+): void {
+  if (!COMMERCIAL_METRICS.has(metricName)) {
+    throw new Error('commercial metric is not allowlisted');
+  }
+  if (!COMMERCIAL_STAGES.has(stage)) {
+    throw new Error('commercial metric stage is not allowlisted');
+  }
+  console.info(
+    JSON.stringify({
+      _aws: {
+        Timestamp: Date.now(),
+        CloudWatchMetrics: [
+          {
+            Namespace: 'RoadMap2U',
+            Dimensions: [['stage']],
+            Metrics: [{ Name: metricName, Unit: 'Count' }],
+          },
+        ],
+      },
+      stage,
+      [metricName]: 1,
+    }),
+  );
+}
+
+export function emitCommercialBrokerAvailabilityMetric(
+  statusCode: number,
+  stage: CommercialMetricStage,
+): void {
+  if (statusCode === 503) {
+    emitCommercialMetric('CommercialConfigurationUnavailable', stage);
+  }
 }
 
 export function instrumentHandler<TEvent, TArgs extends unknown[], TResult>(

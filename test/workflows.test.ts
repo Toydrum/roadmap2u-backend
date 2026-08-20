@@ -115,6 +115,76 @@ describe('backend GitHub Actions', () => {
     );
   });
 
+  it('requires and masks the alarm email, passes it to both CDK operations, and exercises the channel', () => {
+    const contents = workflow('deploy.yml');
+    const ci = workflow('ci.yml');
+    const validation = namedStep(contents, 'Validate and mask alarm notification email');
+    const diff = namedStep(contents, 'Review CDK diff');
+    const deploy = namedStep(contents, 'Deploy selected stage');
+    const alarmCheck = namedStep(contents, 'Verify commercial alarm channel');
+
+    for (const step of [validation, diff, deploy, alarmCheck]) {
+      expect(step).toContain(
+        'ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}',
+      );
+    }
+    expect(
+      contents.match(/ALARM_NOTIFICATION_EMAIL: \$\{\{ secrets\.ALARM_NOTIFICATION_EMAIL \}\}/g) ?? [],
+    ).toHaveLength(4);
+    expect(validation).toContain('::add-mask::$ALARM_NOTIFICATION_EMAIL');
+    expect(validation).toContain('ALARM_NOTIFICATION_EMAIL is missing or invalid');
+    expect(validation).not.toContain('echo "$ALARM_NOTIFICATION_EMAIL"');
+    expect(validation.indexOf('if [[ -z "$ALARM_NOTIFICATION_EMAIL"')).toBeLessThan(
+      validation.indexOf('::add-mask::$ALARM_NOTIFICATION_EMAIL'),
+    );
+    expect(
+      contents.match(
+        /--parameters "Roadmap-\$\{STAGE\}-Backend:AlarmNotificationEmail=\$\{ALARM_NOTIFICATION_EMAIL\}"/g,
+      ) ?? [],
+    )
+      .toHaveLength(2);
+    expect(contents).not.toContain('-c ALARM_NOTIFICATION_EMAIL=');
+    expect(repositoryFile(join('bin', 'roadmap.ts'))).not.toContain(
+      'ALARM_NOTIFICATION_EMAIL',
+    );
+    expect(contents.indexOf('Validate and mask alarm notification email')).toBeLessThan(
+      contents.indexOf('Review CDK diff'),
+    );
+    expect(alarmCheck).toContain('aws sns list-subscriptions-by-topic');
+    expect(alarmCheck).toContain('roadmap-commercial-alerts-${STAGE}');
+    expect(alarmCheck).toContain('SubscriptionArn != "PendingConfirmation"');
+    expect(alarmCheck).toContain('--arg email "$ALARM_NOTIFICATION_EMAIL"');
+    expect(alarmCheck).toContain('(.Subscriptions | length) == 1');
+    expect(alarmCheck).toContain('.Endpoint == $email');
+    expect(alarmCheck).toContain('aws cloudwatch set-alarm-state');
+    expect(alarmCheck).toContain('roadmap-commercial-${STAGE}-synthetic');
+    expect(alarmCheck).toContain('aws cloudwatch describe-alarms');
+    expect(contents.indexOf('Deploy selected stage')).toBeLessThan(
+      contents.indexOf('Verify commercial alarm channel'),
+    );
+    expect(contents.indexOf('Verify commercial alarm channel')).toBeLessThan(
+      contents.indexOf('Publish immutable backend release manifest'),
+    );
+    expect(ci).not.toContain('ALARM_NOTIFICATION_EMAIL');
+  });
+
+  it('documents alarm ownership, confirmation, synthetic test, and the pending drift adapter', () => {
+    const runbook = document(join('runbooks', 'commercial-alerts.md'));
+
+    expect(runbook).toContain('ALARM_NOTIFICATION_EMAIL');
+    expect(runbook).toContain('PendingConfirmation');
+    expect(runbook).toContain('roadmap-commercial-${stage}-synthetic');
+    expect(runbook).toContain('ConfigurationDrift');
+    expect(runbook).toContain('emitCommercialMetric');
+    expect(runbook).toContain('Duration');
+    expect(runbook).toContain('80 %');
+    expect(runbook).toContain('TransactionConflict');
+    expect(runbook).toContain('http-api-metrics.html');
+    expect(runbook).toContain('no publica una métrica nativa separada para 429');
+    expect(runbook).toContain('no completa GATE-100');
+    expect(runbook).not.toContain('@gmail.com');
+  });
+
   it('checks out the locked frontend only for deploy and verifies it before contract parity', () => {
     const contents = workflow('deploy.yml');
     const resolve = namedStep(contents, 'Resolve pinned frontend contract source');
@@ -390,6 +460,8 @@ describe('backend GitHub Actions', () => {
     expect(setup).toContain('repo:Toydrum@61118847/RoadMap2U@741787733:environment:<stage>');
     expect(setup).toContain('proveedor OIDC existente');
     expect(setup).toContain('BootstraplessSynthesizer');
+    expect(setup).toContain('bootstrap canónico v33');
+    expect(setup).toContain('cfn-observability');
     expect(setup).toContain('oidc-preflight.yml');
     expect(setup).toContain("'X-GitHub-Api-Version: 2026-03-10'");
     expect(setup).toContain('{"use_default":true,"use_immutable_subject":true}');
@@ -411,5 +483,7 @@ describe('backend GitHub Actions', () => {
     expect(operationsRunbook).toContain('broker Lambda');
     expect(setup).not.toContain('no forman parte de esta entrega');
     expect(architecture).not.toContain('deliberadamente **no operativa');
+    expect(architecture).toContain('roadmap-commercial-alerts-{stage}');
+    expect(architecture).not.toContain('purga de cuentas adultas y observabilidad/alertas operativas');
   });
 });

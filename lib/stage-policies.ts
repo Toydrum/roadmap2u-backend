@@ -8,6 +8,7 @@ export interface StageManagedPolicies {
   readonly api: iam.ManagedPolicy;
   readonly data: iam.ManagedPolicy;
   readonly edge: iam.ManagedPolicy;
+  readonly observability: iam.ManagedPolicy;
   readonly runtimeBoundary: iam.ManagedPolicy;
 }
 
@@ -117,6 +118,25 @@ function commercialConfigBrokerLogGroupArn(stack: Stack, stage: PolicyStage): st
       account: stack.account,
       resource: 'log-group',
       resourceName: `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
+}
+
+function commercialAlarmTopicArn(stack: Stack, stage: PolicyStage): string {
+  return `arn:${Aws.PARTITION}:sns:${stack.region}:${stack.account}:roadmap-commercial-alerts-${stage}`;
+}
+
+function commercialAlarmArn(stack: Stack, stage: PolicyStage): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'cloudwatch',
+      region: stack.region,
+      account: stack.account,
+      resource: 'alarm',
+      resourceName: `roadmap-commercial-${stage}-*`,
       arnFormat: ArnFormat.COLON_RESOURCE_NAME,
     },
     stack,
@@ -939,6 +959,59 @@ function createEdgePolicy(
   });
 }
 
+function createObservabilityPolicy(
+  stack: Stack,
+  stage: PolicyStage,
+): iam.ManagedPolicy {
+  const topicArn = commercialAlarmTopicArn(stack, stage);
+  const topicActions = [
+    'sns:CreateTopic',
+    'sns:GetTopicAttributes',
+    'sns:ListTagsForResource',
+    'sns:SetTopicAttributes',
+    'sns:TagResource',
+    'sns:UntagResource',
+    ...(stage === 'prod' ? [] : ['sns:DeleteTopic']),
+  ];
+  const alarmActions = [
+    'cloudwatch:DescribeAlarms',
+    'cloudwatch:ListTagsForResource',
+    'cloudwatch:PutMetricAlarm',
+    'cloudwatch:TagResource',
+    'cloudwatch:UntagResource',
+    ...(stage === 'prod' ? [] : ['cloudwatch:DeleteAlarms']),
+  ];
+
+  return new iam.ManagedPolicy(stack, `CfnObservabilityPolicy${stage}`, {
+    managedPolicyName: `roadmap2u-${stage}-cfn-observability`,
+    path: `/roadmap2u/${stage}/`,
+    description: `CloudFormation observability permissions for RoadMap2U ${stage}`,
+    statements: [
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyCommercialAlarmTopic',
+        actions: topicActions,
+        resources: [topicArn],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyCommercialAlarmSubscriptions',
+        actions: [
+          'sns:GetSubscriptionAttributes',
+          'sns:ListSubscriptionsByTopic',
+          'sns:SetSubscriptionAttributes',
+          'sns:Subscribe',
+          'sns:Unsubscribe',
+        ],
+        resources: [topicArn, `${topicArn}:*`],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyCommercialAlarms',
+        actions: alarmActions,
+        resources: [commercialAlarmArn(stack, stage)],
+      }),
+    ],
+  });
+}
+
 export function createStageManagedPolicies(
   stack: Stack,
   stage: PolicyStage,
@@ -947,5 +1020,6 @@ export function createStageManagedPolicies(
   const runtimeBoundary = createRuntimeBoundary(stack, stage);
   const { core, api, data } = createCorePolicies(stack, stage, hostedZoneId);
   const edge = createEdgePolicy(stack, stage, hostedZoneId);
-  return { core, api, data, edge, runtimeBoundary };
+  const observability = createObservabilityPolicy(stack, stage);
+  return { core, api, data, edge, observability, runtimeBoundary };
 }

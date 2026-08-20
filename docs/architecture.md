@@ -129,9 +129,13 @@ Los roles de despliegue no son secretos. Sus ARNs, el account ID y `HOSTED_ZONE_
 - `main` o un dispatch manual del SHA exacto que encabeza `main` puede desplegar `dev` cuando `AWS_DEPLOY_ENABLED=true` y `AWS_ROLLBACK_ENABLED=false`.
 - Promoción: `test` recibe un SHA exitoso de `dev`; `prod` recibe el mismo SHA exitoso de `test` y requiere aprobación.
 - Rollback: requiere `AWS_DEPLOY_ENABLED=false`, `AWS_ROLLBACK_ENABLED=true` y un SHA exitoso previamente registrado en el mismo stage; ambos gates activos o ambos inactivos impiden el job.
-- Cada despliegue ejecuta diff, deploy, validación de outputs/SSM y smoke tests.
+- Cada despliegue ejecuta diff, deploy, validación de outputs/SSM, verificación del canal de alarmas y smoke tests.
 - Ningún deploy ordinario modifica el DNS apex/`www` de producción.
+
+## Alertas comerciales
+
+Cada backend stage sintetiza el topic TLS-only `roadmap-commercial-alerts-{stage}` y alarmas de Lambda, API, DynamoDB, SQS/DLQ y configuración comercial. Un synth local o CI no requiere email: la suscripción condicional queda inactiva por default y el endpoint nunca se incrusta en el template. El deploy oficial exige el secret `ALARM_NOTIFICATION_EMAIL`, lo pasa como parámetro CloudFormation `NoEcho`, verifica que su suscripción esté confirmada y ejercita `roadmap-commercial-{stage}-synthetic` sin conceder Publish o PutMetricData al rol OIDC. La entrega y confirmación humana siguen el runbook `docs/runbooks/commercial-alerts.md` y son evidencia necesaria de GATE-100.
 
 ## Riesgos que siguen siendo gates de go-live
 
-La infraestructura no convierte en cerrados los siguientes pendientes de producto/operación: atomicidad de invitaciones y límites bajo concurrencia, mayor entropía de contraseñas temporales, purga de cuentas adultas y observabilidad/alertas operativas. El correo permanece en HostGator y Cognito default se limita al volumen de rollout/pruebas. También deben estar creadas y revisadas las policies de ejecución CloudFormation por stage. Deben resolverse o aceptarse explícitamente antes del go-live.
+La infraestructura no convierte en cerrados los siguientes pendientes de producto/operación: atomicidad de invitaciones y límites bajo concurrencia, mayor entropía de contraseñas temporales y la ejecución/confirmación live del canal de alertas. El correo permanece en HostGator y Cognito default se limita al volumen de rollout/pruebas. También deben estar creadas y revisadas las policies de ejecución CloudFormation por stage. Deben resolverse o aceptarse explícitamente antes del go-live.

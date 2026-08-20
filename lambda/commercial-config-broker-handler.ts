@@ -6,7 +6,11 @@ import {
   type CommercialConfigCommand,
 } from './commercial-config-broker';
 import { AuditWriter } from './commercial/audit';
-import { instrumentHandler } from './observability';
+import {
+  emitCommercialBrokerAvailabilityMetric,
+  instrumentHandler,
+  type CommercialMetricStage,
+} from './observability';
 
 interface BrokerAllowlistEntry {
   readonly accountId: string;
@@ -93,5 +97,9 @@ const broker = createCommercialConfigBroker({
 
 export const handler = instrumentHandler(
   'commercial-config-broker',
-  (event: CommercialConfigBrokerEvent, _context?: object) => broker(event),
+  async (event: CommercialConfigBrokerEvent, _context?: object) => {
+    const response = await broker(event);
+    emitCommercialBrokerAvailabilityMetric(response.statusCode, stage as CommercialMetricStage);
+    return response;
+  },
 );
