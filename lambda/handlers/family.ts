@@ -27,36 +27,56 @@ import {
 } from '@app/db/schema';
 import {
   Ctx,
+  WRITABLE_PROFILE_CONDITION,
+  closureAbsenceConditionCheck,
   guardiansOf,
   minorsOf,
   profileOf,
   requireCreatedGuardianOf,
   requireGuardianOf,
+  requireGuardianOfConsistent,
+  requireWritableOwner,
   toPublic,
 } from '../authz';
+import { accountClosureKey } from '../account-closure';
 import {
   CodeItem,
   FriendItem,
+  FriendRequestItem,
   K,
   LinkItem,
   ProfileItem,
   RecordItem,
-  TransactWriteCommand,
-  UpdateCommand,
   batchWriteAll,
-  bumpBadAttempt,
   composite,
-  deleteItem,
   getItem,
-  putItem,
   queryPrefix,
   readRateCount,
 } from '../db';
 import { friendCode, tempPassword } from '../codes';
 import { profileView } from './me';
 import { friendsOf, removeFriendshipAs } from './friends';
+import {
+  exactCodeOperation,
+  exactLinkOperation,
+  exactRequestOperation,
+  getConsistent,
+  guardedWrite,
+  recordBadAttempt,
+  sameCode,
+  sameLink,
+  sameRequest,
+} from './guarded-mutation';
 
 const INVITE_TTL_MS = 72 * 3600 * 1000;
+
+async function requireCreatedGuardianConsistent(ctx: Ctx, minorId: string): Promise<LinkItem> {
+  const current = await requireGuardianOfConsistent(ctx, minorId);
+  if (current.kind !== 'created') {
+    throw new ApiError('FORBIDDEN', 'invited links have no identity admin');
+  }
+  return current;
+}
 
 function linkItem(
   guardianId: string,
@@ -98,6 +118,7 @@ export async function createChild(
   if (!USERNAME_PATTERN.test(username)) throw new ApiError('VALIDATION', 'username 3-20 [a-z0-9_]');
   if (!displayName || displayName.length > 40)
     throw new ApiError('VALIDATION', 'displayName 1-40 chars');
+  await requireWritableOwner(ctx, ctx.callerId);
   if ((await minorsOf(ctx.deps, ctx.callerId)).length >= LIMITS.maxChildrenPerGuardian) {
     throw new ApiError(
       'LIMIT_EXCEEDED',
@@ -139,31 +160,50 @@ export async function createChild(
     accountType: 'minor',
     socialEnabled: false,
     createdAt: now,
+    status: 'active',
   };
   try {
-    await ctx.deps.ddb.send(
-      new TransactWriteCommand({
-        TransactItems: [
-          {
-            Put: {
-              TableName: ctx.deps.table,
-              Item: { ...K.uniqUsername(username), userId: sub },
-              ConditionExpression: 'attribute_not_exists(pk)',
-            },
+    await guardedWrite(
+      ctx,
+      [ctx.callerId],
+      [
+        closureAbsenceConditionCheck(ctx.deps, sub),
+        {
+          Put: {
+            TableName: ctx.deps.table,
+            Item: { ...K.uniqUsername(username), userId: sub },
+            ConditionExpression: 'attribute_not_exists(pk)',
           },
-          { Put: { TableName: ctx.deps.table, Item: child } },
-          { Put: { TableName: ctx.deps.table, Item: linkItem(ctx.callerId, sub, 'created', now) } },
-        ],
-      }),
+        },
+        {
+          Put: {
+            TableName: ctx.deps.table,
+            Item: child,
+            ConditionExpression: 'attribute_not_exists(pk)',
+          },
+        },
+        {
+          Put: {
+            TableName: ctx.deps.table,
+            Item: linkItem(ctx.callerId, sub, 'created', now),
+            ConditionExpression: 'attribute_not_exists(pk)',
+          },
+        },
+      ],
+      async () => {
+        const [closure, reservation] = await Promise.all([
+          getConsistent<Record<string, unknown>>(ctx, accountClosureKey(sub)),
+          getConsistent<{ userId?: string }>(ctx, K.uniqUsername(username)),
+        ]);
+        if (closure) throw new ApiError('CONFLICT', 'account closure is in progress');
+        if (reservation) throw new ApiError('USERNAME_TAKEN');
+      },
     );
   } catch (error) {
     // Compensate the identity so a failed transact never leaves a ghost login.
     await ctx.deps.cognito
       .send(new AdminDeleteUserCommand({ UserPoolId: ctx.deps.userPoolId, Username: username }))
       .catch(() => {});
-    if ((error as { name?: string })?.name === 'TransactionCanceledException') {
-      throw new ApiError('USERNAME_TAKEN');
-    }
     throw error;
   }
   return { child: profileView(child), tempPassword: password };
@@ -173,9 +213,9 @@ export async function resetChildPassword(
   ctx: Ctx,
   minorId: string,
 ): Promise<{ tempPassword: string }> {
-  await requireCreatedGuardianOf(ctx, minorId);
-  const child = await profileOf(ctx.deps, minorId);
-  if (!child) throw new ApiError('NOT_FOUND');
+  await requireCreatedGuardianConsistent(ctx, minorId);
+  await requireWritableOwner(ctx, ctx.callerId);
+  const child = await requireWritableOwner(ctx, minorId);
   const password = tempPassword();
   await ctx.deps.cognito.send(
     new AdminSetUserPasswordCommand({
@@ -193,7 +233,7 @@ export async function patchChild(
   minorId: string,
   body: { displayName?: string; socialEnabled?: boolean },
 ): Promise<UserProfile> {
-  await requireCreatedGuardianOf(ctx, minorId);
+  const guardianLink = await requireCreatedGuardianOf(ctx, minorId);
   const child = await profileOf(ctx.deps, minorId);
   if (!child) throw new ApiError('NOT_FOUND');
 
@@ -212,13 +252,28 @@ export async function patchChild(
     child.socialEnabled = !!body.socialEnabled;
   }
   if (sets.length) {
-    await ctx.deps.ddb.send(
-      new UpdateCommand({
-        TableName: ctx.deps.table,
-        Key: K.profile(minorId),
-        UpdateExpression: `SET ${sets.join(', ')}`,
-        ExpressionAttributeValues: values,
-      }),
+    await guardedWrite(
+      ctx,
+      [ctx.callerId, minorId],
+      [
+        {
+          Update: {
+            TableName: ctx.deps.table,
+            Key: K.profile(minorId),
+            UpdateExpression: `SET ${sets.join(', ')}`,
+            ConditionExpression: WRITABLE_PROFILE_CONDITION,
+            ExpressionAttributeNames: { '#status': 'status' },
+            ExpressionAttributeValues: { ...values, ':active': 'active' },
+          },
+        },
+        closureAbsenceConditionCheck(ctx.deps, minorId),
+        exactLinkOperation(ctx.deps, guardianLink, 'check'),
+      ],
+      async () => {
+        const currentLink = await requireCreatedGuardianConsistent(ctx, minorId);
+        if (!sameLink(currentLink, guardianLink)) return;
+      },
+      { [minorId]: { profile: true, closure: true } },
     );
   }
   return profileView(child);
@@ -288,20 +343,34 @@ export async function deleteFamilyLink(ctx: Ctx, linkId: string): Promise<void> 
   const callerIsMinorSide = ctx.callerId === minorId && link.kind === 'invited';
   if (!callerIsGuardian && !callerIsMinorSide) throw new ApiError('NOT_FOUND');
 
+  let remaining: LinkItem[] = [];
   if (link.kind === 'created') {
-    const remaining = (await guardiansOf(ctx.deps, minorId)).filter(
+    remaining = (await guardiansOf(ctx.deps, minorId)).filter(
       (l) => l.guardianId !== guardianId,
     );
     if (!remaining.length) throw new ApiError('LAST_GUARDIAN');
   }
-  await deleteItem(ctx.deps, K.link(minorId, guardianId));
+  await guardedWrite(
+    ctx,
+    [guardianId, minorId],
+    [
+      exactLinkOperation(ctx.deps, link, 'delete'),
+      ...remaining.map((current) => exactLinkOperation(ctx.deps, current, 'check')),
+    ],
+    async () => {
+      const current = await getConsistent<LinkItem>(ctx, K.link(minorId, guardianId));
+      if (!current) throw new ApiError('NOT_FOUND');
+      if (!sameLink(current, link)) return;
+    },
+  );
 }
 
 export async function createFamilyInvite(ctx: Ctx, body: FamilyInviteRequest): Promise<CodeGrant> {
   if (ctx.caller.accountType !== 'adult') throw new ApiError('FORBIDDEN');
   let minorId: string | null = null;
+  let issuerLink: LinkItem | null = null;
   if (body.kind === 'coGuardian') {
-    await requireCreatedGuardianOf(ctx, body.minorId);
+    issuerLink = await requireCreatedGuardianOf(ctx, body.minorId);
     if ((await guardiansOf(ctx.deps, body.minorId)).length >= LIMITS.maxGuardiansPerMinor) {
       throw new ApiError('LIMIT_EXCEEDED', `max ${LIMITS.maxGuardiansPerMinor} guardians`);
     }
@@ -311,7 +380,7 @@ export async function createFamilyInvite(ctx: Ctx, body: FamilyInviteRequest): P
   }
   const code = friendCode();
   const expiresAt = ctx.deps.now() + INVITE_TTL_MS;
-  await putItem(ctx.deps, {
+  const item = {
     ...K.codeG(code),
     code,
     kind: body.kind,
@@ -319,7 +388,28 @@ export async function createFamilyInvite(ctx: Ctx, body: FamilyInviteRequest): P
     ...(minorId ? { minorId } : {}),
     expiresAt,
     ttl: Math.ceil(expiresAt / 1000),
-  } satisfies CodeItem & { pk: string; sk: string });
+  } satisfies CodeItem & { pk: string; sk: string };
+  const owners = minorId ? [ctx.callerId, minorId] : [ctx.callerId];
+  await guardedWrite(
+    ctx,
+    owners,
+    [
+      {
+        Put: {
+          TableName: ctx.deps.table,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(pk)',
+        },
+      },
+      ...(issuerLink ? [exactLinkOperation(ctx.deps, issuerLink, 'check')] : []),
+    ],
+    issuerLink
+      ? async () => {
+          const current = await requireCreatedGuardianConsistent(ctx, issuerLink.minorId);
+          if (!sameLink(current, issuerLink)) return;
+        }
+      : undefined,
+  );
   return { code, expiresAt };
 }
 
@@ -335,7 +425,7 @@ export async function acceptFamilyInvite(
     throw new ApiError('RATE_LIMITED');
   }
   const badAttempt = async (errorCode: 'CODE_INVALID' | 'CODE_EXPIRED'): Promise<never> => {
-    await bumpBadAttempt(ctx.deps, ctx.callerId);
+    await recordBadAttempt(ctx);
     throw new ApiError(errorCode);
   };
   const invite = await getItem<CodeItem>(ctx.deps, K.codeG(code));
@@ -359,8 +449,38 @@ export async function acceptFamilyInvite(
       throw new ApiError('LIMIT_EXCEEDED');
     }
     const link = linkItem(ctx.callerId, minorId, 'created', now);
-    await putItem(ctx.deps, link as unknown as Record<string, unknown>);
-    await deleteItem(ctx.deps, K.codeG(code)); // single-use
+    const owners = [ctx.callerId, invite.userId, minorId];
+    await guardedWrite(
+      ctx,
+      owners,
+      [
+        {
+          Put: {
+            TableName: ctx.deps.table,
+            Item: link,
+            ConditionExpression: 'attribute_not_exists(pk)',
+          },
+        },
+        exactCodeOperation(ctx.deps, invite, 'delete'),
+        exactLinkOperation(ctx.deps, issuerLink, 'check'),
+      ],
+      async () => {
+        const [currentInvite, currentIssuerLink, currentLink] = await Promise.all([
+          getConsistent<CodeItem>(ctx, K.codeG(code)),
+          getConsistent<LinkItem>(ctx, K.link(minorId, invite.userId)),
+          getConsistent<LinkItem>(ctx, K.link(minorId, ctx.callerId)),
+        ]);
+        if (!currentInvite || currentInvite.kind !== 'coGuardian') {
+          throw new ApiError('CODE_INVALID');
+        }
+        if (currentInvite.expiresAt <= ctx.deps.now()) throw new ApiError('CODE_EXPIRED');
+        if (!currentIssuerLink || currentIssuerLink.kind !== 'created') {
+          throw new ApiError('CODE_INVALID');
+        }
+        if (currentLink) throw new ApiError('CONFLICT', 'already a guardian');
+        if (!sameCode(currentInvite, invite) || !sameLink(currentIssuerLink, issuerLink)) return;
+      },
+    );
     return linkView(link, minor, true);
   }
 
@@ -375,8 +495,32 @@ export async function acceptFamilyInvite(
     throw new ApiError('LIMIT_EXCEEDED');
   }
   const link = linkItem(invite.userId, ctx.callerId, 'invited', now);
-  await putItem(ctx.deps, link as unknown as Record<string, unknown>);
-  await deleteItem(ctx.deps, K.codeG(code));
+  await guardedWrite(
+    ctx,
+    [ctx.callerId, invite.userId],
+    [
+      {
+        Put: {
+          TableName: ctx.deps.table,
+          Item: link,
+          ConditionExpression: 'attribute_not_exists(pk)',
+        },
+      },
+      exactCodeOperation(ctx.deps, invite, 'delete'),
+    ],
+    async () => {
+      const [currentInvite, currentLink] = await Promise.all([
+        getConsistent<CodeItem>(ctx, K.codeG(code)),
+        getConsistent<LinkItem>(ctx, K.link(ctx.callerId, invite.userId)),
+      ]);
+      if (!currentInvite || currentInvite.kind !== 'linkExisting') {
+        throw new ApiError('CODE_INVALID');
+      }
+      if (currentInvite.expiresAt <= ctx.deps.now()) throw new ApiError('CODE_EXPIRED');
+      if (currentLink) throw new ApiError('CONFLICT', 'already linked');
+      if (!sameCode(currentInvite, invite)) return;
+    },
+  );
   // The redeemer sees the GUARDIAN on the other end of this new link.
   return linkView(link, issuer, false);
 }
@@ -384,7 +528,16 @@ export async function acceptFamilyInvite(
 export async function revokeFamilyInvite(ctx: Ctx, code: string): Promise<void> {
   const invite = await getItem<CodeItem>(ctx.deps, K.codeG(code));
   if (!invite || invite.userId !== ctx.callerId) throw new ApiError('NOT_FOUND');
-  await deleteItem(ctx.deps, K.codeG(code));
+  await guardedWrite(
+    ctx,
+    [ctx.callerId, ...(invite.minorId ? [invite.minorId] : [])],
+    [exactCodeOperation(ctx.deps, invite, 'delete')],
+    async () => {
+      const current = await getConsistent<CodeItem>(ctx, K.codeG(code));
+      if (!current || current.userId !== ctx.callerId) throw new ApiError('NOT_FOUND');
+      if (!sameCode(current, invite)) return;
+    },
+  );
 }
 
 // ── Guardian oversight of a minor's friendships ─────────────────────────────
@@ -399,8 +552,8 @@ export async function removeChildFriendship(
   minorId: string,
   friendshipId: string,
 ): Promise<void> {
-  await requireGuardianOf(ctx, minorId);
-  await removeFriendshipAs(ctx, minorId, friendshipId);
+  const guardianLink = await requireGuardianOf(ctx, minorId);
+  await removeFriendshipAs(ctx, minorId, friendshipId, guardianLink);
 }
 
 export async function cancelChildRequest(
@@ -408,8 +561,8 @@ export async function cancelChildRequest(
   minorId: string,
   requestId: string,
 ): Promise<void> {
-  await requireGuardianOf(ctx, minorId);
-  const outgoing = await queryPrefix<{ requestId: string; toId: string }>(
+  const guardianLink = await requireGuardianOf(ctx, minorId);
+  const outgoing = await queryPrefix<FriendRequestItem>(
     ctx.deps,
     K.user(minorId),
     'FREQ#',
@@ -417,5 +570,23 @@ export async function cancelChildRequest(
   );
   const item = outgoing.find((r) => r.requestId === requestId);
   if (!item) throw new ApiError('NOT_FOUND');
-  await deleteItem(ctx.deps, K.freq(item.toId, requestId));
+  await guardedWrite(
+    ctx,
+    [ctx.callerId, minorId, item.toId],
+    [
+      exactRequestOperation(ctx.deps, item, 'delete'),
+      exactLinkOperation(ctx.deps, guardianLink, 'check'),
+    ],
+    async () => {
+      const [currentRequest, currentLink] = await Promise.all([
+        getConsistent<FriendRequestItem>(ctx, K.freq(item.toId, requestId)),
+        getConsistent<LinkItem>(ctx, K.link(minorId, ctx.callerId)),
+      ]);
+      if (!currentRequest || currentRequest.expiresAt <= ctx.deps.now()) {
+        throw new ApiError('NOT_FOUND');
+      }
+      if (!currentLink) throw new ApiError('NOT_FOUND');
+      if (!sameRequest(currentRequest, item) || !sameLink(currentLink, guardianLink)) return;
+    },
+  );
 }

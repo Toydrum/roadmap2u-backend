@@ -330,6 +330,12 @@ describe('pushSync — rev LWW', () => {
 
 describe('family', () => {
   it('createChild maps UsernameExistsException to USERNAME_TAKEN', async () => {
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      return key.pk === K.profile('rocio').pk && key.sk === 'PROFILE'
+        ? { Item: profile('rocio', { status: 'active' }) }
+        : {};
+    });
     ddbMock.on(QueryCommand).resolves({ Items: [] }); // no minors yet
     const taken = new Error('exists');
     taken.name = 'UsernameExistsException';
@@ -412,12 +418,16 @@ describe('family', () => {
   // Family invites share the friend-code guessing brake (0.0.115 S1 —
   // this door used to have none): same bucket, same 5-per-hour law.
   it('a bad family code counts as a bad attempt and CODE_INVALID answers', async () => {
+    const rateKey = K.rate('rocio', Math.floor(NOW / 3_600_000));
     ddbMock.on(GetCommand).resolves({}); // rate row absent + code not found
     ddbMock.on(UpdateCommand).resolves({});
     await expect(
       acceptFamilyInvite(ctxOf(profile('rocio')), { code: 'WRONGONE' }),
     ).rejects.toMatchObject({ code: 'CODE_INVALID' });
-    expect(ddbMock.commandCalls(UpdateCommand).length).toBe(1); // the bump
+    const bump = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems?.find(
+      (item) => item.Update?.Key?.['sk'] === rateKey.sk,
+    );
+    expect(bump?.Update).toBeDefined(); // guarded bump
   });
 
   it('the family attempt after 5 bad redemptions is RATE_LIMITED', async () => {
@@ -454,7 +464,10 @@ describe('friend requests', () => {
         code: 'MBRD2468',
       }),
     ).rejects.toMatchObject({ code: 'CODE_EXPIRED' });
-    expect(ddbMock.commandCalls(UpdateCommand).length).toBe(1); // the bump
+    const bump = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems?.find(
+      (item) => item.Update?.Key?.['sk'] === RATE_KEY.sk,
+    );
+    expect(bump?.Update).toBeDefined(); // guarded bump
   });
 
   it('the attempt after 5 bad redemptions in an hour is RATE_LIMITED', async () => {
