@@ -1,5 +1,6 @@
 import { PREPAYMENT_CATALOG } from './commercial/catalog';
 import type { HttpResponse } from './http';
+import { instrumentHandler } from './observability';
 
 const PUBLIC_CATALOG_HEADERS = Object.freeze({
   'content-type': 'application/json',
@@ -15,4 +16,9 @@ export function createCatalogHandler(): (_event?: unknown) => Promise<HttpRespon
   });
 }
 
-export const handler = createCatalogHandler();
+const catalogHandler = createCatalogHandler();
+
+export const handler = instrumentHandler(
+  'catalog',
+  (event: unknown, _context?: unknown) => catalogHandler(event),
+);

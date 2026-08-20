@@ -168,8 +168,11 @@ describe('stage backend infrastructure', () => {
       lambdaLogs.map((resource) => resource.Properties.LogGroupName).sort(),
     ).toEqual(
       [
+        `/aws/lambda/roadmap-access-reader-${stage}`,
         `/aws/lambda/roadmap-account-closure-reconciler-${stage}`,
+        `/aws/lambda/roadmap-account-closure-request-${stage}`,
         `/aws/lambda/roadmap-account-closure-worker-${stage}`,
+        `/aws/lambda/roadmap-catalog-${stage}`,
         `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
         `/aws/lambda/roadmap-post-confirmation-${stage}`,
         `/aws/lambda/roadmap-pre-signup-${stage}`,
@@ -204,8 +207,11 @@ describe('stage backend infrastructure', () => {
 
       expect(functions.map((fn) => fn.Properties.FunctionName).sort()).toEqual(
         [
+          `roadmap-access-reader-${stage}`,
           `roadmap-account-closure-reconciler-${stage}`,
+          `roadmap-account-closure-request-${stage}`,
           `roadmap-account-closure-worker-${stage}`,
+          `roadmap-catalog-${stage}`,
           `roadmap-commercial-config-broker-${stage}`,
           `roadmap-post-confirmation-${stage}`,
           `roadmap-pre-signup-${stage}`,

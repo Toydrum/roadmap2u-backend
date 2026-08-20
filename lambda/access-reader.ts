@@ -20,6 +20,7 @@ import {
   type AccessSnapshot,
 } from './commercial/access-resolver';
 import { accessKey, type AccessItem, type GrantItem } from './commercial/model';
+import { instrumentHandler } from './observability';
 
 export type AccessReaderEvent = APIGatewayProxyEventV2WithJWTAuthorizer;
 
@@ -52,6 +53,55 @@ const ACCESS_SNAPSHOT_ATTEMPTS = 3;
  */
 const MAX_GRANT_QUERY_PAGES = 64;
 const NO_STORE_HEADERS = Object.freeze({ 'cache-control': 'no-store' });
+
+function projection(attributes: readonly string[]): {
+  readonly ProjectionExpression: string;
+  readonly ExpressionAttributeNames: Readonly<Record<string, string>>;
+} {
+  const aliases = attributes.map((attribute, index) => [`#p${index}`, attribute] as const);
+  return {
+    ProjectionExpression: aliases.map(([alias]) => alias).join(', '),
+    ExpressionAttributeNames: Object.fromEntries(aliases),
+  };
+}
+
+const PROFILE_PROJECTION = projection(['pk', 'sk', 'userId', 'status']);
+const CLOSURE_PROJECTION = projection(['pk', 'sk']);
+const USAGE_PROJECTION = projection(['pk', 'sk', 'state', 'activeTrees']);
+const ACCESS_PROJECTION = projection([
+  'pk',
+  'sk',
+  'ownerSub',
+  'effectivePlanKey',
+  'catalogVersion',
+  'status',
+  'activeSources',
+  'limits',
+  'capabilities',
+  'revision',
+  'nextRecomputeAt',
+  'offlineValidUntil',
+  'updatedAt',
+]);
+const GRANT_PROJECTION = projection([
+  'pk',
+  'sk',
+  'ownerSub',
+  'grantId',
+  'sourceKind',
+  'status',
+  'catalogVersion',
+  'planKey',
+  'limits',
+  'capabilities',
+  'startsAt',
+  'expiresAt',
+  'revision',
+  'reason',
+  'createdAt',
+  'updatedAt',
+  'revokedAt',
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -178,9 +228,27 @@ async function readOwnerSnapshot(
   const result = await ddb.send(
     new TransactGetCommand({
       TransactItems: [
-        { Get: { TableName: tableName, Key: K.profile(ownerSub) } },
-        { Get: { TableName: tableName, Key: accountClosureKey(ownerSub) } },
-        { Get: { TableName: tableName, Key: { pk: K.user(ownerSub), sk: 'USAGE' } } },
+        {
+          Get: {
+            TableName: tableName,
+            Key: K.profile(ownerSub),
+            ...PROFILE_PROJECTION,
+          },
+        },
+        {
+          Get: {
+            TableName: tableName,
+            Key: accountClosureKey(ownerSub),
+            ...CLOSURE_PROJECTION,
+          },
+        },
+        {
+          Get: {
+            TableName: tableName,
+            Key: { pk: K.user(ownerSub), sk: 'USAGE' },
+            ...USAGE_PROJECTION,
+          },
+        },
       ],
     }),
   );
@@ -204,6 +272,7 @@ async function readAccess(
       TableName: tableName,
       Key: accessKey(ownerSub),
       ConsistentRead: true,
+      ...ACCESS_PROJECTION,
     }),
   );
   return result.Item as AccessItem | undefined;
@@ -234,6 +303,8 @@ async function readAllGrants(
           ':prefix': 'GRANT#',
         },
         ConsistentRead: true,
+        Select: 'SPECIFIC_ATTRIBUTES',
+        ...GRANT_PROJECTION,
         ExclusiveStartKey: exclusiveStartKey,
       }),
     );
@@ -351,6 +422,8 @@ function productionReader(): (event: AccessReaderEvent) => Promise<HttpResponse>
   return realReader;
 }
 
-export async function handler(event: AccessReaderEvent): Promise<HttpResponse> {
-  return productionReader()(event);
-}
+export const handler = instrumentHandler(
+  'access-reader',
+  (event: AccessReaderEvent, _context?: unknown): Promise<HttpResponse> =>
+    productionReader()(event),
+);

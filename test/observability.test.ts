@@ -246,6 +246,63 @@ describe('observability', () => {
     expect(true).toBe(true);
   });
 
+  it('allows only the three bounded commercial HTTP entrypoint service names', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+
+    for (const service of [
+      'catalog',
+      'access-reader',
+      'account-closure-request',
+    ] as const) {
+      const wrapped = instrumentHandler(service, async () => ({ statusCode: 204 }));
+      await expect(wrapped({})).resolves.toEqual({ statusCode: 204 });
+    }
+
+    const capture = info.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(capture).toContain('"service":"catalog"');
+    expect(capture).toContain('"service":"access-reader"');
+    expect(capture).toContain('"service":"account-closure-request"');
+  });
+
+  it('instruments the real public catalog and JWT access entrypoints without logging requests', async () => {
+    vi.stubEnv('TABLE_NAME', 'roadmap-dev');
+    vi.resetModules();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const [{ handler: catalogHandler }, { handler: accessHandler }] = await Promise.all([
+      import('../lambda/catalog'),
+      import('../lambda/access-reader'),
+    ]);
+    const secret = 'never-log-commercial-http-request';
+
+    await expect(
+      catalogHandler(
+        {
+          body: secret,
+          headers: { authorization: `Bearer ${secret}` },
+          requestContext: { requestId: 'catalog-request' },
+        },
+        { awsRequestId: 'catalog-lambda' },
+      ),
+    ).resolves.toMatchObject({ statusCode: 200 });
+    await expect(
+      accessHandler(
+        {
+          body: secret,
+          headers: { authorization: `Bearer ${secret}` },
+          requestContext: { requestId: 'access-request', http: { method: 'GET' } },
+        } as never,
+        { awsRequestId: 'access-lambda' },
+      ),
+    ).resolves.toMatchObject({ statusCode: 401 });
+
+    const capture = info.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(capture).toContain('"service":"catalog"');
+    expect(capture).toContain('"requestId":"catalog-request"');
+    expect(capture).toContain('"service":"access-reader"');
+    expect(capture).toContain('"requestId":"access-request"');
+    expect(capture).not.toContain(secret);
+  });
+
   it('rethrows the exact handler error without logging a sensitive message', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);

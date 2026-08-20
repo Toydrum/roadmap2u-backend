@@ -14,6 +14,7 @@ const DYNAMODB_OPERATIONS = [
   'Scan',
   'BatchGetItem',
   'BatchWriteItem',
+  'TransactGetItems',
   'TransactWriteItems',
 ];
 const templates = new Map<string, any>();
@@ -123,7 +124,19 @@ describe('commercial alarms', () => {
     const alarms = Object.values(template.Resources).filter(
       (resource: any) => resource.Type === 'AWS::CloudWatch::Alarm',
     ) as any[];
-    expect(functions).toHaveLength(6);
+    expect(functions.map(([, resource]) => resource.Properties.FunctionName).sort()).toEqual(
+      [
+        'roadmap-access-reader-dev',
+        'roadmap-account-closure-reconciler-dev',
+        'roadmap-account-closure-request-dev',
+        'roadmap-account-closure-worker-dev',
+        'roadmap-catalog-dev',
+        'roadmap-commercial-config-broker-dev',
+        'roadmap-post-confirmation-dev',
+        'roadmap-pre-signup-dev',
+        'roadmap-router-dev',
+      ].sort(),
+    );
     for (const metricName of ['Errors', 'Throttles']) {
       const matching = alarms.filter(
         (alarm) =>
@@ -296,7 +309,7 @@ describe('commercial alarms', () => {
         resource.Type === 'AWS::SNS::Topic' || resource.Type === 'AWS::CloudWatch::Alarm',
     ) as any[];
 
-    expect(protectedResources).toHaveLength(31);
+    expect(protectedResources).toHaveLength(40);
     for (const resource of protectedResources) {
       expect(resource.DeletionPolicy).toBe('Retain');
       expect(resource.UpdateReplacePolicy).toBe('Retain');

@@ -27,6 +27,7 @@ const DYNAMODB_OPERATIONS = [
   'Scan',
   'BatchGetItem',
   'BatchWriteItem',
+  'TransactGetItems',
   'TransactWriteItems',
 ] as const;
 

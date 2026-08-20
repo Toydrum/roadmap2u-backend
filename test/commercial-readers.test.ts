@@ -315,6 +315,13 @@ describe('Dynamo commercial reader adapters', () => {
       ],
     });
     expect(JSON.stringify(input)).not.toContain('ConsistentRead');
+    for (const item of input?.TransactItems ?? []) {
+      expect(item.Get?.ProjectionExpression).toBeTypeOf('string');
+      expect(item.Get?.ExpressionAttributeNames).toBeTypeOf('object');
+    }
+    expect(JSON.stringify(input)).not.toMatch(
+      /title|note|email|displayName|username|record/i,
+    );
   });
 
   it.each([
@@ -377,13 +384,22 @@ describe('Dynamo commercial reader adapters', () => {
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(3);
     for (const call of ddbMock.commandCalls(GetCommand)) {
       expect(call.args[0].input.ConsistentRead).toBe(true);
+      expect(call.args[0].input.ProjectionExpression).toBeTypeOf('string');
+      expect(JSON.stringify(call.args[0].input)).not.toMatch(
+        /title|note|email|displayName|username|record/i,
+      );
     }
     for (const call of ddbMock.commandCalls(QueryCommand)) {
       expect(call.args[0].input).toMatchObject({
         ConsistentRead: true,
+        Select: 'SPECIFIC_ATTRIBUTES',
         KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
         ExpressionAttributeValues: { ':pk': `USER#${OWNER}`, ':prefix': 'GRANT#' },
       });
+      expect(call.args[0].input.ProjectionExpression).toBeTypeOf('string');
+      expect(JSON.stringify(call.args[0].input)).not.toMatch(
+        /title|note|email|displayName|username|record/i,
+      );
     }
     expect(ddbMock.commandCalls(QueryCommand)[1]?.args[0].input.ExclusiveStartKey).toEqual({
       pk: `USER#${OWNER}`,

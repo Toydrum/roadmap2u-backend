@@ -307,6 +307,39 @@ describe('GitHub OIDC bootstrap', () => {
       expect(JSON.stringify(statements)).toContain(`roadmap-commercial-alerts-${stage}`);
       expect(JSON.stringify(statements)).toContain(`roadmap-commercial-${stage}-*`);
 
+      const commercialHttpFunctions = statements.find(
+        (statement: any) => statement.Sid === 'ManageOnlyCommercialHttpFunctions',
+      );
+      const commercialHttpLogs = statements.find(
+        (statement: any) => statement.Sid === 'ManageOnlyCommercialHttpLogGroups',
+      );
+      const commercialHttpLogTags = statements.find(
+        (statement: any) => statement.Sid === 'ManageOnlyCommercialHttpLogGroupTags',
+      );
+      expect(commercialHttpFunctions.Action).toContain('lambda:CreateFunction');
+      expect(commercialHttpFunctions.Action).toContain('lambda:AddPermission');
+      expect(commercialHttpFunctions.Action).not.toContain(
+        'lambda:CreateFunctionUrlConfig',
+      );
+      expect(JSON.stringify(commercialHttpFunctions.Resource)).toContain(
+        `:function:roadmap-catalog-${stage}`,
+      );
+      expect(JSON.stringify(commercialHttpFunctions.Resource)).toContain(
+        `:function:roadmap-access-reader-${stage}`,
+      );
+      expect(JSON.stringify(commercialHttpFunctions.Resource)).not.toContain(
+        `roadmap-catalog-${stage === 'dev' ? 'test' : 'dev'}`,
+      );
+      expect(commercialHttpLogs.Resource).toHaveLength(2);
+      expect(commercialHttpLogTags.Resource).toHaveLength(2);
+      expect(JSON.stringify(commercialHttpLogs.Resource)).toContain(
+        `/aws/lambda/roadmap-catalog-${stage}:*`,
+      );
+      expect(JSON.stringify(commercialHttpLogs.Resource)).toContain(
+        `/aws/lambda/roadmap-access-reader-${stage}:*`,
+      );
+      expect(JSON.stringify(commercialHttpLogTags.Resource)).not.toContain(':*');
+
       for (const role of roles) {
         expect(JSON.stringify(role.Properties.ManagedPolicyArns ?? [])).not.toContain(
           `roadmap2u-${stage}-cfn-observability`,

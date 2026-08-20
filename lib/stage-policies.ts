@@ -83,6 +83,10 @@ function functionArns(stack: Stack, stage: PolicyStage): string[] {
   ].map((name) => functionArn(stack, stage, name));
 }
 
+function commercialHttpFunctionArns(stack: Stack, stage: PolicyStage): string[] {
+  return ['catalog', 'access-reader'].map((name) => functionArn(stack, stage, name));
+}
+
 function lambdaLogGroupArns(stack: Stack, stage: PolicyStage): string[] {
   return [
     'pre-signup',
@@ -107,6 +111,27 @@ function lambdaLogGroupArns(stack: Stack, stage: PolicyStage): string[] {
 
 function lambdaLogArns(stack: Stack, stage: PolicyStage): string[] {
   return lambdaLogGroupArns(stack, stage).map((arn) => `${arn}:*`);
+}
+
+function commercialHttpLogGroupArns(stack: Stack, stage: PolicyStage): string[] {
+  return ['catalog', 'access-reader'].map((name) =>
+    Arn.format(
+      {
+        partition: Aws.PARTITION,
+        service: 'logs',
+        region: stack.region,
+        account: stack.account,
+        resource: 'log-group',
+        resourceName: `/aws/lambda/roadmap-${name}-${stage}`,
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      },
+      stack,
+    ),
+  );
+}
+
+function commercialHttpLogArns(stack: Stack, stage: PolicyStage): string[] {
+  return commercialHttpLogGroupArns(stack, stage).map((arn) => `${arn}:*`);
 }
 
 function commercialConfigBrokerLogGroupArn(stack: Stack, stage: PolicyStage): string {
@@ -344,6 +369,7 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
         resources: [
           ...lambdaLogArns(stack, stage),
+          ...commercialHttpLogArns(stack, stage),
           `${commercialConfigBrokerLogGroupArn(stack, stage)}:*`,
         ],
       }),
@@ -986,6 +1012,43 @@ function createObservabilityPolicy(
     path: `/roadmap2u/${stage}/`,
     description: `CloudFormation observability permissions for RoadMap2U ${stage}`,
     statements: [
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyCommercialHttpFunctions',
+        actions: [
+          'lambda:AddPermission',
+          'lambda:CreateFunction',
+          'lambda:DeleteFunction',
+          'lambda:GetFunction',
+          'lambda:GetFunctionCodeSigningConfig',
+          'lambda:GetFunctionConfiguration',
+          'lambda:GetFunctionRecursionConfig',
+          'lambda:GetFunctionScalingConfig',
+          'lambda:GetPolicy',
+          'lambda:GetRuntimeManagementConfig',
+          'lambda:ListTags',
+          'lambda:RemovePermission',
+          'lambda:TagResource',
+          'lambda:UntagResource',
+          'lambda:UpdateFunctionCode',
+          'lambda:UpdateFunctionConfiguration',
+        ],
+        resources: commercialHttpFunctionArns(stack, stage),
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyCommercialHttpLogGroups',
+        actions: [
+          'logs:CreateLogGroup',
+          'logs:DeleteLogGroup',
+          'logs:PutRetentionPolicy',
+          'logs:TagResource',
+        ],
+        resources: commercialHttpLogArns(stack, stage),
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyCommercialHttpLogGroupTags',
+        actions: ['logs:ListTagsForResource', 'logs:TagResource', 'logs:UntagResource'],
+        resources: commercialHttpLogGroupArns(stack, stage),
+      }),
       new iam.PolicyStatement({
         sid: 'ManageOnlyCommercialAlarmTopic',
         actions: topicActions,

@@ -155,6 +155,33 @@ const FAMILY_FENCE_SAFE_READ_ATTRIBUTES = [
   'userId',
 ] as const;
 
+const COMMERCIAL_ACCESS_SAFE_ATTRIBUTES = [
+  'pk',
+  'sk',
+  'userId',
+  'status',
+  'state',
+  'activeTrees',
+  'ownerSub',
+  'effectivePlanKey',
+  'catalogVersion',
+  'activeSources',
+  'limits',
+  'capabilities',
+  'revision',
+  'nextRecomputeAt',
+  'offlineValidUntil',
+  'updatedAt',
+  'grantId',
+  'sourceKind',
+  'planKey',
+  'startsAt',
+  'expiresAt',
+  'reason',
+  'createdAt',
+  'revokedAt',
+] as const;
+
 function denyCommercialConfigWrites(role: iam.Role, table: dynamodb.ITable): void {
   role.addToPolicy(
     new iam.PolicyStatement({
@@ -697,6 +724,165 @@ export class RoadmapStack extends Stack {
     );
     denyCommercialConfigWrites(accountClosureWorkerRole, table);
 
+    const catalogName = `roadmap-catalog-${stage}`;
+    const catalogRole = createRuntimeRole(this, 'CatalogRole', stage);
+    const catalog = new NodejsFunction(this, 'Catalog', {
+      functionName: catalogName,
+      entry: join(here, '../lambda/catalog.ts'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
+      timeout: Duration.seconds(5),
+      role: catalogRole,
+      logGroup: createFunctionLogGroup(this, 'CatalogLogs', catalogName, stage),
+      bundling: {
+        format: OutputFormat.ESM,
+        tsconfig: join(here, '../tsconfig.json'),
+        target: 'node22',
+      },
+    });
+
+    const accessReaderName = `roadmap-access-reader-${stage}`;
+    const accessReaderRole = createRuntimeRole(this, 'AccessReaderRole', stage);
+    const accessReader = new NodejsFunction(this, 'AccessReader', {
+      functionName: accessReaderName,
+      entry: join(here, '../lambda/access-reader.ts'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
+      timeout: Duration.seconds(10),
+      role: accessReaderRole,
+      logGroup: createFunctionLogGroup(
+        this,
+        'AccessReaderLogs',
+        accessReaderName,
+        stage,
+      ),
+      environment: { TABLE_NAME: table.tableName },
+      bundling: {
+        format: OutputFormat.ESM,
+        tsconfig: join(here, '../tsconfig.json'),
+        target: 'node22',
+      },
+    });
+    accessReaderRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadCommercialAccessItems',
+        actions: ['dynamodb:GetItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'ACCOUNT_CLOSURE#*'],
+          },
+          'ForAllValues:StringEquals': {
+            'dynamodb:Attributes': [...COMMERCIAL_ACCESS_SAFE_ATTRIBUTES],
+          },
+        },
+      }),
+    );
+    accessReaderRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'QueryCommercialAccessGrants',
+        actions: ['dynamodb:Query'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' },
+          'ForAllValues:StringEquals': {
+            'dynamodb:Attributes': [...COMMERCIAL_ACCESS_SAFE_ATTRIBUTES],
+          },
+          StringEquals: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+        },
+      }),
+    );
+    accessReaderRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'MaterializeCommercialAccess',
+        actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'ACCOUNT_CLOSURE#*'],
+          },
+          'ForAllValues:StringEquals': {
+            'dynamodb:Attributes': [...COMMERCIAL_ACCESS_SAFE_ATTRIBUTES],
+          },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+
+    const accountClosureRequestName = `roadmap-account-closure-request-${stage}`;
+    const accountClosureRequestRole = createRuntimeRole(
+      this,
+      'AccountClosureRequestRole',
+      stage,
+    );
+    const accountClosureRequest = new NodejsFunction(this, 'AccountClosureRequest', {
+      functionName: accountClosureRequestName,
+      entry: join(here, '../lambda/account-closure-request.ts'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
+      timeout: Duration.seconds(15),
+      role: accountClosureRequestRole,
+      logGroup: createFunctionLogGroup(
+        this,
+        'AccountClosureRequestLogs',
+        accountClosureRequestName,
+        stage,
+      ),
+      environment: {
+        TABLE_NAME: table.tableName,
+        AUDIT_TABLE_NAME: accessAuditTable.tableName,
+        ACCOUNT_CLOSURE_QUEUE_URL: accountClosureQueue.queueUrl,
+      },
+      bundling: {
+        format: OutputFormat.ESM,
+        tsconfig: join(here, '../tsconfig.json'),
+        target: 'node22',
+      },
+    });
+    accountClosureRequestRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadAccountClosureRequestState',
+        actions: ['dynamodb:GetItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'ACCOUNT_CLOSURE#*'],
+          },
+        },
+      }),
+    );
+    accountClosureRequestRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyAccountClosureRequestState',
+        actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'ACCOUNT_CLOSURE#*'],
+          },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    accountClosureRequestRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyAccountClosureRequestAudit',
+        actions: ['dynamodb:PutItem'],
+        resources: [accessAuditTable.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#*' },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    accountClosureRequestRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SendOnlyAccountClosureRequest',
+        actions: ['sqs:SendMessage'],
+        resources: [accountClosureQueue.queueArn],
+      }),
+    );
+
     const apiCertificate = new certificatemanager.Certificate(this, 'ApiCertificate', {
       domainName: apiDomain,
       validation: certificatemanager.CertificateValidation.fromDns(zone),
@@ -726,7 +912,33 @@ export class RoadmapStack extends Stack {
       `https://cognito-idp.${this.region}.amazonaws.com/${pool.userPoolId}`,
       { jwtAudience: [webClient.userPoolClientId] },
     );
+    const catalogIntegration = new HttpLambdaIntegration('CatalogIntegration', catalog);
+    const accessReaderIntegration = new HttpLambdaIntegration(
+      'AccessReaderIntegration',
+      accessReader,
+    );
+    const accountClosureRequestIntegration = new HttpLambdaIntegration(
+      'AccountClosureRequestIntegration',
+      accountClosureRequest,
+    );
     const routerIntegration = new HttpLambdaIntegration('RouterIntegration', router);
+    api.addRoutes({
+      path: '/v1/plans',
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration: catalogIntegration,
+    });
+    api.addRoutes({
+      path: '/v1/access',
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration: accessReaderIntegration,
+      authorizer,
+    });
+    api.addRoutes({
+      path: '/v1/me',
+      methods: [apigatewayv2.HttpMethod.DELETE],
+      integration: accountClosureRequestIntegration,
+      authorizer,
+    });
     api.addRoutes({
       path: '/v1/{proxy+}',
       methods: [apigatewayv2.HttpMethod.ANY],
@@ -830,6 +1042,21 @@ export class RoadmapStack extends Stack {
           {
             key: 'router',
             function: router,
+            durationWarningMilliseconds: 12_000,
+          },
+          {
+            key: 'catalog',
+            function: catalog,
+            durationWarningMilliseconds: 4_000,
+          },
+          {
+            key: 'access-reader',
+            function: accessReader,
+            durationWarningMilliseconds: 8_000,
+          },
+          {
+            key: 'closure-request',
+            function: accountClosureRequest,
             durationWarningMilliseconds: 12_000,
           },
         ],

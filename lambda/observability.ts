@@ -25,6 +25,9 @@ const OBSERVED_SERVICES = [
   'account-closure-worker',
   'account-closure-reconciler',
   'commercial-config-broker',
+  'catalog',
+  'access-reader',
+  'account-closure-request',
 ] as const;
 export type ObservedService = (typeof OBSERVED_SERVICES)[number];
 const METRIC_UNITS: Readonly<Record<string, string>> = {
