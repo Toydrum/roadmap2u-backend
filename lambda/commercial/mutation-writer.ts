@@ -79,6 +79,7 @@ interface AggregatedTreeDelta {
   physicalVisibleBranches: number;
   quotaVisibleBranches: number;
   createsCounter: boolean;
+  guardsCounter: boolean;
 }
 
 interface AggregatedUsageDelta {
@@ -128,6 +129,7 @@ function aggregateDeltas(deltas: readonly UsageMutationDelta[]): AggregatedUsage
       physicalVisibleBranches: 0,
       quotaVisibleBranches: 0,
       createsCounter: false,
+      guardsCounter: false,
     };
     tree.physicalVisibleBranches = checkedSum(
       tree.physicalVisibleBranches,
@@ -139,10 +141,8 @@ function aggregateDeltas(deltas: readonly UsageMutationDelta[]): AggregatedUsage
       delta.quota.visibleBranches,
       'quota visibleBranches',
     );
-    tree.createsCounter ||=
-      delta.recordWasNew &&
-      delta.treeActivity === 'activate' &&
-      delta.physical.activeTrees > 0;
+    tree.createsCounter ||= delta.treeCounter === 'create';
+    tree.guardsCounter ||= delta.treeCounter === 'existing';
     aggregate.trees.set(delta.treeId, tree);
   }
   return aggregate;
@@ -610,12 +610,14 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
           );
           if (tree.createsCounter) {
             expectedVisibleBranches.set(tree.treeId, 0);
+          } else if (tree.guardsCounter) {
+            if (expected === null) throw new ApiError('CONFLICT', 'usage drift');
+            expectedVisibleBranches.set(tree.treeId, expected);
           } else if (
             tree.physicalVisibleBranches !== 0 ||
             tree.quotaVisibleBranches !== 0
           ) {
-            if (expected === null) throw new ApiError('CONFLICT', 'usage drift');
-            expectedVisibleBranches.set(tree.treeId, expected);
+            throw new ApiError('CONFLICT', 'tree counter intent is missing');
           }
         }
         if (resolvedFlags) {
@@ -652,7 +654,7 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
                 expected,
               ),
             );
-          } else if (tree.quotaVisibleBranches !== 0) {
+          } else if (tree.guardsCounter) {
             if (expected === undefined) throw new ApiError('CONFLICT', 'usage drift');
             items.push(
               treeUsageGuard(

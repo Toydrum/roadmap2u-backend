@@ -24,6 +24,8 @@ export interface UsageMutationDelta {
   readonly outcome: 'applied' | 'stale';
   readonly treeId: string;
   readonly recordWasNew: boolean;
+  /** Set by the persistence adapter; avoids inferring counter ownership from deltas. */
+  readonly treeCounter?: 'create' | 'existing';
   readonly physical: UsageCounterDelta;
   readonly quota: UsageCounterDelta;
   readonly treeActivity: TreeActivityDelta;

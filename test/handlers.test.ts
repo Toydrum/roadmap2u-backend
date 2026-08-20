@@ -17,6 +17,7 @@ import {
 import { ApiError, SyncRecord, SyncStore } from '@app/api/contracts';
 import { Harvest, Preserve, SCHEMA_VERSION, Tree, TreeNode, newSyncBase } from '@app/db/schema';
 import { Ctx } from '../lambda/authz';
+import { deriveAccessItem } from '../lambda/commercial/access-resolver';
 import { Deps, K, LinkItem, ProfileItem, RecordItem } from '../lambda/db';
 import { getForest } from '../lambda/handlers/forests';
 import { pushSync } from '../lambda/handlers/sync';
@@ -156,6 +157,22 @@ function preserve(id: string): Preserve {
   };
 }
 
+function syncFlags() {
+  return {
+    pk: 'COMMERCIAL#CONFIG',
+    sk: 'FLAGS',
+    revision: 1,
+    quotaMode: 'off',
+    capabilityMode: 'off',
+    accessCodeIssuanceEnabled: false,
+    accessCodeRedemptionEnabled: false,
+    premiumPaymentsEnabled: false,
+    updatedAt: NOW - 1,
+    updatedBy: 'test',
+    reason: 'handler fixture',
+  };
+}
+
 beforeEach(() => {
   ddbMock.reset();
   cognitoMock.reset();
@@ -251,11 +268,18 @@ describe('pushSync — rev LWW', () => {
     });
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
+      if (key.pk === 'COMMERCIAL#CONFIG' && key.sk === 'FLAGS') {
+        return { Item: syncFlags() };
+      }
       if (key.pk === K.profile('rocio').pk && key.sk === K.profile('rocio').sk) {
         return { Item: profile('rocio', { status: 'active' }) };
       }
+      if (key.pk === K.user('rocio') && key.sk === 'USAGE') {
+        return { Item: { ...key, state: 'active', activeTrees: 0 } };
+      }
       return key.pk === winner.pk && key.sk === winner.sk ? { Item: winner } : {};
     });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
 
     const result = await pushSync(ctxOf(profile('rocio')), {
       schemaVersion: 3,
@@ -311,10 +335,22 @@ describe('pushSync — rev LWW', () => {
       recordItem('rocio', 'trees', tree('t1')),
       recordItem('rocio', 'nodes', node('n1', 't1')),
     ];
+    const access = deriveAccessItem('rocio', NOW, undefined, []);
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
+      if (key.pk === 'COMMERCIAL#CONFIG' && key.sk === 'FLAGS') {
+        return { Item: syncFlags() };
+      }
+      if (key.pk === K.user('rocio') && key.sk === 'PROFILE') {
+        return { Item: profile('rocio', { status: 'active' }) };
+      }
+      if (key.pk === K.user('rocio') && key.sk === 'ACCESS') return { Item: access };
+      if (key.pk === K.user('rocio') && key.sk === 'USAGE') {
+        return { Item: { ...key, state: 'active', activeTrees: 0 } };
+      }
       return { Item: related.find((item) => item.pk === key.pk && item.sk === key.sk) };
     });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
     const records: SyncRecord[] = [
       { store: 'harvests', record: harvest('h:n1') },
       { store: 'preserves', record: preserve('p1') },
@@ -328,10 +364,15 @@ describe('pushSync — rev LWW', () => {
     expect(result.applied).toEqual(['h:n1', 'p1']);
     const written = ddbMock
       .commandCalls(TransactWriteCommand)
-      .map((call) => call.args[0].input.TransactItems?.[0]?.Put?.Item as RecordItem);
+      .map(
+        (call) =>
+          call.args[0].input.TransactItems?.find((item) =>
+            String(item.Put?.Item?.['sk']).startsWith('REC#'),
+          )?.Put?.Item as RecordItem,
+      );
     expect(written.map((item) => recordItem('rocio', item.store, item.record).store)).toEqual([
-      'harvests',
       'preserves',
+      'harvests',
     ]);
   });
 });

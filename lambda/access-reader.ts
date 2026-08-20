@@ -319,7 +319,7 @@ async function readAllGrants(
  * ACCESS is the fence: every GRANT mutation must update ACCESS in the same
  * TransactWrite. Reading the fence before and after all pages detects a race.
  */
-async function readStableAccessSnapshot(
+export async function readStableAccessSnapshot(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   ownerSub: string,

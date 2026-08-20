@@ -516,15 +516,13 @@ export async function validateSyncBatch(
 
       const previous = previousByEntry.get(item);
       const isNew = previous === undefined;
-      const isActive = record.deletedAt === null && record.archivedAt === null;
       const heartId = record.heartId;
       if (
         request.heartPolicy === 'required' &&
         isNew &&
-        isActive &&
         (typeof heartId !== 'string' || heartId.length === 0)
       ) {
-        invalid('new active tree requires heartId');
+        invalid('new tree requires heartId');
       }
       if (typeof heartId === 'string') {
         const heart = requireRelated(
@@ -535,7 +533,7 @@ export async function validateSyncBatch(
         );
         if (heart.record.treeId !== treeId) invalid('trees.heartId must belong to the same tree');
         if (heart.record.parentId !== null) invalid('trees.heartId must reference a root node');
-        if (isNew && isActive && (heart.record.deletedAt !== null || heart.record.archivedAt !== null)) {
+        if (isNew && (heart.record.deletedAt !== null || heart.record.archivedAt !== null)) {
           invalid('new tree heart must be visible');
         }
       }

@@ -85,6 +85,7 @@ function branchGrowth(): UsageMutationDelta {
     outcome: 'applied',
     treeId: 'tree-1',
     recordWasNew: true,
+    treeCounter: 'existing',
     physical: { activeTrees: 0, visibleBranches: 1 },
     quota: { activeTrees: 0, visibleBranches: 1 },
     treeActivity: 'unchanged',
@@ -96,6 +97,7 @@ function branchReduction(): UsageMutationDelta {
     outcome: 'applied',
     treeId: 'tree-1',
     recordWasNew: false,
+    treeCounter: 'existing',
     physical: { activeTrees: 0, visibleBranches: -1 },
     quota: { activeTrees: 0, visibleBranches: -1 },
     treeActivity: 'unchanged',
@@ -107,6 +109,7 @@ function treeGrowth(): UsageMutationDelta {
     outcome: 'applied',
     treeId: 'tree-2',
     recordWasNew: true,
+    treeCounter: 'create',
     physical: { activeTrees: 1, visibleBranches: 0 },
     quota: { activeTrees: 1, visibleBranches: 0 },
     treeActivity: 'activate',
@@ -118,6 +121,7 @@ function restoreTree(latentVisibleBranches: number): UsageMutationDelta {
     outcome: 'applied',
     treeId: 'tree-1',
     recordWasNew: false,
+    treeCounter: 'existing',
     physical: { activeTrees: 1, visibleBranches: 0 },
     quota: { activeTrees: 1, visibleBranches: latentVisibleBranches },
     treeActivity: 'activate',
@@ -129,6 +133,7 @@ function neutralEdit(): UsageMutationDelta {
     outcome: 'applied',
     treeId: 'tree-1',
     recordWasNew: false,
+    treeCounter: 'existing',
     physical: { activeTrees: 0, visibleBranches: 0 },
     quota: { activeTrees: 0, visibleBranches: 0 },
     treeActivity: 'unchanged',
@@ -151,6 +156,7 @@ function newHeart(treeId = 'tree-2'): UsageMutationDelta {
     outcome: 'applied',
     treeId,
     recordWasNew: true,
+    treeCounter: 'existing',
     physical: { activeTrees: 0, visibleBranches: 0 },
     quota: { activeTrees: 0, visibleBranches: 0 },
     treeActivity: 'unchanged',
@@ -305,6 +311,29 @@ describe('CommercialMutationWriter', () => {
     )?.ConditionCheck;
     expect(guard?.ConditionExpression).toContain('userId = :ownerSub');
     expect(guard?.ExpressionAttributeValues).toMatchObject({ ':ownerSub': OWNER });
+  });
+
+  it('guards an existing tree counter even when its branch delta is zero', async () => {
+    const h = harness([
+      snapshot({
+        deltas: [{ ...neutralEdit(), treeCounter: 'existing' as const }],
+      }),
+    ]);
+
+    await h.writer.write({ ownerSub: OWNER, mutationId: 'zero-tree-delta' });
+
+    expect(
+      h.commits[0].items.find(
+        (item) => item.ConditionCheck?.Key?.['sk'] === 'USAGE#TREE#tree-1',
+      )?.ConditionCheck,
+    ).toMatchObject({
+      ConditionExpression:
+        'generation = :activeGeneration AND visibleBranches = :expectedVisibleBranches',
+      ExpressionAttributeValues: {
+        ':activeGeneration': GENERATION,
+        ':expectedVisibleBranches': 9,
+      },
+    });
   });
 
   it.each([

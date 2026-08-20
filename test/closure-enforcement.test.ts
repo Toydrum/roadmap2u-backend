@@ -5,6 +5,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
+  QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -101,6 +102,34 @@ function transactionCanceled(codes: string[]): Error & { CancellationReasons: Ar
   });
 }
 
+function flags() {
+  return {
+    pk: 'COMMERCIAL#CONFIG',
+    sk: 'FLAGS',
+    revision: 1,
+    quotaMode: 'off',
+    capabilityMode: 'off',
+    accessCodeIssuanceEnabled: false,
+    accessCodeRedemptionEnabled: false,
+    premiumPaymentsEnabled: false,
+    updatedAt: NOW - 1,
+    updatedBy: 'test',
+    reason: 'sync closure fixture',
+  };
+}
+
+function syncFixture(key: { pk: string; sk: string }): unknown {
+  if (key.pk === 'COMMERCIAL#CONFIG' && key.sk === 'FLAGS') return flags();
+  if (key.sk === 'PROFILE') {
+    const userId = key.pk.replace('USER#', '');
+    return profile(userId, { status: 'active' });
+  }
+  if (key.pk.startsWith('USER#') && key.sk === 'USAGE') {
+    return { ...key, state: 'active', activeTrees: 0 };
+  }
+  return undefined;
+}
+
 function conditionChecks(transaction: ConstructorParameters<typeof TransactWriteCommand>[0]) {
   return (transaction.TransactItems ?? []).flatMap((item) =>
     item.ConditionCheck ? [item.ConditionCheck] : [],
@@ -110,6 +139,7 @@ function conditionChecks(transaction: ConstructorParameters<typeof TransactWrite
 beforeEach(() => {
   ddbMock.reset();
   cognitoMock.reset();
+  ddbMock.on(QueryCommand).resolves({ Items: [] });
 });
 
 describe('post-confirmation closure guard', () => {
@@ -228,7 +258,10 @@ describe('patchMe closure serialization', () => {
 
 describe('sync closure serialization', () => {
   it('puts a self record and both writable-owner guards in one transaction', async () => {
-    ddbMock.on(GetCommand).resolves({});
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      return { Item: syncFixture(key) };
+    });
     ddbMock.on(TransactWriteCommand).resolves({});
     const incoming = tree('self-tree');
 
@@ -241,12 +274,15 @@ describe('sync closure serialization', () => {
 
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
-    const put = transaction.TransactItems?.find((item) => item.Put)?.Put;
+    const put = transaction.TransactItems?.find((item) =>
+      String(item.Put?.Item?.['sk']).startsWith('REC#'),
+    )?.Put;
     expect(put?.Item).toMatchObject({ ...K.rec('rocio', 'trees', 'self-tree'), owner: 'rocio' });
     expect(put?.ConditionExpression).toContain('rev < :rev');
     expect(conditionChecks(transaction).map((guard) => guard.Key)).toEqual([
       K.profile('rocio'),
       accountClosureKey('rocio'),
+      { pk: K.user('rocio'), sk: 'USAGE_MIGRATION' },
     ]);
   });
 
@@ -260,7 +296,7 @@ describe('sync closure serialization', () => {
       if (key.pk === accountClosureKey('rocio').pk) {
         return { Item: { ...accountClosureKey('rocio'), state: 'requested' } };
       }
-      return {};
+      return { Item: syncFixture(key) };
     });
 
     await expect(
@@ -282,7 +318,7 @@ describe('sync closure serialization', () => {
       if (key.pk === accountClosureKey('rocio').pk) {
         return { Item: { ...accountClosureKey('rocio'), state: 'requested' } };
       }
-      return {};
+      return { Item: syncFixture(key) };
     });
 
     await expect(
@@ -304,7 +340,7 @@ describe('sync closure serialization', () => {
       if (key.sk === 'PROFILE') return { Item: profile('rocio', { status: 'active' }) };
       if (key.pk === accountClosureKey('rocio').pk) return {};
       if (key.pk === winner.pk && key.sk === winner.sk) return { Item: winner };
-      return {};
+      return { Item: syncFixture(key) };
     });
 
     await expect(
@@ -320,24 +356,35 @@ describe('sync closure serialization', () => {
     const consistentReads = ddbMock
       .commandCalls(GetCommand)
       .filter((call) => call.args[0].input.ConsistentRead === true);
-    expect(consistentReads.map((call) => call.args[0].input.Key)).toEqual([
-      K.profile('rocio'),
-      accountClosureKey('rocio'),
-      K.rec('rocio', 'trees', 'stale-tree'),
-    ]);
+    expect(consistentReads.map((call) => call.args[0].input.Key)).toEqual(
+      expect.arrayContaining([
+        K.profile('rocio'),
+        accountClosureKey('rocio'),
+        K.rec('rocio', 'trees', 'stale-tree'),
+      ]),
+    );
   });
 
-  it('does not mask a non-conditional transaction cancellation as STALE_REV', async () => {
+  it('bounds a Dynamo transaction-conflict retry and never reports STALE_REV', async () => {
     const transactionConflict = transactionCanceled(['TransactionConflict', 'None', 'None']);
-    ddbMock.on(GetCommand).resolves({});
-    ddbMock.on(TransactWriteCommand).rejects(transactionConflict);
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      return { Item: syncFixture(key) };
+    });
+    let attempts = 0;
+    ddbMock.on(TransactWriteCommand).callsFake(() => {
+      attempts += 1;
+      if (attempts === 1) throw transactionConflict;
+      return {};
+    });
 
     await expect(
       pushSync(ctxOf(profile('rocio')), {
         schemaVersion: 3,
         records: [{ store: 'trees', record: tree('retry-me') }],
       }),
-    ).rejects.toBe(transactionConflict);
+    ).resolves.toMatchObject({ applied: ['retry-me'], rejected: [] });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(2);
   });
 
   it('does not mask a malformed stored winner as STALE_REV', async () => {
@@ -355,7 +402,7 @@ describe('sync closure serialization', () => {
       if (key.pk === malformedWinner.pk && key.sk === malformedWinner.sk) {
         return { Item: malformedWinner };
       }
-      return {};
+      return { Item: syncFixture(key) };
     });
 
     await expect(
@@ -363,14 +410,16 @@ describe('sync closure serialization', () => {
         schemaVersion: 3,
         records: [{ store: 'trees', record: incoming }],
       }),
-    ).rejects.toBe(cancelled);
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
   });
 
   it('guards caller, minor and their current guardian link in the same write transaction', async () => {
     const link = guardianLink('rocio', 'nico');
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
-      return key.pk === link.pk && key.sk === link.sk ? { Item: link } : {};
+      return key.pk === link.pk && key.sk === link.sk
+        ? { Item: link }
+        : { Item: syncFixture(key) };
     });
     ddbMock.on(TransactWriteCommand).resolves({});
 
@@ -383,10 +432,11 @@ describe('sync closure serialization', () => {
 
     const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
     expect(conditionChecks(transaction).map((guard) => guard.Key)).toEqual([
-      K.profile('rocio'),
-      accountClosureKey('rocio'),
       K.profile('nico'),
       accountClosureKey('nico'),
+      { pk: K.user('nico'), sk: 'USAGE_MIGRATION' },
+      K.profile('rocio'),
+      accountClosureKey('rocio'),
       K.link('nico', 'rocio'),
     ]);
   });
@@ -402,7 +452,7 @@ describe('sync closure serialization', () => {
         const userId = key.pk.replace('USER#', '');
         return { Item: profile(userId, { status: 'active' }) };
       }
-      return {};
+      return { Item: syncFixture(key) };
     });
     ddbMock
       .on(TransactWriteCommand)
