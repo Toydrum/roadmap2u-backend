@@ -923,7 +923,7 @@ describe('closure races and family listings', () => {
 
     await resetChildPassword(ctx, 'minor-1', () => 'identity-lease-1');
 
-    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(2);
     const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
     const lease = items.find((item) => item.Update)?.Update;
     expect(lease).toMatchObject({
@@ -935,12 +935,28 @@ describe('closure races and family listings', () => {
       }),
     });
     expect(cognitoMock.commandCalls(AdminSetUserPasswordCommand)).toHaveLength(1);
-    const release = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    const cleanup = ddbMock.commandCalls(TransactWriteCommand)[1].args[0].input.TransactItems ?? [];
+    const release = cleanup.find((item) => item.Update)?.Update;
     expect(release).toMatchObject({
       Key: K.profile('minor-1'),
       UpdateExpression: 'REMOVE identityLeaseOwner, identityLeaseUntil',
-      ConditionExpression: 'identityLeaseOwner = :identityLeaseOwner',
+      ConditionExpression: expect.stringContaining('identityLeaseOwner = :identityLeaseOwner'),
+      ExpressionAttributeValues: expect.objectContaining({
+        ':active': 'active',
+        ':identityLeaseOwner': 'identity-lease-1',
+      }),
     });
+    const cleanupChecks = cleanup.flatMap((item) =>
+      item.ConditionCheck ? [item.ConditionCheck.Key] : [],
+    );
+    expect(cleanupChecks).toEqual(
+      expect.arrayContaining([
+        K.profile('guardian-1'),
+        { pk: 'ACCOUNT_CLOSURE#guardian-1', sk: 'STATE' },
+        { pk: 'ACCOUNT_CLOSURE#minor-1', sk: 'STATE' },
+      ]),
+    );
   });
 
   it('does not call Cognito when closure wins the password-reset transaction', async () => {

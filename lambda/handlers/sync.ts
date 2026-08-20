@@ -968,6 +968,10 @@ async function pushInto(
   }
   if (!Array.isArray(req.records)) throw new ApiError('VALIDATION');
   if (req.records.length > LIMITS.syncPushMax) throw new ApiError('LIMIT_EXCEEDED', `max ${LIMITS.syncPushMax} records per push`);
+  if (req.records.length === 0) {
+    await recheckWriteGuards(ctx, ownerId, expectedGuardianLink);
+    return { applied: [], rejected: [], serverRecords: [] };
+  }
 
   await validateSyncBatch({
     ownerId,

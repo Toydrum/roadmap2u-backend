@@ -4,7 +4,6 @@
   AdminSetUserPasswordCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { randomUUID } from 'node:crypto';
-import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
   ApiError,
   CodeGrant,
@@ -52,9 +51,11 @@ import {
   LinkItem,
   ProfileItem,
   RecordItem,
+  type DynamoKey,
   composite,
   getItem,
   queryPrefix,
+  queryPrefixPage,
   readRateCount,
 } from '../db';
 import { friendCode, tempPassword } from '../codes';
@@ -132,6 +133,37 @@ async function requireCreatedGuardianConsistent(ctx: Ctx, minorId: string): Prom
     throw new ApiError('FORBIDDEN', 'invited links have no identity admin');
   }
   return current;
+}
+
+async function requireWritableExportAuthority(ctx: Ctx, minorId: string): Promise<LinkItem> {
+  const [caller, child, link] = await Promise.all([
+    requireWritableOwner(ctx, ctx.callerId),
+    requireWritableOwner(ctx, minorId),
+    requireCreatedGuardianConsistent(ctx, minorId),
+  ]);
+  if (
+    caller.userId !== ctx.callerId ||
+    child.userId !== minorId ||
+    link.guardianId !== ctx.callerId ||
+    link.minorId !== minorId
+  ) {
+    throw new ApiError('NOT_FOUND');
+  }
+  return link;
+}
+
+async function exportRecordsConsistent(ctx: Ctx, ownerId: string): Promise<RecordItem[]> {
+  const records: RecordItem[] = [];
+  let exclusiveStartKey: DynamoKey | undefined;
+  do {
+    const page = await queryPrefixPage<RecordItem>(ctx.deps, K.user(ownerId), 'REC#', {
+      consistentRead: true,
+      exclusiveStartKey,
+    });
+    records.push(...page.items);
+    exclusiveStartKey = page.lastEvaluatedKey;
+  } while (exclusiveStartKey);
+  return records;
 }
 
 function linkItem(
@@ -322,14 +354,32 @@ export async function resetChildPassword(
     failure = error;
   }
   try {
-    await ctx.deps.ddb.send(
-      new UpdateCommand({
-        TableName: ctx.deps.table,
-        Key: K.profile(minorId),
-        UpdateExpression: 'REMOVE identityLeaseOwner, identityLeaseUntil',
-        ConditionExpression: 'identityLeaseOwner = :identityLeaseOwner',
-        ExpressionAttributeValues: { ':identityLeaseOwner': identityLeaseOwner },
-      }),
+    // This nonce-matched REMOVE cannot grant authority or recreate data, but it
+    // still carries the exact guardian link and both owners' lifecycle fences.
+    await guardedWrite(
+      ctx,
+      [ctx.callerId, minorId],
+      [
+        {
+          Update: {
+            TableName: ctx.deps.table,
+            Key: K.profile(minorId),
+            UpdateExpression: 'REMOVE identityLeaseOwner, identityLeaseUntil',
+            ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND (identityLeaseOwner = :identityLeaseOwner)`,
+            ExpressionAttributeNames: { '#status': 'status' },
+            ExpressionAttributeValues: {
+              ':active': 'active',
+              ':identityLeaseOwner': identityLeaseOwner,
+            },
+          },
+        },
+        exactLinkOperation(ctx.deps, guardianLink, 'check'),
+      ],
+      async () => {
+        const currentLink = await requireCreatedGuardianConsistent(ctx, minorId);
+        if (!sameLink(currentLink, guardianLink)) throw new ApiError('NOT_FOUND');
+      },
+      { [minorId]: { profile: true } },
     );
   } catch (error) {
     failure ??= error;
@@ -372,6 +422,21 @@ export async function patchChild(
     values[':s'] = !!body.socialEnabled;
     child.socialEnabled = !!body.socialEnabled;
   }
+  if (!sets.length) {
+    const [caller, currentChild, currentLink] = await Promise.all([
+      requireWritableOwner(ctx, ctx.callerId),
+      requireWritableOwner(ctx, minorId),
+      requireCreatedGuardianConsistent(ctx, minorId),
+    ]);
+    if (
+      caller.userId !== ctx.callerId ||
+      currentChild.userId !== minorId ||
+      !sameLink(currentLink, guardianLink)
+    ) {
+      throw new ApiError('NOT_FOUND');
+    }
+    return profileView(currentChild);
+  }
   if (sets.length) {
     await guardedWrite(
       ctx,
@@ -401,8 +466,12 @@ export async function patchChild(
 }
 
 export async function exportChild(ctx: Ctx, minorId: string): Promise<ExportEnvelope> {
-  await requireCreatedGuardianOf(ctx, minorId);
-  const records = await queryPrefix<RecordItem>(ctx.deps, K.user(minorId), 'REC#');
+  const expectedLink = await requireWritableExportAuthority(ctx, minorId);
+  const records = await exportRecordsConsistent(ctx, minorId);
+  // The postflight keeps a concurrent closure or unlink from returning a stale
+  // export. This lifecycle check is deliberately independent of Premium.
+  const currentLink = await requireWritableExportAuthority(ctx, minorId);
+  if (!sameLink(currentLink, expectedLink)) throw new ApiError('NOT_FOUND');
   const of = <T>(store: string): T[] =>
     records.filter((r) => r.store === store).map((r) => r.record as T);
   return {

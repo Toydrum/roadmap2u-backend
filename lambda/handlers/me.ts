@@ -45,7 +45,10 @@ export async function getMe(ctx: Ctx): Promise<MeResponse> {
 
 export async function patchMe(ctx: Ctx, body: { displayName?: string }): Promise<UserProfile> {
   const displayName = body.displayName?.trim();
-  if (displayName === undefined) return profileView(ctx.caller);
+  if (displayName === undefined) {
+    const current = await requireWritableOwner(ctx, ctx.callerId);
+    return profileView(current);
+  }
   if (!displayName || displayName.length > 40) throw new ApiError('VALIDATION', 'displayName 1-40 chars');
   try {
     await ctx.deps.ddb.send(
