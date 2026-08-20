@@ -58,26 +58,28 @@ function roleArn(stack: Stack, stage: PolicyStage): string {
   return resourceArn(stack, 'iam', 'role', `roadmap2u/${stage}/runtime/*`, { region: '' });
 }
 
+function functionArn(stack: Stack, stage: PolicyStage, name: string): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'lambda',
+      region: stack.region,
+      account: stack.account,
+      resource: 'function',
+      resourceName: `roadmap-${name}-${stage}`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
+}
+
 function functionArns(stack: Stack, stage: PolicyStage): string[] {
   return [
     'pre-signup',
     'post-confirmation',
     'router',
     'account-closure-*',
-  ].map((name) =>
-    Arn.format(
-      {
-        partition: Aws.PARTITION,
-        service: 'lambda',
-        region: stack.region,
-        account: stack.account,
-        resource: 'function',
-        resourceName: `roadmap-${name}-${stage}`,
-        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-      },
-      stack,
-    ),
-  );
+  ].map((name) => functionArn(stack, stage, name));
 }
 
 function lambdaLogGroupArns(stack: Stack, stage: PolicyStage): string[] {
@@ -104,6 +106,21 @@ function lambdaLogGroupArns(stack: Stack, stage: PolicyStage): string[] {
 
 function lambdaLogArns(stack: Stack, stage: PolicyStage): string[] {
   return lambdaLogGroupArns(stack, stage).map((arn) => `${arn}:*`);
+}
+
+function commercialConfigBrokerLogGroupArn(stack: Stack, stage: PolicyStage): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'logs',
+      region: stack.region,
+      account: stack.account,
+      resource: 'log-group',
+      resourceName: `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
 }
 
 function apiAccessLogArn(stack: Stack, stage: PolicyStage): string {
@@ -305,7 +322,10 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
       new iam.PolicyStatement({
         sid: 'WriteOnlyOwnFunctionLogs',
         actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
-        resources: lambdaLogArns(stack, stage),
+        resources: [
+          ...lambdaLogArns(stack, stage),
+          `${commercialConfigBrokerLogGroupArn(stack, stage)}:*`,
+        ],
       }),
       new iam.PolicyStatement({
         sid: 'UseOnlyOwnStageTable',
@@ -522,6 +542,47 @@ function createCorePolicies(
     // AWS::IAM::ManagedPolicy.Description is create-only; keep this deployed value stable.
     description: `CloudFormation data-service permissions for RoadMap2U ${stage}`,
     statements: [
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyCommercialConfigBrokerLogGroup',
+        actions: [
+          'logs:CreateLogGroup',
+          'logs:DeleteLogGroup',
+          'logs:PutRetentionPolicy',
+          'logs:TagResource',
+        ],
+        resources: [`${commercialConfigBrokerLogGroupArn(stack, stage)}:*`],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyCommercialConfigBrokerLogGroupTags',
+        actions: ['logs:ListTagsForResource', 'logs:TagResource', 'logs:UntagResource'],
+        resources: [commercialConfigBrokerLogGroupArn(stack, stage)],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyCommercialConfigBrokerFunctionUrl',
+        actions: [
+          'lambda:AddPermission',
+          'lambda:CreateFunction',
+          'lambda:CreateFunctionUrlConfig',
+          'lambda:DeleteFunction',
+          'lambda:DeleteFunctionUrlConfig',
+          'lambda:GetFunction',
+          'lambda:GetFunctionCodeSigningConfig',
+          'lambda:GetFunctionConfiguration',
+          'lambda:GetFunctionRecursionConfig',
+          'lambda:GetFunctionScalingConfig',
+          'lambda:GetFunctionUrlConfig',
+          'lambda:GetPolicy',
+          'lambda:GetRuntimeManagementConfig',
+          'lambda:ListTags',
+          'lambda:RemovePermission',
+          'lambda:TagResource',
+          'lambda:UntagResource',
+          'lambda:UpdateFunctionCode',
+          'lambda:UpdateFunctionConfiguration',
+          'lambda:UpdateFunctionUrlConfig',
+        ],
+        resources: [functionArn(stack, stage, 'commercial-config-broker')],
+      }),
       new iam.PolicyStatement({
         sid: 'CreateOnlyTaggedStageUserPools',
         actions: ['cognito-idp:CreateUserPool'],

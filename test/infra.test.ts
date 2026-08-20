@@ -4,6 +4,7 @@ import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, it } from 'vitest';
 import { calculateContractHash, RoadmapStack } from '../lib/roadmap-stack';
+import { AuditWriter } from '../lambda/commercial/audit';
 
 const ACCOUNT = '123456789012';
 const HOSTED_ZONE_ID = 'Z0123456789ABCDEFGHIJ';
@@ -169,6 +170,7 @@ describe('stage backend infrastructure', () => {
       [
         `/aws/lambda/roadmap-account-closure-reconciler-${stage}`,
         `/aws/lambda/roadmap-account-closure-worker-${stage}`,
+        `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
         `/aws/lambda/roadmap-post-confirmation-${stage}`,
         `/aws/lambda/roadmap-pre-signup-${stage}`,
         `/aws/lambda/roadmap-router-${stage}`,
@@ -204,6 +206,7 @@ describe('stage backend infrastructure', () => {
         [
           `roadmap-account-closure-reconciler-${stage}`,
           `roadmap-account-closure-worker-${stage}`,
+          `roadmap-commercial-config-broker-${stage}`,
           `roadmap-post-confirmation-${stage}`,
           `roadmap-pre-signup-${stage}`,
           `roadmap-router-${stage}`,
@@ -291,7 +294,18 @@ describe('stage backend infrastructure', () => {
     expect(JSON.stringify(preSignUpRole.Properties.ManagedPolicyArns)).toContain(
       ':iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
     );
-    expect(preSignUpRole.Properties.Policies).toBeUndefined();
+    const preSignUpPolicies = Object.values(template.Resources).filter(
+      (resource: any) =>
+        resource.Type === 'AWS::IAM::Policy' &&
+        JSON.stringify(resource.Properties.Roles).includes(preSignUpRoleId),
+    ) as any[];
+    expect(preSignUpPolicies).toHaveLength(1);
+    expect(preSignUpPolicies[0].Properties.PolicyDocument.Statement).toEqual([
+      expect.objectContaining({
+        Sid: 'DenyCommercialConfigWrites',
+        Effect: 'Deny',
+      }),
+    ]);
   });
 
   it('retains and protects production identity and data', () => {
@@ -360,6 +374,251 @@ describe('stage backend infrastructure', () => {
       IdentitySource: ['$request.header.Authorization'],
       JwtConfiguration: Match.objectLike({ Audience: Match.anyValue(), Issuer: Match.anyValue() }),
     });
+  });
+
+  it.each(['dev', 'test', 'prod'] as const)(
+    'exposes the %s commercial config broker only through an AWS_IAM Function URL',
+    (stage) => {
+      const rendered = backendTemplate(stage).toJSON();
+      const [functionId, fn] = Object.entries(rendered.Resources).find(
+        ([, resource]: [string, any]) =>
+          resource.Type === 'AWS::Lambda::Function' &&
+          resource.Properties.FunctionName === `roadmap-commercial-config-broker-${stage}`,
+      ) as [string, any];
+      const functionUrl = Object.values(rendered.Resources).find(
+        (resource: any) =>
+          resource.Type === 'AWS::Lambda::Url' &&
+          resource.Properties.TargetFunctionArn?.['Fn::GetAtt']?.[0] === functionId,
+      ) as any;
+
+      expect(fn).toBeDefined();
+      expect(fn.Properties.Environment.Variables).toMatchObject({
+        TABLE_NAME: { Ref: expect.stringMatching(/^Table/) },
+        AUDIT_TABLE_NAME: { Ref: expect.stringMatching(/^AccessAuditTable/) },
+        COMMERCIAL_STAGE: stage,
+        COMMERCIAL_CONFIG_ALLOWLIST: expect.any(String),
+      });
+      expect(JSON.parse(fn.Properties.Environment.Variables.COMMERCIAL_CONFIG_ALLOWLIST)).toEqual([
+        {
+          accountId: ACCOUNT,
+          roleName: `roadmap2u-${stage}-commercial-migration`,
+          stage,
+          commands: ['bootstrap-flags', 'freeze-cutover'],
+        },
+        {
+          accountId: ACCOUNT,
+          roleName: `roadmap2u-${stage}-commercial-flag-operator`,
+          stage,
+          commands: ['set-flags'],
+        },
+      ]);
+      expect(functionUrl.Properties.AuthType).toBe('AWS_IAM');
+      expect(functionUrl.Properties.Cors).toBeUndefined();
+      expect(rendered.Outputs).toHaveProperty('CommercialConfigBrokerFunctionUrl');
+      expect(rendered.Outputs).toHaveProperty('CommercialConfigBrokerFunctionArn');
+      expect(rendered.Outputs).not.toHaveProperty('CommercialConfigBrokerApiRoute');
+    },
+    20_000,
+  );
+
+  it('gives only the broker role config writes and explicitly denies them to other writers', () => {
+    const rendered = backendTemplate('dev').toJSON();
+    const functions = Object.values(rendered.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::Lambda::Function',
+    ) as any[];
+    const policies = Object.values(rendered.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Policy',
+    ) as any[];
+    const broker = functions.find(
+      (fn) => fn.Properties.FunctionName === 'roadmap-commercial-config-broker-dev',
+    );
+    const brokerRoleId = broker.Properties.Role['Fn::GetAtt'][0] as string;
+    const auditTableId = Object.entries(rendered.Resources).find(
+      ([, resource]: [string, any]) =>
+        resource.Type === 'AWS::DynamoDB::Table' &&
+        resource.Properties.TableName === 'roadmap-access-audit-dev',
+    )?.[0];
+    if (!auditTableId) throw new Error('audit table should exist');
+    const brokerPolicy = policies.find((policy) =>
+      JSON.stringify(policy.Properties.Roles).includes(brokerRoleId),
+    );
+    const brokerStatements = brokerPolicy.Properties.PolicyDocument.Statement;
+    const brokerJson = JSON.stringify(brokerStatements);
+
+    expect(brokerJson).not.toContain('dynamodb:TransactWriteItems');
+    expect(brokerJson).toContain('dynamodb:GetItem');
+    expect(brokerJson).toContain('COMMERCIAL#CONFIG');
+    expect(auditTableId).toBeDefined();
+    expect(brokerJson).toContain(auditTableId);
+    expect(brokerJson).toContain('TARGET#*');
+    expect(brokerJson).not.toContain('AUDIT#*');
+    expect(brokerJson).not.toContain('cognito-idp:');
+    expect(brokerJson).not.toContain('secretsmanager:');
+    expect(brokerStatements.some((statement: any) => statement.Effect === 'Deny')).toBe(false);
+
+    for (const functionName of [
+      'roadmap-pre-signup-dev',
+      'roadmap-router-dev',
+      'roadmap-post-confirmation-dev',
+      'roadmap-account-closure-worker-dev',
+      'roadmap-account-closure-reconciler-dev',
+    ]) {
+      const fn = functions.find((candidate) => candidate.Properties.FunctionName === functionName);
+      const roleId = fn.Properties.Role['Fn::GetAtt'][0] as string;
+      const rolePolicies = policies.filter((policy) =>
+        JSON.stringify(policy.Properties.Roles).includes(roleId),
+      );
+      const deny = rolePolicies
+        .flatMap((policy) => policy.Properties.PolicyDocument.Statement)
+        .find((statement: any) => statement.Sid === 'DenyCommercialConfigWrites');
+      expect(deny?.Effect, functionName).toBe('Deny');
+      expect(JSON.stringify(deny?.Condition), functionName).toContain('COMMERCIAL#CONFIG');
+    }
+
+    const auditWriter = new AuditWriter({
+      ddb: { send: async () => ({}) } as never,
+      tableName: 'roadmap-access-audit-dev',
+    });
+    const auditKey = auditWriter.transactPut({
+      targetKind: 'CONFIG',
+      targetId: 'dev',
+      timestamp: 1_755_631_800_000,
+      requestId: 'function-url-request-1',
+      action: 'commercial_config.flags_changed',
+      actor: 'arn:aws:sts::765932874577:assumed-role/example/session',
+      subject: 'COMMERCIAL#CONFIG/FLAGS',
+    }).Put.Item.pk;
+    const configWrites = brokerStatements.find(
+      (statement: any) => statement.Sid === 'TransactOnlyCommercialConfig',
+    );
+    expect(configWrites.Action).toEqual(['dynamodb:PutItem', 'dynamodb:UpdateItem']);
+    expect(configWrites.Condition).toEqual({
+      'ForAllValues:StringEquals': {
+        'dynamodb:LeadingKeys': 'COMMERCIAL#CONFIG',
+      },
+      StringEquals: {
+        'dynamodb:EnclosingOperation': 'TransactWriteItems',
+      },
+    });
+    expect(JSON.stringify(configWrites.Resource)).not.toContain(auditTableId);
+
+    const auditWrites = brokerStatements.find(
+      (statement: any) => statement.Sid === 'TransactOnlyCommercialAudit',
+    );
+    expect(auditWrites.Action).toBe('dynamodb:PutItem');
+    expect(auditWrites.Condition).toEqual({
+      'ForAllValues:StringLike': {
+        'dynamodb:LeadingKeys': 'TARGET#*',
+      },
+      StringEquals: {
+        'dynamodb:EnclosingOperation': 'TransactWriteItems',
+      },
+    });
+    expect(auditKey).toMatch(/^TARGET#/);
+    expect(JSON.stringify(auditWrites.Resource)).toContain(auditTableId);
+
+    const brokerWriteAllows = brokerStatements.filter((statement: any) =>
+      (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).some(
+        (action: string) => [
+          'dynamodb:ConditionCheckItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:PutItem',
+          'dynamodb:UpdateItem',
+        ].includes(action),
+      ),
+    );
+    expect(brokerWriteAllows).toHaveLength(2);
+    for (const statement of brokerWriteAllows) {
+      expect(statement.Condition.StringEquals['dynamodb:EnclosingOperation']).toBe(
+        'TransactWriteItems',
+      );
+    }
+  });
+
+  it('grants post-confirmation only its transaction-scoped Put and closure guard', () => {
+    const rendered = backendTemplate('dev').toJSON();
+    const functions = Object.values(rendered.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::Lambda::Function',
+    ) as any[];
+    const policies = Object.values(rendered.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Policy',
+    ) as any[];
+
+    const postConfirmation = functions.find(
+      (candidate) => candidate.Properties.FunctionName === 'roadmap-post-confirmation-dev',
+    );
+    const postRoleId = postConfirmation.Properties.Role['Fn::GetAtt'][0] as string;
+    const postAllows = policies
+      .filter((policy) => JSON.stringify(policy.Properties.Roles).includes(postRoleId))
+      .flatMap((policy) => policy.Properties.PolicyDocument.Statement)
+      .filter((statement: any) => statement.Effect !== 'Deny');
+    const postWrites = postAllows.filter((statement: any) =>
+      (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).some(
+        (action: string) => action.startsWith('dynamodb:'),
+      ),
+    );
+    expect(postWrites).toHaveLength(1);
+    expect(postWrites[0].Action).toEqual([
+      'dynamodb:ConditionCheckItem',
+      'dynamodb:PutItem',
+    ]);
+    expect(postWrites[0].Condition).toEqual({
+      StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+    });
+    expect(JSON.stringify(postWrites[0].Resource)).toContain('Table');
+    expect(JSON.stringify(postWrites[0])).not.toContain('roadmap-access-audit-dev');
+    expect(JSON.stringify(postWrites)).not.toMatch(
+      /dynamodb:(?:BatchWriteItem|DeleteItem|UpdateItem|TransactWriteItems)/,
+    );
+
+    const router = functions.find(
+      (candidate) => candidate.Properties.FunctionName === 'roadmap-router-dev',
+    );
+    const routerRoleId = router.Properties.Role['Fn::GetAtt'][0] as string;
+    const routerAllows = policies
+      .filter((policy) => JSON.stringify(policy.Properties.Roles).includes(routerRoleId))
+      .flatMap((policy) => policy.Properties.PolicyDocument.Statement)
+      .filter((statement: any) => statement.Effect !== 'Deny');
+    expect(JSON.stringify(routerAllows)).toContain('dynamodb:ConditionCheckItem');
+    expect(JSON.stringify(routerAllows)).not.toContain('dynamodb:TransactWriteItems');
+  });
+
+  it('allows the closure worker to append audit events only inside TransactWrite', () => {
+    const rendered = backendTemplate('dev').toJSON();
+    const functions = Object.values(rendered.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::Lambda::Function',
+    ) as any[];
+    const policies = Object.values(rendered.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Policy',
+    ) as any[];
+    const auditTableId = Object.entries(rendered.Resources).find(
+      ([, resource]: [string, any]) =>
+        resource.Type === 'AWS::DynamoDB::Table' &&
+        resource.Properties.TableName === 'roadmap-access-audit-dev',
+    )?.[0];
+    if (!auditTableId) throw new Error('audit table should exist');
+    const worker = functions.find(
+      (candidate) => candidate.Properties.FunctionName === 'roadmap-account-closure-worker-dev',
+    );
+    const roleId = worker.Properties.Role['Fn::GetAtt'][0] as string;
+    const statements = policies
+      .filter((policy) => JSON.stringify(policy.Properties.Roles).includes(roleId))
+      .flatMap((policy) => policy.Properties.PolicyDocument.Statement)
+      .filter((statement: any) => statement.Effect !== 'Deny');
+    const auditWrites = statements.filter(
+      (statement: any) =>
+        JSON.stringify(statement.Resource).includes(auditTableId) &&
+        (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).includes(
+          'dynamodb:PutItem',
+        ),
+    );
+    expect(auditWrites).toHaveLength(1);
+    expect(auditWrites[0].Action).toBe('dynamodb:PutItem');
+    expect(auditWrites[0].Condition).toEqual({
+      'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#*' },
+      StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+    });
+    expect(JSON.stringify(auditWrites)).not.toContain('dynamodb:TransactWriteItems');
   });
 
   it('uses the same canonical cross-platform contract hash as the release script', () => {

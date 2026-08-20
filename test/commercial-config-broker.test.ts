@@ -50,6 +50,7 @@ function event(body: unknown, actorArn: string | null = ACTOR): CommercialConfig
   return {
     body: typeof body === 'string' ? body : JSON.stringify(body),
     requestContext: {
+      requestId: 'function-url-request-1',
       http: { method: 'POST' },
       authorizer: actorArn === null ? undefined : { iam: { userArn: actorArn } },
     },
@@ -87,7 +88,6 @@ function createBroker(
   ],
 ) {
   const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-  let auditSequence = 0;
   return createCommercialConfigBroker({
     ddb,
     tableName: 'roadmap-dev',
@@ -96,8 +96,6 @@ function createBroker(
     auditWriter: new AuditWriter({
       ddb,
       tableName: 'roadmap-access-audit-dev',
-      now: () => NOW,
-      nextEventId: () => `broker-event-${++auditSequence}`,
     }),
   });
 }
@@ -262,6 +260,10 @@ describe('CommercialConfigBroker flag mutations', () => {
       Put: {
         TableName: 'roadmap-access-audit-dev',
         Item: {
+          targetKind: 'CONFIG',
+          targetId: 'dev',
+          timestamp: NOW,
+          requestId: 'function-url-request-1',
           action: 'commercial_config.flags_bootstrapped',
           actor: ACTOR,
           subject: 'COMMERCIAL#CONFIG/FLAGS',
@@ -314,6 +316,10 @@ describe('CommercialConfigBroker flag mutations', () => {
       Put: {
         TableName: 'roadmap-access-audit-dev',
         Item: {
+          targetKind: 'CONFIG',
+          targetId: 'dev',
+          timestamp: NOW,
+          requestId: 'function-url-request-1',
           action: 'commercial_config.flags_changed',
           actor: FLAG_ACTOR,
           subject: 'COMMERCIAL#CONFIG/FLAGS',
@@ -394,6 +400,10 @@ describe('CommercialConfigBroker immutable cutover', () => {
       Put: {
         TableName: 'roadmap-access-audit-dev',
         Item: {
+          targetKind: 'CONFIG',
+          targetId: 'dev',
+          timestamp: NOW,
+          requestId: 'function-url-request-1',
           action: 'commercial_config.cutover_frozen',
           actor: ACTOR,
           subject: 'COMMERCIAL#CONFIG/CUTOVER',

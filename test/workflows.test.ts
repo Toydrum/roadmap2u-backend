@@ -14,6 +14,12 @@ function document(name: string): string {
   return existsSync(path) ? readFileSync(path, 'utf8') : '';
 }
 
+function repositoryFile(name: string): string {
+  const path = join(process.cwd(), name);
+  expect(existsSync(path), `Missing repository file ${path}`).toBe(true);
+  return existsSync(path) ? readFileSync(path, 'utf8') : '';
+}
+
 function namedStep(contents: string, name: string): string {
   const marker = `      - name: ${name}`;
   const start = contents.indexOf(marker);
@@ -23,6 +29,27 @@ function namedStep(contents: string, name: string): string {
 }
 
 describe('backend GitHub Actions', () => {
+  it('exposes the three owner-only commercial config CLIs without a generic payments input', () => {
+    const packageJson = JSON.parse(repositoryFile('package.json')) as {
+      scripts: Record<string, string>;
+    };
+    expect(packageJson.scripts).toMatchObject({
+      'commercial:bootstrap': 'node scripts/bootstrap-commercial-flags.mjs',
+      'commercial:set': 'node scripts/set-commercial-flags.mjs',
+      'commercial:freeze': 'node scripts/freeze-commercial-cutover.mjs',
+    });
+    const sources = [
+      repositoryFile(join('scripts', 'bootstrap-commercial-flags.mjs')),
+      repositoryFile(join('scripts', 'set-commercial-flags.mjs')),
+      repositoryFile(join('scripts', 'freeze-commercial-cutover.mjs')),
+      repositoryFile(join('scripts', 'lib', 'commercial-config-cli.mjs')),
+    ].join('\n');
+    expect(sources).toContain('AWS4-HMAC-SHA256');
+    expect(sources).toContain('commercial-flag-operator');
+    expect(sources).toContain('commercial-migration');
+    expect(sources).not.toContain("'premium-payments-enabled'");
+  });
+
   it('runs reproducible contract, type, test and three-stage synth checks', () => {
     const contents = workflow('ci.yml');
     expect(contents).toContain('pull_request:');

@@ -1,9 +1,12 @@
-import { randomUUID } from 'node:crypto';
 import { PutCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
 const ABSENT_KEY_CONDITION = 'attribute_not_exists(pk) AND attribute_not_exists(sk)';
 
 export interface AuditEvent {
+  readonly targetKind: string;
+  readonly targetId: string;
+  readonly timestamp: number;
+  readonly requestId: string;
   readonly action: string;
   readonly actor: string;
   readonly subject: string;
@@ -13,15 +16,11 @@ export interface AuditEvent {
 export interface AuditItem extends AuditEvent {
   readonly pk: string;
   readonly sk: string;
-  readonly eventId: string;
-  readonly occurredAt: number;
 }
 
 export interface AuditWriterOptions {
   readonly ddb: DynamoDBDocumentClient;
   readonly tableName: string;
-  readonly now?: () => number;
-  readonly nextEventId?: () => string;
 }
 
 export interface AuditPutInput {
@@ -36,24 +35,31 @@ export interface AuditTransactPut {
 
 /** Writes access events once; collisions fail instead of overwriting history. */
 export class AuditWriter {
-  private readonly now: () => number;
-  private readonly nextEventId: () => string;
-
-  constructor(private readonly options: AuditWriterOptions) {
-    this.now = options.now ?? Date.now;
-    this.nextEventId = options.nextEventId ?? randomUUID;
-  }
+  constructor(private readonly options: AuditWriterOptions) {}
 
   /** Builds one append-only Put that can be composed into a DynamoDB transaction. */
   transactPut(event: AuditEvent): AuditTransactPut {
-    const eventId = this.nextEventId();
-    const occurredAt = this.now();
+    if (!/^[A-Z][A-Z0-9_]{0,31}$/.test(event.targetKind)) {
+      throw new Error('invalid audit target kind');
+    }
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/.test(event.targetId) ||
+      Buffer.byteLength(event.targetId, 'utf8') > 128
+    ) {
+      throw new Error('invalid audit target id');
+    }
+    if (
+      !Number.isSafeInteger(event.timestamp) ||
+      event.timestamp < 0 ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/.test(event.requestId) ||
+      Buffer.byteLength(event.requestId, 'utf8') > 128
+    ) {
+      throw new Error('invalid audit identity');
+    }
     const item: AuditItem = {
       ...event,
-      pk: `AUDIT#${eventId}`,
-      sk: `EVENT#${occurredAt}#${eventId}`,
-      eventId,
-      occurredAt,
+      pk: `TARGET#${event.targetKind}#${event.targetId}`,
+      sk: `EVENT#${event.timestamp}#${event.requestId}`,
     };
     return {
       Put: {

@@ -125,7 +125,10 @@ describe('account closure infrastructure', () => {
     });
 
     const workerStatements = roleStatementsFor(template, worker);
-    const workerActions = statementActions(workerStatements);
+    const workerAllowStatements = workerStatements.filter(
+      (statement) => statement.Effect !== 'Deny',
+    );
+    const workerActions = statementActions(workerAllowStatements);
     expect(workerActions).toEqual(
       expect.arrayContaining([
         'dynamodb:BatchWriteItem',
@@ -149,7 +152,10 @@ describe('account closure infrastructure', () => {
     expect(workerActions).not.toContain('dynamodb:DeleteItem');
 
     const reconcilerStatements = roleStatementsFor(template, reconciler);
-    const reconcilerActions = statementActions(reconcilerStatements);
+    const reconcilerAllowStatements = reconcilerStatements.filter(
+      (statement) => statement.Effect !== 'Deny',
+    );
+    const reconcilerActions = statementActions(reconcilerAllowStatements);
     expect(reconcilerActions).toEqual(
       expect.arrayContaining(['dynamodb:Query', 'sqs:SendMessage']),
     );

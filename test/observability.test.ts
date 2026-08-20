@@ -16,6 +16,7 @@ const REQUEST = {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe('observability', () => {
@@ -269,5 +270,56 @@ describe('observability', () => {
     expect(capture).toContain('"requestId":"lambda-post-confirmation"');
     expect(capture).not.toContain('never-log-entrypoint-authorization');
     expect(capture).not.toContain('never-log-entrypoint-body');
+  });
+
+  it('instruments the config broker without logging its body, actor, or reason', async () => {
+    vi.stubEnv('TABLE_NAME', 'roadmap-dev');
+    vi.stubEnv('AUDIT_TABLE_NAME', 'roadmap-access-audit-dev');
+    vi.stubEnv('COMMERCIAL_STAGE', 'dev');
+    vi.stubEnv(
+      'COMMERCIAL_CONFIG_ALLOWLIST',
+      JSON.stringify([
+        {
+          accountId: '765932874577',
+          roleName: 'roadmap2u-dev-commercial-migration',
+          stage: 'dev',
+          commands: ['bootstrap-flags', 'freeze-cutover'],
+        },
+        {
+          accountId: '765932874577',
+          roleName: 'roadmap2u-dev-commercial-flag-operator',
+          stage: 'dev',
+          commands: ['set-flags'],
+        },
+      ]),
+    );
+    vi.resetModules();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const actor =
+      'arn:aws:sts::765932874577:assumed-role/roadmap2u-dev-commercial-migration/private-session';
+    const reason = 'private commercial operator reason';
+    const body = JSON.stringify({ command: 'bootstrap-flags', stage: 'test', reason });
+    const module = await import('../lambda/commercial-config-broker-handler');
+
+    await expect(
+      module.handler(
+        {
+          body,
+          requestContext: {
+            requestId: 'function-url-request',
+            http: { method: 'POST' },
+            authorizer: { iam: { userArn: actor } },
+          },
+        },
+        { awsRequestId: 'lambda-request' } as never,
+      ),
+    ).resolves.toMatchObject({ statusCode: 403 });
+
+    const capture = info.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(capture).toContain('"service":"commercial-config-broker"');
+    expect(capture).toContain('function-url-request');
+    expect(capture).not.toContain(body);
+    expect(capture).not.toContain(actor);
+    expect(capture).not.toContain(reason);
   });
 });

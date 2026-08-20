@@ -9,42 +9,38 @@ import { AuditWriter } from '../lambda/commercial/audit';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
-function writerWith(ids: string[]): AuditWriter {
+function writer(): AuditWriter {
   return new AuditWriter({
     ddb: DynamoDBDocumentClient.from(new DynamoDBClient({})),
     tableName: 'roadmap-access-audit-test',
-    now: () => 1_723_456_789_012,
-    nextEventId: () => {
-      const id = ids.shift();
-      if (!id) throw new Error('No audit event id fixture remains.');
-      return id;
-    },
   });
 }
 
 describe('append-only commercial audit writer', () => {
   beforeEach(() => ddbMock.reset());
 
-  it('appends each event with unique keys and an absence condition', async () => {
+  it('reuses the caller-supplied timestamp and request id deterministically for retries', async () => {
     ddbMock.on(PutCommand).resolves({});
-    const writer = writerWith(['event-a', 'event-b']);
+    const audit = writer();
     const event = {
+      targetKind: 'USER',
+      targetId: 'target',
+      timestamp: 1_723_456_789_012,
+      requestId: 'request-a',
       action: 'sponsored-access.issued',
       actor: 'arn:aws:iam::123456789012:role/operator',
       subject: 'USER#target',
       details: { grantId: 'grant-123' },
     };
 
-    const first = await writer.append(event);
-    const second = await writer.append(event);
+    const first = await audit.append(event);
+    const second = await audit.append(event);
 
-    expect(first.pk).not.toBe(second.pk);
-    expect(first.sk).not.toBe(second.sk);
+    expect(first.pk).toBe(second.pk);
+    expect(first.sk).toBe(second.sk);
     expect(first).toEqual({
-      pk: 'AUDIT#event-a',
-      sk: 'EVENT#1723456789012#event-a',
-      eventId: 'event-a',
-      occurredAt: 1_723_456_789_012,
+      pk: 'TARGET#USER#target',
+      sk: 'EVENT#1723456789012#request-a',
       ...event,
     });
     const calls = ddbMock.commandCalls(PutCommand);
@@ -57,9 +53,13 @@ describe('append-only commercial audit writer', () => {
   });
 
   it('builds a transaction entry containing only a conditional Put', () => {
-    const writer = writerWith(['event-c']);
+    const audit = writer();
 
-    const entry = writer.transactPut({
+    const entry = audit.transactPut({
+      targetKind: 'USER',
+      targetId: 'target',
+      timestamp: 1_723_456_789_012,
+      requestId: 'request-c',
       action: 'sponsored-access.revoked',
       actor: 'arn:aws:iam::123456789012:role/operator',
       subject: 'USER#target',
@@ -70,10 +70,12 @@ describe('append-only commercial audit writer', () => {
       Put: {
         TableName: 'roadmap-access-audit-test',
         Item: {
-          pk: 'AUDIT#event-c',
-          sk: 'EVENT#1723456789012#event-c',
-          eventId: 'event-c',
-          occurredAt: 1_723_456_789_012,
+          pk: 'TARGET#USER#target',
+          sk: 'EVENT#1723456789012#request-c',
+          timestamp: 1_723_456_789_012,
+          requestId: 'request-c',
+          targetKind: 'USER',
+          targetId: 'target',
           action: 'sponsored-access.revoked',
           actor: 'arn:aws:iam::123456789012:role/operator',
           subject: 'USER#target',
@@ -84,8 +86,12 @@ describe('append-only commercial audit writer', () => {
   });
 
   it('does not let event payload fields replace generated audit identity', () => {
-    const writer = writerWith(['event-d']);
+    const audit = writer();
     const untrustedEvent = {
+      targetKind: 'USER',
+      targetId: 'target',
+      timestamp: 1_723_456_789_012,
+      requestId: 'request-d',
       action: 'sponsored-access.redeemed',
       actor: 'USER#redeemer',
       subject: 'USER#target',
@@ -95,14 +101,55 @@ describe('append-only commercial audit writer', () => {
       occurredAt: 0,
     } as Parameters<AuditWriter['transactPut']>[0];
 
-    const item = writer.transactPut(untrustedEvent).Put.Item;
+    const item = audit.transactPut(untrustedEvent).Put.Item;
 
     expect(item).toMatchObject({
-      pk: 'AUDIT#event-d',
-      sk: 'EVENT#1723456789012#event-d',
-      eventId: 'event-d',
-      occurredAt: 1_723_456_789_012,
+      pk: 'TARGET#USER#target',
+      sk: 'EVENT#1723456789012#request-d',
+      timestamp: 1_723_456_789_012,
+      requestId: 'request-d',
     });
+  });
+
+  it.each([
+    ['empty target kind', { targetKind: '', targetId: 'target' }],
+    ['lowercase target kind', { targetKind: 'user', targetId: 'target' }],
+    ['separator in target kind', { targetKind: 'USER#OTHER', targetId: 'target' }],
+    ['empty target id', { targetKind: 'USER', targetId: '' }],
+    ['separator in target id', { targetKind: 'USER', targetId: 'target#other' }],
+    ['oversized target id', { targetKind: 'USER', targetId: 'x'.repeat(129) }],
+  ])('rejects %s before constructing a DynamoDB key', (_name, target) => {
+    const audit = writer();
+    expect(() =>
+      audit.transactPut({
+        ...target,
+        timestamp: 1_723_456_789_012,
+        requestId: 'request-e',
+        action: 'commercial.audit.invalid_target',
+        actor: 'SYSTEM',
+        subject: 'untrusted',
+      }),
+    ).toThrow('audit target');
+  });
+
+  it.each([
+    ['empty request id', { timestamp: 1_723_456_789_012, requestId: '' }],
+    ['separator in request id', { timestamp: 1_723_456_789_012, requestId: 'request#other' }],
+    ['oversized request id', { timestamp: 1_723_456_789_012, requestId: 'x'.repeat(129) }],
+    ['non-integer timestamp', { timestamp: 1.5, requestId: 'request-f' }],
+    ['negative timestamp', { timestamp: -1, requestId: 'request-f' }],
+  ])('rejects %s before constructing a DynamoDB key', (_name, identity) => {
+    const audit = writer();
+    expect(() =>
+      audit.transactPut({
+        targetKind: 'USER',
+        targetId: 'target',
+        ...identity,
+        action: 'commercial.audit.invalid_identity',
+        actor: 'SYSTEM',
+        subject: 'untrusted',
+      }),
+    ).toThrow('audit identity');
   });
 
   it('contains no overwrite, update, delete, batch-write, or non-Put transaction primitive', () => {

@@ -68,8 +68,6 @@ function closureDeps(enqueue = vi.fn(async () => {})) {
     auditWriter: new AuditWriter({
       ddb: base.ddb,
       tableName: 'roadmap-access-audit-dev',
-      now: () => NOW,
-      nextEventId: () => 'audit-transition',
     }),
     queue: { enqueue },
     nextClosureId: () => 'closure-1',
@@ -115,8 +113,6 @@ describe('account closure request', () => {
       auditWriter: new AuditWriter({
         ddb: baseDeps().ddb,
         tableName: 'roadmap-access-audit-dev',
-        now: () => NOW,
-        nextEventId: () => 'audit-requested',
       }),
       queue: { enqueue },
       nextClosureId: () => 'closure-1',
@@ -175,11 +171,13 @@ describe('account closure request', () => {
       TableName: 'roadmap-access-audit-dev',
       ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
       Item: {
+        targetKind: 'USER',
+        targetId: 'adult-1',
+        timestamp: NOW,
+        requestId: 'request-1',
         action: 'account_closure.requested',
         actor: 'user:adult-1',
         subject: 'adult-1',
-        eventId: 'audit-requested',
-        occurredAt: NOW,
       },
     });
   });
@@ -195,8 +193,6 @@ describe('account closure request', () => {
       auditWriter: new AuditWriter({
         ddb: baseDeps().ddb,
         tableName: 'roadmap-access-audit-dev',
-        now: () => NOW,
-        nextEventId: () => 'unused',
       }),
       queue: { enqueue },
       nextClosureId: () => 'must-not-be-used',
@@ -243,8 +239,6 @@ describe('account closure request', () => {
       auditWriter: new AuditWriter({
         ddb: baseDeps().ddb,
         tableName: 'roadmap-access-audit-dev',
-        now: () => NOW,
-        nextEventId: () => 'audit-requested',
       }),
       queue: {
         enqueue: vi.fn(async () => {
@@ -388,6 +382,10 @@ describe('account closure worker', () => {
     expect(transaction.TransactItems?.[1]?.Put).toMatchObject({
       TableName: 'roadmap-access-audit-dev',
       Item: {
+        targetKind: 'USER',
+        targetId: 'adult-1',
+        timestamp: NOW,
+        requestId: 'closure-1-purging-2',
         action: 'account_closure.purging',
         actor: 'system:account-closure-worker',
         subject: 'adult-1',
@@ -804,6 +802,10 @@ describe('account closure worker', () => {
     );
     expect(transition.TransactItems?.[1]?.Put).toMatchObject({
       Item: {
+        targetKind: 'USER',
+        targetId: 'adult-1',
+        timestamp: NOW,
+        requestId: 'closure-1-purgeComplete-12',
         action: 'account_closure.purge_complete',
         actor: 'system:account-closure-worker',
         subject: 'adult-1',
@@ -874,6 +876,10 @@ describe('account closure worker', () => {
     );
     expect(transaction.TransactItems?.[1]?.Put).toMatchObject({
       Item: {
+        targetKind: 'USER',
+        targetId: 'adult-1',
+        timestamp: NOW,
+        requestId: 'closure-1-completed-13',
         action: 'account_closure.completed',
         actor: 'system:account-closure-worker',
         subject: 'adult-1',

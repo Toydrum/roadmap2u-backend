@@ -333,6 +333,10 @@ async function markPurgeComplete(
           },
         },
         deps.auditWriter.transactPut({
+          targetKind: 'USER',
+          targetId: closure.sub,
+          timestamp: now,
+          requestId: `${closure.closureId}-purgeComplete-${closure.revision + 1}`,
           action: 'account_closure.purge_complete',
           actor: 'system:account-closure-worker',
           subject: closure.sub,
@@ -382,6 +386,10 @@ async function deleteIdentityAndComplete(
           },
         },
         deps.auditWriter.transactPut({
+          targetKind: 'USER',
+          targetId: closure.sub,
+          timestamp: now,
+          requestId: `${closure.closureId}-completed-${closure.revision + 1}`,
           action: 'account_closure.completed',
           actor: 'system:account-closure-worker',
           subject: closure.sub,
@@ -494,6 +502,10 @@ export async function processAccountClosureMessage(
           },
         },
         deps.auditWriter.transactPut({
+          targetKind: 'USER',
+          targetId: closure.sub,
+          timestamp: now,
+          requestId: `${closure.closureId}-purging-${closure.revision + 1}`,
           action: 'account_closure.purging',
           actor: 'system:account-closure-worker',
           subject: closure.sub,

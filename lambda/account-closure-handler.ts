@@ -114,6 +114,10 @@ export async function requestAccountClosure(
             },
           },
           deps.auditWriter.transactPut({
+            targetKind: 'USER',
+            targetId: sub,
+            timestamp: now,
+            requestId,
             action: 'account_closure.requested',
             actor: `user:${sub}`,
             subject: sub,

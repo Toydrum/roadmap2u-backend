@@ -24,6 +24,7 @@ const OBSERVED_SERVICES = [
   'pre-signup',
   'account-closure-worker',
   'account-closure-reconciler',
+  'commercial-config-broker',
 ] as const;
 export type ObservedService = (typeof OBSERVED_SERVICES)[number];
 const METRIC_UNITS: Readonly<Record<string, string>> = {

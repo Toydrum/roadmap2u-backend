@@ -15,6 +15,7 @@ export interface CommercialConfigBrokerEvent {
   readonly body?: string | null;
   readonly isBase64Encoded?: boolean;
   readonly requestContext?: {
+    readonly requestId?: string;
     readonly http?: { readonly method?: string };
     readonly authorizer?: { readonly iam?: { readonly userArn?: string } };
   };
@@ -96,6 +97,7 @@ const STAGE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const ASSUMED_ROLE_ARN_PATTERN =
   /^arn:aws:sts::([0-9]{12}):assumed-role\/([A-Za-z0-9_+=,.@-]{1,64})\/([A-Za-z0-9_+=,.@-]{2,64})$/;
+const AUDIT_REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
 
 function respond(statusCode: number, payload: Readonly<Record<string, unknown>>): CommercialConfigBrokerResponse {
   return { statusCode, headers: JSON_HEADERS, body: JSON.stringify(payload) };
@@ -265,6 +267,7 @@ async function bootstrapFlags(
   deps: CommercialConfigBrokerDeps,
   request: BootstrapFlagsRequest,
   actorArn: string,
+  requestId: string,
 ): Promise<CommercialConfigBrokerResponse> {
   const now = deps.now();
   try {
@@ -290,6 +293,10 @@ async function bootstrapFlags(
             },
           },
           deps.auditWriter.transactPut({
+            targetKind: 'CONFIG',
+            targetId: request.stage,
+            timestamp: now,
+            requestId,
             action: 'commercial_config.flags_bootstrapped',
             actor: actorArn,
             subject: 'COMMERCIAL#CONFIG/FLAGS',
@@ -310,6 +317,7 @@ async function setFlags(
   deps: CommercialConfigBrokerDeps,
   request: SetFlagsRequest,
   actorArn: string,
+  requestId: string,
 ): Promise<CommercialConfigBrokerResponse> {
   const now = deps.now();
   const nextRevision = request.expectedRevision + 1;
@@ -359,6 +367,10 @@ async function setFlags(
             },
           },
           deps.auditWriter.transactPut({
+            targetKind: 'CONFIG',
+            targetId: request.stage,
+            timestamp: now,
+            requestId,
             action: 'commercial_config.flags_changed',
             actor: actorArn,
             subject: 'COMMERCIAL#CONFIG/FLAGS',
@@ -408,6 +420,7 @@ async function freezeCutover(
   deps: CommercialConfigBrokerDeps,
   request: FreezeCutoverRequest,
   actorArn: string,
+  requestId: string,
 ): Promise<CommercialConfigBrokerResponse> {
   const now = deps.now();
   try {
@@ -429,6 +442,10 @@ async function freezeCutover(
             },
           },
           deps.auditWriter.transactPut({
+            targetKind: 'CONFIG',
+            targetId: request.stage,
+            timestamp: now,
+            requestId,
             action: 'commercial_config.cutover_frozen',
             actor: actorArn,
             subject: 'COMMERCIAL#CONFIG/CUTOVER',
@@ -470,6 +487,14 @@ export function createCommercialConfigBroker(deps: CommercialConfigBrokerDeps) {
     if (typeof actorArn !== 'string' || actorArn.length === 0) {
       return respond(401, { error: 'UNAUTHENTICATED' });
     }
+    const requestId = event.requestContext?.requestId;
+    if (
+      typeof requestId !== 'string' ||
+      !AUDIT_REQUEST_ID_PATTERN.test(requestId) ||
+      Buffer.byteLength(requestId, 'utf8') > 128
+    ) {
+      return respond(400, { error: 'INVALID_REQUEST' });
+    }
     if (event.requestContext?.http?.method !== 'POST') {
       return respond(400, { error: 'INVALID_REQUEST' });
     }
@@ -479,9 +504,9 @@ export function createCommercialConfigBroker(deps: CommercialConfigBrokerDeps) {
     if (!isAllowed(deps, actorArn, request)) return respond(403, { error: 'FORBIDDEN' });
 
     if (request.command === 'bootstrap-flags') {
-      return bootstrapFlags(deps, request, actorArn);
+      return bootstrapFlags(deps, request, actorArn, requestId);
     }
-    if (request.command === 'set-flags') return setFlags(deps, request, actorArn);
-    return freezeCutover(deps, request, actorArn);
+    if (request.command === 'set-flags') return setFlags(deps, request, actorArn, requestId);
+    return freezeCutover(deps, request, actorArn, requestId);
   };
 }
