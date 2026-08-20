@@ -1,9 +1,11 @@
 ﻿import type { PostConfirmationTriggerEvent } from 'aws-lambda';
+import { isDeepStrictEqual } from 'node:util';
 import { AdminUpdateUserAttributesCommand } from '@aws-sdk/client-cognito-identity-provider';
 import type { Context } from 'aws-lambda';
 import { Deps, K, ProfileItem, TransactWriteCommand, realDeps } from './db';
 import { instrumentHandler } from './observability';
 import { accountClosureKey } from './account-closure';
+import { deriveAccessItem } from './commercial/access-resolver';
 
 /**
  * Cognito PostConfirmation → the DynamoDB profile item. Self-signup is always
@@ -15,33 +17,85 @@ let deps: Deps | null = null;
 
 type CancellationReason = { Code?: string; Item?: Record<string, unknown> };
 
-function stringAttribute(
-  item: Record<string, unknown> | undefined,
-  name: string,
-): string | undefined {
-  const value = item?.[name];
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object' && 'S' in value) {
-    const stringValue = (value as { S?: unknown }).S;
-    return typeof stringValue === 'string' ? stringValue : undefined;
-  }
-  return undefined;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isSameSignupCancellation(error: unknown, sub: string, username: string): boolean {
+/** CancellationReason.Item may be returned in either DocumentClient or raw AV form. */
+function decodeAttribute(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(decodeAttribute);
+  if (!isRecord(value)) return value;
+
+  const keys = Object.keys(value);
+  if (keys.length === 1) {
+    const tag = keys[0];
+    const encoded = value[tag];
+    if (tag === 'S' && typeof encoded === 'string') return encoded;
+    if (tag === 'N' && typeof encoded === 'string') return Number(encoded);
+    if (tag === 'BOOL' && typeof encoded === 'boolean') return encoded;
+    if (tag === 'NULL' && encoded === true) return null;
+    if (tag === 'L' && Array.isArray(encoded)) return encoded.map(decodeAttribute);
+    if (tag === 'M' && isRecord(encoded)) return decodeItem(encoded);
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([name, nested]) => [name, decodeAttribute(nested)]),
+  );
+}
+
+function decodeItem(item: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!item) return undefined;
+  return Object.fromEntries(
+    Object.entries(item).map(([name, value]) => [name, decodeAttribute(value)]),
+  );
+}
+
+function isSameSignupCancellation(
+  error: unknown,
+  expectedProfile: ProfileItem,
+  username: string,
+): boolean {
   const cancellation = error as {
     name?: string;
     CancellationReasons?: CancellationReason[];
   };
   if (cancellation?.name !== 'TransactionCanceledException') return false;
-  const [profileReason, reservationReason, closureReason] = cancellation.CancellationReasons ?? [];
+  const reasons = cancellation.CancellationReasons ?? [];
+  if (reasons.length !== 5) return false;
+  const [profileReason, reservationReason, accessReason, usageReason, closureReason] = reasons;
+  if (
+    profileReason?.Code !== 'ConditionalCheckFailed' ||
+    reservationReason?.Code !== 'ConditionalCheckFailed' ||
+    accessReason?.Code !== 'ConditionalCheckFailed' ||
+    usageReason?.Code !== 'ConditionalCheckFailed' ||
+    closureReason?.Code !== 'None' ||
+    closureReason.Item !== undefined
+  ) {
+    return false;
+  }
+
+  const profile = decodeItem(profileReason.Item);
+  const createdAt = profile?.['createdAt'];
+  if (typeof createdAt !== 'number' || !Number.isSafeInteger(createdAt) || createdAt < 0) {
+    return false;
+  }
+  const sub = expectedProfile.userId;
   return (
-    profileReason?.Code === 'ConditionalCheckFailed' &&
-    reservationReason?.Code === 'ConditionalCheckFailed' &&
-    closureReason?.Code === 'None' &&
-    stringAttribute(profileReason.Item, 'userId') === sub &&
-    stringAttribute(profileReason.Item, 'username') === username &&
-    stringAttribute(reservationReason.Item, 'userId') === sub
+    isDeepStrictEqual(profile, { ...expectedProfile, createdAt }) &&
+    isDeepStrictEqual(decodeItem(reservationReason.Item), {
+      ...K.uniqUsername(username),
+      userId: sub,
+    }) &&
+    isDeepStrictEqual(
+      decodeItem(accessReason.Item),
+      deriveAccessItem(sub, createdAt, undefined, []),
+    ) &&
+    isDeepStrictEqual(decodeItem(usageReason.Item), {
+      pk: K.user(sub),
+      sk: 'USAGE',
+      state: 'active',
+      activeTrees: 0,
+    })
   );
 }
 
@@ -53,7 +107,9 @@ export async function handleEvent(
   const d = injected ?? (deps ??= realDeps());
   const sub = event.request.userAttributes['sub'];
   const username = event.userName.toLowerCase();
+  const createdAt = d.now();
 
+  const email = event.request.userAttributes['email'];
   const profile: ProfileItem = {
     ...K.profile(sub),
     userId: sub,
@@ -61,10 +117,10 @@ export async function handleEvent(
     displayName: event.request.userAttributes['name']?.trim() || username,
     accountType: 'adult',
     socialEnabled: true,
-    createdAt: d.now(),
+    createdAt,
     status: 'active',
     familyFenceVersion: 1,
-    email: event.request.userAttributes['email'],
+    ...(email ? { email } : {}),
   };
   try {
     await d.ddb.send(
@@ -74,7 +130,7 @@ export async function handleEvent(
             Put: {
               TableName: d.table,
               Item: profile,
-              ConditionExpression: 'attribute_not_exists(pk)',
+              ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
               ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
             },
           },
@@ -84,7 +140,23 @@ export async function handleEvent(
             Put: {
               TableName: d.table,
               Item: { ...K.uniqUsername(username), userId: sub },
-              ConditionExpression: 'attribute_not_exists(pk)',
+              ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+              ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+            },
+          },
+          {
+            Put: {
+              TableName: d.table,
+              Item: deriveAccessItem(sub, createdAt, undefined, []),
+              ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+              ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+            },
+          },
+          {
+            Put: {
+              TableName: d.table,
+              Item: { pk: K.user(sub), sk: 'USAGE', state: 'active', activeTrees: 0 },
+              ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
               ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
             },
           },
@@ -99,7 +171,7 @@ export async function handleEvent(
       }),
     );
   } catch (error) {
-    if (!isSameSignupCancellation(error, sub, username)) throw error;
+    if (!isSameSignupCancellation(error, profile, username)) throw error;
   }
   await d.cognito.send(
     new AdminUpdateUserAttributesCommand({

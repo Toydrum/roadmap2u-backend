@@ -571,10 +571,14 @@ describe('username reservation', () => {
     const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
     const profilePut = transaction.TransactItems?.[0]?.Put;
     const usernamePut = transaction.TransactItems?.[1]?.Put;
-    expect(profilePut?.ConditionExpression).toBe('attribute_not_exists(pk)');
+    expect(profilePut?.ConditionExpression).toBe(
+      'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+    );
     expect(profilePut?.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
     expect(usernamePut?.Item).toMatchObject(K.uniqUsername('rocio'));
-    expect(usernamePut?.ConditionExpression).toBe('attribute_not_exists(pk)');
+    expect(usernamePut?.ConditionExpression).toBe(
+      'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+    );
     expect(usernamePut?.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
   });
 
@@ -602,27 +606,24 @@ describe('username reservation', () => {
       userPoolId: 'pool-1',
       request: { userAttributes: { sub: 'sub-rocio', name: 'Rocio', email: 'r@example.com' } },
     } as unknown as Parameters<typeof handlePostConfirmation>[0];
-    let provisioned = false;
-    ddbMock.on(TransactWriteCommand).callsFake(() => {
-      if (provisioned) {
-        throw Object.assign(new Error('username already reserved'), {
-          name: 'TransactionCanceledException',
-          CancellationReasons: [
-            {
-              Code: 'ConditionalCheckFailed',
-              Item: { userId: { S: 'sub-rocio' }, username: { S: 'rocio' } },
-            },
-            {
-              Code: 'ConditionalCheckFailed',
-              Item: { userId: { S: 'sub-rocio' } },
-            },
-            { Code: 'None' },
-          ],
-        });
-      }
-      provisioned = true;
-      return {};
-    });
+    let provisionedItems: Record<string, unknown>[] | undefined;
+    ddbMock
+      .on(TransactWriteCommand)
+      .callsFake((input: ConstructorParameters<typeof TransactWriteCommand>[0]) => {
+        if (provisionedItems) {
+          throw Object.assign(new Error('username already reserved'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [
+              ...provisionedItems.map((Item) => ({ Code: 'ConditionalCheckFailed', Item })),
+              { Code: 'None' },
+            ],
+          });
+        }
+        provisionedItems = (input.TransactItems ?? []).flatMap((item) =>
+          item.Put?.Item ? [item.Put.Item] : [],
+        );
+        return {};
+      });
     let attributeUpdates = 0;
     cognitoMock.on(AdminUpdateUserAttributesCommand).callsFake(() => {
       attributeUpdates += 1;

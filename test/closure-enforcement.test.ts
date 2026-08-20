@@ -15,6 +15,7 @@ import {
 import { newSyncBase, type Tree } from '@app/db/schema';
 import type { Ctx } from '../lambda/authz';
 import { accountClosureKey } from '../lambda/account-closure';
+import { deriveAccessItem } from '../lambda/commercial/access-resolver';
 import type { Deps, LinkItem, ProfileItem, RecordItem } from '../lambda/db';
 import { K } from '../lambda/db';
 import { patchMe } from '../lambda/handlers/me';
@@ -148,9 +149,31 @@ describe('post-confirmation closure guard', () => {
       CancellationReasons: [
         {
           Code: 'ConditionalCheckFailed',
-          Item: { userId: { S: 'sub-rocio' }, username: { S: 'rocio' } },
+          Item: {
+            ...K.profile('sub-rocio'),
+            userId: 'sub-rocio',
+            username: 'rocio',
+            displayName: 'Rocio',
+            accountType: 'adult',
+            socialEnabled: true,
+            createdAt: NOW,
+            status: 'active',
+            familyFenceVersion: 1,
+            email: 'r@example.com',
+          },
         },
-        { Code: 'ConditionalCheckFailed', Item: { userId: { S: 'sub-rocio' } } },
+        {
+          Code: 'ConditionalCheckFailed',
+          Item: { ...K.uniqUsername('rocio'), userId: 'sub-rocio' },
+        },
+        {
+          Code: 'ConditionalCheckFailed',
+          Item: deriveAccessItem('sub-rocio', NOW, undefined, []),
+        },
+        {
+          Code: 'ConditionalCheckFailed',
+          Item: { pk: K.user('sub-rocio'), sk: 'USAGE', state: 'active', activeTrees: 0 },
+        },
         { Code: 'ConditionalCheckFailed' },
       ],
     });
