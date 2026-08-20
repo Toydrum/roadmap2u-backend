@@ -225,17 +225,25 @@ describe('pushSync — rev LWW', () => {
     const stale = { ...tree('t-stale'), rev: 1 };
     const winner = recordItem('rocio', 'trees', { ...tree('t-stale'), rev: 5 });
 
-    ddbMock.on(PutCommand).callsFake((input) => {
-      const item = input.Item as RecordItem;
+    ddbMock.on(TransactWriteCommand).callsFake((input) => {
+      const item = input.TransactItems?.[0]?.Put?.Item as RecordItem;
       if (item.record && (item.record as Tree).id === 't-stale') {
-        const error = new Error('conditional');
-        error.name = 'ConditionalCheckFailedException';
-        throw error;
+        throw Object.assign(new Error('conditional'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+            { Code: 'None' },
+          ],
+        });
       }
       return {};
     });
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
+      if (key.pk === K.profile('rocio').pk && key.sk === K.profile('rocio').sk) {
+        return { Item: profile('rocio', { status: 'active' }) };
+      }
       return key.pk === winner.pk && key.sk === winner.sk ? { Item: winner } : {};
     });
 
@@ -277,18 +285,18 @@ describe('pushSync — rev LWW', () => {
       }),
     ).rejects.toMatchObject({ code: 'VALIDATION' });
 
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   it('rejects clients newer than the server schema', async () => {
     await expect(
       pushSync(ctxOf(profile('rocio')), { schemaVersion: SCHEMA_VERSION + 1, records: [] }),
     ).rejects.toMatchObject({ code: 'SYNC_TOO_OLD' });
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   it('accepts harvest and preserve records as first-class sync stores', async () => {
-    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
     const related = [
       recordItem('rocio', 'trees', tree('t1')),
       recordItem('rocio', 'nodes', node('n1', 't1')),
@@ -308,7 +316,9 @@ describe('pushSync — rev LWW', () => {
     });
 
     expect(result.applied).toEqual(['h:n1', 'p1']);
-    const written = ddbMock.commandCalls(PutCommand).map((call) => call.args[0].input.Item as RecordItem);
+    const written = ddbMock
+      .commandCalls(TransactWriteCommand)
+      .map((call) => call.args[0].input.TransactItems?.[0]?.Put?.Item as RecordItem);
     expect(written.map((item) => recordItem('rocio', item.store, item.record).store)).toEqual([
       'harvests',
       'preserves',
@@ -583,6 +593,7 @@ describe('username reservation', () => {
               Code: 'ConditionalCheckFailed',
               Item: { userId: { S: 'sub-rocio' } },
             },
+            { Code: 'None' },
           ],
         });
       }
@@ -624,6 +635,7 @@ describe('username reservation', () => {
           Code: 'ConditionalCheckFailed',
           Item: { userId: { S: 'sub-other' } },
         },
+        { Code: 'None' },
       ],
     });
     ddbMock.on(TransactWriteCommand).rejects(conflict);

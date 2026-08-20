@@ -1,4 +1,5 @@
 ﻿import { ApiError, PublicProfile } from '@app/api/contracts';
+import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import { accountClosureKey } from './account-closure';
 import {
   Deps,
@@ -20,6 +21,41 @@ export interface Ctx {
   callerId: string;
   caller: ProfileItem;
   deps: Deps;
+}
+
+type TransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
+
+export const WRITABLE_PROFILE_CONDITION =
+  'attribute_exists(pk) AND (attribute_not_exists(#status) OR #status = :active)';
+
+/** Transaction guards used by every owner-scoped write. Legacy profiles have no status. */
+export function writableProfileConditionCheck(deps: Deps, ownerId: string): TransactItem {
+  return {
+    ConditionCheck: {
+      TableName: deps.table,
+      Key: K.profile(ownerId),
+      ConditionExpression: WRITABLE_PROFILE_CONDITION,
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: { ':active': 'active' },
+    },
+  };
+}
+
+export function closureAbsenceConditionCheck(deps: Deps, ownerId: string): TransactItem {
+  return {
+    ConditionCheck: {
+      TableName: deps.table,
+      Key: accountClosureKey(ownerId),
+      ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+    },
+  };
+}
+
+export function writableOwnerConditionChecks(deps: Deps, ownerId: string): TransactItem[] {
+  return [
+    writableProfileConditionCheck(deps, ownerId),
+    closureAbsenceConditionCheck(deps, ownerId),
+  ];
 }
 
 /** Resolve the caller or 401 — a live token for a deleted account is not a user. */
@@ -51,7 +87,7 @@ export async function requireWritableOwner(ctx: Ctx, ownerId: string): Promise<P
       }),
     ),
   ]);
-  const profile = profileResult.Item as (ProfileItem & { status?: string }) | undefined;
+  const profile = profileResult.Item as ProfileItem | undefined;
   if (
     !profile ||
     (profile.status !== undefined && profile.status !== 'active') ||
@@ -118,6 +154,20 @@ export async function relationshipTo(ctx: Ctx, targetId: string): Promise<Relati
 /** Guardian gate for /family/children/:id/* — 404-shaped, never an oracle. */
 export async function requireGuardianOf(ctx: Ctx, minorId: string): Promise<LinkItem> {
   const link = await guardianLink(ctx.deps, ctx.callerId, minorId);
+  if (!link) throw new ApiError('NOT_FOUND');
+  return link;
+}
+
+/** Re-check the relationship after a failed transaction without an eventual-read window. */
+export async function requireGuardianOfConsistent(ctx: Ctx, minorId: string): Promise<LinkItem> {
+  const result = await ctx.deps.ddb.send(
+    new GetCommand({
+      TableName: ctx.deps.table,
+      Key: K.link(minorId, ctx.callerId),
+      ConsistentRead: true,
+    }),
+  );
+  const link = result.Item as LinkItem | undefined;
   if (!link) throw new ApiError('NOT_FOUND');
   return link;
 }

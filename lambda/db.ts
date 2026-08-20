@@ -51,6 +51,8 @@ export interface ProfileItem {
   accountType: AccountType;
   socialEnabled: boolean;
   createdAt: number;
+  /** Missing on legacy profiles and therefore treated exactly like `active`. */
+  status?: 'active' | 'closing';
   email?: string;
   /** Current friend code (CODE#F item is the authority; this is the pointer). */
   friendCode?: string;

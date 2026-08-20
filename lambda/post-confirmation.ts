@@ -3,6 +3,7 @@ import { AdminUpdateUserAttributesCommand } from '@aws-sdk/client-cognito-identi
 import type { Context } from 'aws-lambda';
 import { Deps, K, ProfileItem, TransactWriteCommand, realDeps } from './db';
 import { instrumentHandler } from './observability';
+import { accountClosureKey } from './account-closure';
 
 /**
  * Cognito PostConfirmation → the DynamoDB profile item. Self-signup is always
@@ -33,10 +34,11 @@ function isSameSignupCancellation(error: unknown, sub: string, username: string)
     CancellationReasons?: CancellationReason[];
   };
   if (cancellation?.name !== 'TransactionCanceledException') return false;
-  const [profileReason, reservationReason] = cancellation.CancellationReasons ?? [];
+  const [profileReason, reservationReason, closureReason] = cancellation.CancellationReasons ?? [];
   return (
     profileReason?.Code === 'ConditionalCheckFailed' &&
     reservationReason?.Code === 'ConditionalCheckFailed' &&
+    closureReason?.Code === 'None' &&
     stringAttribute(profileReason.Item, 'userId') === sub &&
     stringAttribute(profileReason.Item, 'username') === username &&
     stringAttribute(reservationReason.Item, 'userId') === sub
@@ -60,6 +62,7 @@ export async function handleEvent(
     accountType: 'adult',
     socialEnabled: true,
     createdAt: d.now(),
+    status: 'active',
     email: event.request.userAttributes['email'],
   };
   try {
@@ -82,6 +85,13 @@ export async function handleEvent(
               Item: { ...K.uniqUsername(username), userId: sub },
               ConditionExpression: 'attribute_not_exists(pk)',
               ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+            },
+          },
+          {
+            ConditionCheck: {
+              TableName: d.table,
+              Key: accountClosureKey(sub),
+              ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
             },
           },
         ],

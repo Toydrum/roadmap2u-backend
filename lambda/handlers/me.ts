@@ -1,6 +1,15 @@
 ﻿import { ApiError, FamilyLinkView, MeResponse, UserProfile } from '@app/api/contracts';
-import { Ctx, guardiansOf, minorsOf, profileOf, toPublic } from '../authz';
-import { K, ProfileItem, UpdateCommand } from '../db';
+import {
+  Ctx,
+  WRITABLE_PROFILE_CONDITION,
+  closureAbsenceConditionCheck,
+  guardiansOf,
+  minorsOf,
+  profileOf,
+  requireWritableOwner,
+  toPublic,
+} from '../authz';
+import { K, ProfileItem, TransactWriteCommand } from '../db';
 
 export function profileView(item: ProfileItem): UserProfile {
   return {
@@ -38,13 +47,28 @@ export async function patchMe(ctx: Ctx, body: { displayName?: string }): Promise
   const displayName = body.displayName?.trim();
   if (displayName === undefined) return profileView(ctx.caller);
   if (!displayName || displayName.length > 40) throw new ApiError('VALIDATION', 'displayName 1-40 chars');
-  await ctx.deps.ddb.send(
-    new UpdateCommand({
-      TableName: ctx.deps.table,
-      Key: K.profile(ctx.callerId),
-      UpdateExpression: 'SET displayName = :d',
-      ExpressionAttributeValues: { ':d': displayName },
-    }),
-  );
+  try {
+    await ctx.deps.ddb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: ctx.deps.table,
+              Key: K.profile(ctx.callerId),
+              UpdateExpression: 'SET displayName = :d',
+              ConditionExpression: WRITABLE_PROFILE_CONDITION,
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: { ':d': displayName, ':active': 'active' },
+            },
+          },
+          closureAbsenceConditionCheck(ctx.deps, ctx.callerId),
+        ],
+      }),
+    );
+  } catch (error) {
+    if ((error as { name?: string })?.name !== 'TransactionCanceledException') throw error;
+    await requireWritableOwner(ctx, ctx.callerId);
+    throw error;
+  }
   return profileView({ ...ctx.caller, displayName });
 }
