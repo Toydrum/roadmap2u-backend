@@ -14,6 +14,14 @@ function document(name: string): string {
   return existsSync(path) ? readFileSync(path, 'utf8') : '';
 }
 
+function namedStep(contents: string, name: string): string {
+  const marker = `      - name: ${name}`;
+  const start = contents.indexOf(marker);
+  expect(start, `Missing workflow step ${name}`).toBeGreaterThan(-1);
+  const end = contents.indexOf('\n      - name:', start + marker.length);
+  return contents.slice(start, end === -1 ? contents.length : end);
+}
+
 describe('backend GitHub Actions', () => {
   it('runs reproducible contract, type, test and three-stage synth checks', () => {
     const contents = workflow('ci.yml');
@@ -31,6 +39,27 @@ describe('backend GitHub Actions', () => {
     for (const stage of ['dev', 'test', 'prod']) {
       expect(contents).toContain(`stage=${stage}`);
     }
+  });
+
+  it('checks out and verifies the exact locked frontend contract source in CI', () => {
+    const contents = workflow('ci.yml');
+    const resolve = namedStep(contents, 'Resolve pinned frontend contract source');
+    const checkout = namedStep(contents, 'Checkout pinned frontend contract source');
+    const verify = namedStep(contents, 'Verify pinned frontend contract source');
+
+    expect(resolve).toContain('node scripts/verify-contract-source.mjs resolve');
+    expect(resolve).toContain('--github-output "$GITHUB_OUTPUT"');
+    expect(checkout).toContain('repository: Toydrum/RoadMap2U');
+    expect(checkout).toContain('ref: ${{ steps.contract-source.outputs.commit_sha }}');
+    expect(contents.match(/repository: Toydrum\/RoadMap2U/g) ?? []).toHaveLength(1);
+    expect(verify).toContain('node scripts/verify-contract-source.mjs verify');
+    expect(verify).toContain('--frontend-root "${GITHUB_WORKSPACE}/RoadMap2U"');
+    expect(contents.indexOf('Verify pinned frontend contract source')).toBeLessThan(
+      contents.indexOf('npm run contracts:check'),
+    );
+    expect(contents).not.toMatch(
+      /name: Checkout (?:pinned )?frontend contract source[\s\S]*?repository: Toydrum\/RoadMap2U\n\s+path: RoadMap2U/,
+    );
   });
 
   it('deploys only an exact SHA with OIDC and release-marker promotion proof', () => {
@@ -56,6 +85,27 @@ describe('backend GitHub Actions', () => {
     expect(contents.indexOf('cdk diff')).toBeLessThan(contents.indexOf('cdk deploy'));
     expect(contents.indexOf('Smoke-test protected API')).toBeLessThan(
       contents.lastIndexOf('/backend-releases/${SHA}'),
+    );
+  });
+
+  it('checks out the locked frontend only for deploy and verifies it before contract parity', () => {
+    const contents = workflow('deploy.yml');
+    const resolve = namedStep(contents, 'Resolve pinned frontend contract source');
+    const checkout = namedStep(contents, 'Checkout pinned frontend contract source');
+    const verify = namedStep(contents, 'Verify pinned frontend contract source');
+
+    expect(resolve).toContain('node scripts/verify-contract-source.mjs resolve');
+    expect(checkout).toContain("if: ${{ needs.prepare.outputs.operation == 'deploy' }}");
+    expect(checkout).toContain('repository: Toydrum/RoadMap2U');
+    expect(checkout).toContain('ref: ${{ steps.contract-source.outputs.commit_sha }}');
+    expect(contents.match(/repository: Toydrum\/RoadMap2U/g) ?? []).toHaveLength(1);
+    expect(verify).toContain("if: ${{ needs.prepare.outputs.operation == 'deploy' }}");
+    expect(verify).toContain('node scripts/verify-contract-source.mjs verify');
+    expect(contents.indexOf('Verify pinned frontend contract source')).toBeLessThan(
+      contents.indexOf('npm run contracts:check'),
+    );
+    expect(contents).not.toMatch(
+      /name: Checkout (?:pinned )?frontend contract source[\s\S]*?repository: Toydrum\/RoadMap2U\n\s+path: RoadMap2U/,
     );
   });
 
@@ -149,6 +199,10 @@ describe('backend GitHub Actions', () => {
     expect(manifestContents).toContain('schemaVersion: 1');
     expect(manifestContents).toContain('stage: $stage');
     expect(manifestContents).toContain('backendReleaseSha: $sha');
+    expect(manifestContents).toContain('contractSource: $contractSource[0]');
+    expect(manifestContents).toContain('--slurpfile contractSource shared/contracts-source.json');
+    expect(manifestContents).toContain('.contractSource.repository == "Toydrum/RoadMap2U"');
+    expect(manifestContents).toContain('.contractSource.contractHash == .handoff.contractHash');
     expect(manifestContents).toContain('handoff:');
     for (const key of [
       'region',

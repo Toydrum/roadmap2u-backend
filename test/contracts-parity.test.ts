@@ -24,6 +24,8 @@ const contractFiles = [
   'auth/auth-types.ts',
 ] as const;
 
+const contractSourcePath = join(backendRoot, 'shared', 'contracts-source.json');
+
 function sourcePath(relativePath: string): string {
   return join(frontendRoot, 'src', 'app', 'core', relativePath);
 }
@@ -47,6 +49,153 @@ function contractHash(root: string): string {
 }
 
 describe('vendored frontend contracts', () => {
+  it('pins the exact frontend repository, commit and vendored contract hash', () => {
+    expect(existsSync(contractSourcePath), `Missing contract source lock ${contractSourcePath}`).toBe(
+      true,
+    );
+    const lock = JSON.parse(readFileSync(contractSourcePath, 'utf8')) as Record<string, unknown>;
+
+    expect(lock).toEqual({
+      schemaVersion: 1,
+      repository: 'Toydrum/RoadMap2U',
+      commitSha: expect.stringMatching(/^[0-9a-f]{40}$/),
+      contractHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(lock['commitSha']).toBe('5c8a4f1bfb4c8c0f63c7dc666fd498c7eeb5eb92');
+    expect(lock['contractHash']).toBe(contractHash(join(backendRoot, 'shared')));
+  });
+
+  it('resolves and verifies the pinned checkout before parity checks', () => {
+    const sandbox = mkdtempSync(join(tmpdir(), 'roadmap-contract-source-'));
+    try {
+      const fakeFrontend = join(sandbox, 'frontend');
+      for (const relativePath of contractFiles) {
+        const source = vendoredPath(relativePath);
+        const destination = join(fakeFrontend, 'src', 'app', 'core', relativePath);
+        mkdirSync(dirname(destination), { recursive: true });
+        copyFileSync(source, destination);
+      }
+      const runGit = (...args: string[]) =>
+        spawnSync('git', ['-C', fakeFrontend, ...args], { encoding: 'utf8' });
+      expect(runGit('init', '--quiet').status).toBe(0);
+      expect(runGit('config', 'user.name', 'RoadMap2U Contract Test').status).toBe(0);
+      expect(runGit('config', 'user.email', 'contract-test@roadmap2u.invalid').status).toBe(0);
+      expect(runGit('config', 'commit.gpgsign', 'false').status).toBe(0);
+      expect(runGit('add', 'src/app/core').status).toBe(0);
+      expect(runGit('commit', '--quiet', '-m', 'contract fixture').status).toBe(0);
+      const commitResult = runGit('rev-parse', 'HEAD');
+      expect(commitResult.status, commitResult.stderr).toBe(0);
+      const commitSha = commitResult.stdout.trim();
+      const expectedHash = contractHash(join(backendRoot, 'shared'));
+      const lockPath = join(sandbox, 'contracts-source.json');
+      writeFileSync(
+        lockPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          repository: 'Toydrum/RoadMap2U',
+          commitSha,
+          contractHash: expectedHash,
+        }),
+        'utf8',
+      );
+
+      const githubOutput = join(sandbox, 'github-output');
+      const script = join(backendRoot, 'scripts', 'verify-contract-source.mjs');
+      const resolveResult = spawnSync(
+        process.execPath,
+        [script, 'resolve', '--lock', lockPath, '--github-output', githubOutput],
+        { cwd: backendRoot, encoding: 'utf8' },
+      );
+
+      expect(resolveResult.status, resolveResult.stderr).toBe(0);
+      expect(readFileSync(githubOutput, 'utf8')).toBe(
+        [
+          'repository=Toydrum/RoadMap2U',
+          `commit_sha=${commitSha}`,
+          `contract_hash=${expectedHash}`,
+          '',
+        ].join('\n'),
+      );
+
+      const verifyResult = spawnSync(
+        process.execPath,
+        [script, 'verify', '--lock', lockPath, '--frontend-root', fakeFrontend],
+        { cwd: backendRoot, encoding: 'utf8' },
+      );
+      expect(verifyResult.status, verifyResult.stderr).toBe(0);
+      expect(verifyResult.stdout).toContain('Verified pinned frontend contract source');
+
+      writeFileSync(
+        join(fakeFrontend, 'src', 'app', 'core', contractFiles[0]),
+        '// substituted contract bytes\n',
+        'utf8',
+      );
+      const substitutedContract = spawnSync(
+        process.execPath,
+        [script, 'verify', '--lock', lockPath, '--frontend-root', fakeFrontend],
+        { cwd: backendRoot, encoding: 'utf8' },
+      );
+      expect(substitutedContract.status).not.toBe(0);
+      expect(substitutedContract.stderr).toContain('does not match pinned hash');
+      copyFileSync(
+        vendoredPath(contractFiles[0]),
+        join(fakeFrontend, 'src', 'app', 'core', contractFiles[0]),
+      );
+
+      writeFileSync(
+        lockPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          repository: 'Toydrum/RoadMap2U',
+          commitSha: '0000000000000000000000000000000000000000',
+          contractHash: expectedHash,
+        }),
+        'utf8',
+      );
+      const substitutedHead = spawnSync(
+        process.execPath,
+        [script, 'verify', '--lock', lockPath, '--frontend-root', fakeFrontend],
+        { cwd: backendRoot, encoding: 'utf8' },
+      );
+      expect(substitutedHead.status).not.toBe(0);
+      expect(substitutedHead.stderr).toContain('does not match pinned commit');
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects malformed or substituted contract source locks', () => {
+    const sandbox = mkdtempSync(join(tmpdir(), 'roadmap-contract-lock-'));
+    try {
+      const lockPath = join(sandbox, 'contracts-source.json');
+      writeFileSync(
+        lockPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          repository: 'attacker/substitute',
+          commitSha: 'main',
+          contractHash: 'not-a-hash',
+        }),
+        'utf8',
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(backendRoot, 'scripts', 'verify-contract-source.mjs'),
+          'resolve',
+          '--lock',
+          lockPath,
+        ],
+        { cwd: backendRoot, encoding: 'utf8' },
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('Invalid contract source lock');
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
   it('requires the frontend source checkout instead of silently skipping parity', () => {
     expect(
       existsSync(frontendRoot),
