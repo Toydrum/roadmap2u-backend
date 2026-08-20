@@ -183,7 +183,14 @@ beforeEach(() => {
 function stubForest(owner: ProfileItem, relationLinks: LinkItem[], friends: boolean): void {
   ddbMock.on(GetCommand).callsFake((input) => {
     const { pk, sk } = input.Key as { pk: string; sk: string };
-    if (sk === 'PROFILE' && pk === K.user(owner.userId)) return { Item: owner };
+    if (pk === 'COMMERCIAL#CONFIG' && sk === 'FLAGS') return { Item: syncFlags() };
+    if (sk === 'ACCESS' && pk.startsWith('USER#')) {
+      const ownerSub = pk.slice('USER#'.length);
+      return { Item: deriveAccessItem(ownerSub, NOW, undefined, []) };
+    }
+    if (sk === 'PROFILE') {
+      return { Item: pk === K.user(owner.userId) ? owner : profile(pk.slice('USER#'.length)) };
+    }
     const linkHit = relationLinks.find((l) => l.pk === pk && l.sk === sk);
     if (linkHit) return { Item: linkHit };
     if (sk.startsWith('FRIEND#') && friends) {
@@ -537,14 +544,10 @@ describe('friend requests', () => {
   });
 
   it.each([
-    ['list friends', (ctx: Ctx) => getFriends(ctx)],
     ['get a friend code', (ctx: Ctx) => getFriendCode(ctx)],
     ['rotate a friend code', (ctx: Ctx) => rotateFriendCode(ctx)],
     ['create a request', (ctx: Ctx) => createFriendRequest(ctx, { code: 'MBRD2468' })],
     ['accept a request', (ctx: Ctx) => acceptFriendRequest(ctx, 'r1')],
-    ['decline a request', (ctx: Ctx) => declineFriendRequest(ctx, 'r1')],
-    ['cancel a request', (ctx: Ctx) => cancelFriendRequest(ctx, 'r1')],
-    ['remove a friend', (ctx: Ctx) => removeFriend(ctx, 'nico~val')],
   ])('blocks social-off callers before they can %s', async (_label, invoke) => {
     const socialOff = ctxOf(profile('nico', { accountType: 'minor', socialEnabled: false }));
 

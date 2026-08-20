@@ -14,6 +14,7 @@ import {
   friendshipBetween,
   profileOf,
   requireSocial,
+  requireWritableOwner,
   toPublic,
 } from '../authz';
 import {
@@ -29,6 +30,7 @@ import {
   readRateCount,
 } from '../db';
 import { friendCode } from '../codes';
+import { guardedSocialWrite, resolveSocialCapability } from '../commercial/social-policy';
 import {
   TransactItem,
   absentConditionCheck,
@@ -57,7 +59,6 @@ async function requestView(deps: Deps, item: FriendRequestItem, otherId: string)
 }
 
 export async function getFriends(ctx: Ctx): Promise<FriendsResponse> {
-  requireSocial(ctx);
   return friendsOf(ctx, ctx.callerId);
 }
 
@@ -116,12 +117,17 @@ async function mintFriendCode(ctx: Ctx, previous: CodeItem | null): Promise<Code
         TableName: ctx.deps.table,
         Key: K.profile(ctx.callerId),
         UpdateExpression: 'SET friendCode = :code',
-        ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND (${
+        ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND (#socialEnabled = :socialEnabled AND ${
           previousCode ? '#friendCode = :previousCode' : 'attribute_not_exists(#friendCode)'
         })`,
-        ExpressionAttributeNames: { '#status': 'status', '#friendCode': 'friendCode' },
+        ExpressionAttributeNames: {
+          '#status': 'status',
+          '#friendCode': 'friendCode',
+          '#socialEnabled': 'socialEnabled',
+        },
         ExpressionAttributeValues: {
           ':active': 'active',
+          ':socialEnabled': true,
           ':code': code,
           ...(previousCode ? { ':previousCode': previousCode } : {}),
         },
@@ -135,7 +141,7 @@ async function mintFriendCode(ctx: Ctx, previous: CodeItem | null): Promise<Code
   } else if (previousCode) {
     writes.push(absentConditionCheck(ctx.deps, K.codeF(previousCode)));
   }
-  await guardedWrite(ctx, [ctx.callerId], writes, undefined, {
+  await guardedSocialWrite(ctx, 'create', [ctx.callerId], writes, undefined, {
     [ctx.callerId]: { profile: true, closure: true },
   });
   return { code, expiresAt };
@@ -151,6 +157,14 @@ export async function getFriendCode(ctx: Ctx): Promise<CodeGrant> {
       existing.userId === ctx.callerId &&
       existing.expiresAt > ctx.deps.now()
     ) {
+      await resolveSocialCapability(ctx, 'create', [ctx.callerId]);
+      const currentCaller = await requireWritableOwner(ctx, ctx.callerId);
+      if (!currentCaller.socialEnabled) {
+        throw new ApiError('FORBIDDEN', 'social features are off');
+      }
+      if (currentCaller.friendCode !== existing.code) {
+        throw new ApiError('CONFLICT', 'friend code changed; retry');
+      }
       return { code: existing.code, expiresAt: existing.expiresAt };
     }
   }
@@ -215,8 +229,9 @@ export async function createFriendRequest(ctx: Ctx, body: { code?: string }): Pr
   const reverseGuard = reverse
     ? exactRequestOperation(ctx.deps, reverse, 'check')
     : absentConditionCheck(ctx.deps, K.freq(ctx.callerId, reverseRequestId));
-  await guardedWrite(
+  await guardedSocialWrite(
     ctx,
+    'create',
     [ctx.callerId, grant.userId],
     [
       {
@@ -274,6 +289,7 @@ export async function acceptFriendRequest(ctx: Ctx, requestId: string): Promise<
   const request = await findIncoming(ctx, requestId);
   const other = await profileOf(ctx.deps, request.fromId);
   if (!other) throw new ApiError('NOT_FOUND');
+  if (!other.socialEnabled) throw new ApiError('FORBIDDEN', 'social features are off');
 
   // The cap holds on BOTH ends at accept time too — requests sit for days,
   // and either side may have filled up since the request was sent.
@@ -294,8 +310,9 @@ export async function acceptFriendRequest(ctx: Ctx, requestId: string): Promise<
     userB: friendshipId.split('~')[1],
     createdAt: now,
   });
-  await guardedWrite(
+  await guardedSocialWrite(
     ctx,
+    'accept',
     [ctx.callerId, request.fromId],
     [
       {
@@ -331,7 +348,6 @@ export async function acceptFriendRequest(ctx: Ctx, requestId: string): Promise<
 
 /** Silent by design — the requester's pending item simply disappears. */
 export async function declineFriendRequest(ctx: Ctx, requestId: string): Promise<void> {
-  requireSocial(ctx);
   const request = await findIncoming(ctx, requestId);
   await guardedWrite(
     ctx,
@@ -349,7 +365,6 @@ export async function declineFriendRequest(ctx: Ctx, requestId: string): Promise
 }
 
 export async function cancelFriendRequest(ctx: Ctx, requestId: string): Promise<void> {
-  requireSocial(ctx);
   const mine = await queryPrefix<FriendRequestItem>(ctx.deps, K.user(ctx.callerId), 'FREQ#', {
     index: 'gsi1',
   });
@@ -368,7 +383,6 @@ export async function cancelFriendRequest(ctx: Ctx, requestId: string): Promise<
 }
 
 export async function removeFriend(ctx: Ctx, friendshipId: string): Promise<void> {
-  requireSocial(ctx);
   await removeFriendshipAs(ctx, ctx.callerId, friendshipId);
 }
 

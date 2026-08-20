@@ -21,6 +21,7 @@ import {
   type Ctx,
 } from '../lambda/authz';
 import { accountClosureKey } from '../lambda/account-closure';
+import type { AccessItem } from '../lambda/commercial/model';
 import type {
   CodeItem,
   Deps,
@@ -147,9 +148,55 @@ function transactionCanceled(): Error {
   });
 }
 
+function commercialFlags() {
+  return {
+    pk: 'COMMERCIAL#CONFIG',
+    sk: 'FLAGS',
+    revision: 1,
+    quotaMode: 'off',
+    capabilityMode: 'off',
+    accessCodeIssuanceEnabled: false,
+    accessCodeRedemptionEnabled: false,
+    premiumPaymentsEnabled: false,
+    updatedAt: NOW - 1,
+    updatedBy: 'test',
+    reason: 'closure fixture',
+  };
+}
+
+function freeAccess(ownerSub: string): AccessItem {
+  return {
+    pk: K.user(ownerSub),
+    sk: 'ACCESS',
+    ownerSub,
+    effectivePlanKey: 'free',
+    catalogVersion: '2026-08-prepayment-v1',
+    status: 'active',
+    activeSources: [{ kind: 'default', sourceId: 'default', planKey: 'free', validUntil: null }],
+    limits: { maxActiveTrees: 2, maxVisibleBranchesPerTree: 10 },
+    capabilities: { cloudSync: false, social: false, family: false },
+    revision: 1,
+    nextRecomputeAt: null,
+    offlineValidUntil: NOW + 60_000,
+    updatedAt: NOW - 1,
+  };
+}
+
+function commercialGet(key: { pk: string; sk: string }): { Item?: unknown } {
+  if (key.pk === 'COMMERCIAL#CONFIG' && key.sk === 'FLAGS') return { Item: commercialFlags() };
+  if (key.sk === 'ACCESS' && key.pk.startsWith('USER#')) {
+    return { Item: freeAccess(key.pk.slice('USER#'.length)) };
+  }
+  return {};
+}
+
 beforeEach(() => {
   ddbMock.reset();
   cognitoMock.reset();
+  ddbMock.on(GetCommand).callsFake((input) =>
+    commercialGet(input.Key as { pk: string; sk: string }),
+  );
+  ddbMock.on(QueryCommand).resolves({ Items: [] });
 });
 
 afterEach(() => {
@@ -295,7 +342,12 @@ describe('friend mutations serialize with account closure', () => {
       expiresAt: NOW + 60_000,
       ttl: Math.ceil((NOW + 60_000) / 1_000),
     };
-    ddbMock.on(GetCommand).resolves({ Item: oldGrant });
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      return key.pk === oldGrant.pk && key.sk === oldGrant.sk
+        ? { Item: oldGrant }
+        : commercialGet(key);
+    });
     ddbMock.on(TransactWriteCommand).resolves({});
 
     await rotateFriendCode(ctxOf(profile('rocio', { friendCode: oldCode })));
@@ -328,7 +380,7 @@ describe('friend mutations serialize with account closure', () => {
       if (key.pk === K.profile('ambar').pk && key.sk === 'PROFILE') {
         return { Item: profile('ambar') };
       }
-      return {};
+      return commercialGet(key);
     });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     ddbMock.on(TransactWriteCommand).resolves({});
@@ -354,7 +406,7 @@ describe('friend mutations serialize with account closure', () => {
       if (key.pk === K.profile('ambar').pk && key.sk === 'PROFILE') {
         return { Item: profile('ambar') };
       }
-      return {};
+      return commercialGet(key);
     });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     ddbMock.on(TransactWriteCommand).resolves({});
@@ -426,16 +478,18 @@ describe('friend mutations serialize with account closure', () => {
       if (key.pk === accountClosureKey('rocio').pk) {
         return { Item: { ...accountClosureKey('rocio'), state: 'requested' } };
       }
-      return {};
+      return commercialGet(key);
     });
 
     await expect(getFriendCode(ctxOf(profile('rocio')))).rejects.toMatchObject({ code: 'CONFLICT' });
-    expect(
-      ddbMock.commandCalls(GetCommand).filter((call) => call.args[0].input.ConsistentRead),
-    ).toHaveLength(2);
+    const strongKeys = ddbMock.commandCalls(GetCommand)
+      .filter((call) => call.args[0].input.ConsistentRead)
+      .map((call) => call.args[0].input.Key);
+    expect(strongKeys).toContainEqual(K.profile('rocio'));
+    expect(strongKeys).toContainEqual(accountClosureKey('rocio'));
   });
 
-  it('does not mask an unexplained friend transaction cancellation', async () => {
+  it('does not mislabel an unchanged-domain cancellation as an ACCESS conflict', async () => {
     const cancelled = transactionCanceled();
     ddbMock.on(TransactWriteCommand).rejects(cancelled);
     ddbMock.on(GetCommand).callsFake((input) => {
@@ -443,10 +497,13 @@ describe('friend mutations serialize with account closure', () => {
       if (key.pk === K.profile('rocio').pk && key.sk === 'PROFILE') {
         return { Item: profile('rocio', { status: 'active' }) };
       }
-      return {};
+      return commercialGet(key);
     });
 
-    await expect(getFriendCode(ctxOf(profile('rocio')))).rejects.toBe(cancelled);
+    await expect(getFriendCode(ctxOf(profile('rocio')))).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 });
 

@@ -73,14 +73,16 @@ function hasEquivalentWritableCondition(expression: string): boolean {
 }
 
 function assertEmbeddedProfileGuard(ctx: Ctx, ownerId: string, writes: TransactItem[]): void {
-  const update = writes.find((item) => sameAddress(item, ctx.deps.table, K.profile(ownerId)))
-    ?.Update;
-  const expression = update?.ConditionExpression ?? '';
+  const item = writes.find((candidate) =>
+    sameAddress(candidate, ctx.deps.table, K.profile(ownerId)),
+  );
+  const operation = item?.Update ?? item?.ConditionCheck;
+  const expression = operation?.ConditionExpression ?? '';
   if (
-    !update ||
+    !operation ||
     !hasEquivalentWritableCondition(expression) ||
-    update.ExpressionAttributeNames?.['#status'] !== 'status' ||
-    update.ExpressionAttributeValues?.[':active'] !== 'active'
+    operation.ExpressionAttributeNames?.['#status'] !== 'status' ||
+    operation.ExpressionAttributeValues?.[':active'] !== 'active'
   ) {
     throw new Error(`owner ${ownerId} has no equivalent embedded profile guard`);
   }
