@@ -358,7 +358,6 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
           'dynamodb:GetItem',
           'dynamodb:PutItem',
           'dynamodb:Query',
-          'dynamodb:Scan',
           'dynamodb:UpdateItem',
         ],
         resources: primaryTableArns(stack, stage),

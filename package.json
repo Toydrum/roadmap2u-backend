@@ -16,6 +16,7 @@
     "commercial:bootstrap": "node scripts/bootstrap-commercial-flags.mjs",
     "commercial:set": "node scripts/set-commercial-flags.mjs",
     "commercial:freeze": "node scripts/freeze-commercial-cutover.mjs",
+    "commercial:family-fence": "node scripts/family-fence-backfill.mjs",
     "contracts:check": "vitest run test/contracts-parity.test.ts",
     "contracts:hash": "node scripts/contracts-hash.mjs",
     "contracts:sync": "node scripts/sync-contracts.mjs",

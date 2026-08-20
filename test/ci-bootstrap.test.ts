@@ -404,6 +404,9 @@ describe('GitHub OIDC bootstrap', () => {
         const policyJson = JSON.stringify(statements);
         expect(policyJson).not.toContain('secretsmanager:');
         expect(policyJson).not.toContain('cognito-idp:');
+        expect(JSON.stringify(policy.Properties.PolicyDocument).length).toBeLessThanOrEqual(
+          10_000,
+        );
         const deny = statements.find(
           (statement: any) => statement.Sid === 'DenyCommercialConfigWrites',
         );
@@ -428,20 +431,90 @@ describe('GitHub OIDC bootstrap', () => {
         ).toBe(true);
 
         if (purpose === 'commercial-migration') {
-          const primaryWrites = statements.find(
-            (statement: any) => statement.Sid === 'TransactOnlyUserMigration',
+          const primaryTableArn = `table/roadmap-${stage}`;
+          const safeProjection = [
+            'accountType',
+            'createdAt',
+            'createdMinorIds',
+            'familyFenceVersion',
+            'gsi1pk',
+            'gsi1sk',
+            'guardianId',
+            'kind',
+            'linkId',
+            'minorId',
+            'pk',
+            'sk',
+            'status',
+            'userId',
+          ];
+          const scan = statements.find(
+            (statement: any) => statement.Sid === 'ScanOnlyFamilyFenceProjection',
           );
-          expect(primaryWrites.Action).toEqual([
-            'dynamodb:ConditionCheckItem',
-            'dynamodb:PutItem',
-            'dynamodb:UpdateItem',
-          ]);
+          expect(scan.Action).toBe('dynamodb:Scan');
+          expect(JSON.stringify(scan.Resource)).toContain(primaryTableArn);
+          expect(JSON.stringify(scan.Resource)).not.toContain('/index/');
+          expect(JSON.stringify(scan.Resource)).not.toContain('roadmap-access-audit');
+          expect(scan.Condition).toEqual({
+            'ForAllValues:StringEquals': {
+              'dynamodb:Attributes': safeProjection,
+            },
+            StringEquals: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+            Null: { 'dynamodb:Attributes': 'false' },
+          });
+          expect(JSON.stringify(scan.Condition)).not.toContain('dynamodb:LeadingKeys');
+
+          const userReads = statements.find(
+            (statement: any) => statement.Sid === 'ReadOnlyUserMigrationPartitions',
+          );
+          expect(userReads.Action).toBe('dynamodb:GetItem');
+          expect(userReads.Condition).toEqual({
+            'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' },
+            'ForAllValues:StringEquals': {
+              'dynamodb:Attributes': safeProjection,
+            },
+            Null: { 'dynamodb:Attributes': 'false' },
+          });
+          expect(JSON.stringify(userReads.Resource)).toContain(primaryTableArn);
+
+          const closureReads = statements.find(
+            (statement: any) => statement.Sid === 'ReadOnlyFamilyFenceClosures',
+          );
+          expect(closureReads.Action).toBe('dynamodb:GetItem');
+          expect(closureReads.Condition).toEqual({
+            'ForAllValues:StringLike': {
+              'dynamodb:LeadingKeys': 'ACCOUNT_CLOSURE#*',
+            },
+            'ForAllValues:StringEquals': {
+              'dynamodb:Attributes': safeProjection,
+            },
+            Null: { 'dynamodb:Attributes': 'false' },
+          });
+          expect(JSON.stringify(closureReads.Resource)).toContain(primaryTableArn);
+
+          const primaryWrites = statements.find(
+            (statement: any) => statement.Sid === 'TransactOnlyUserMigrationWrites',
+          );
+          expect(primaryWrites.Action).toBe('dynamodb:UpdateItem');
           expect(primaryWrites.Condition).toEqual({
             'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' },
             StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
           });
           expect(JSON.stringify(primaryWrites.Resource)).toContain(`table/roadmap-${stage}`);
           expect(JSON.stringify(primaryWrites.Resource)).not.toContain('roadmap-access-audit');
+
+          const primaryChecks = statements.find(
+            (statement: any) => statement.Sid === 'TransactOnlyFamilyFenceChecks',
+          );
+          expect(primaryChecks.Action).toBe('dynamodb:ConditionCheckItem');
+          expect(primaryChecks.Condition).toEqual({
+            'ForAllValues:StringLike': {
+              'dynamodb:LeadingKeys': ['ACCOUNT_CLOSURE#*', 'USER#*'],
+            },
+            StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+          });
+          expect(JSON.stringify(primaryChecks.Resource)).toContain(primaryTableArn);
+          expect(JSON.stringify(primaryChecks.Resource)).not.toContain('roadmap-access-audit');
 
           const auditWrites = statements.find(
             (statement: any) => statement.Sid === 'TransactOnlyMigrationAudit',
@@ -454,6 +527,13 @@ describe('GitHub OIDC bootstrap', () => {
           expect(JSON.stringify(auditWrites.Resource)).toContain(
             `table/roadmap-access-audit-${stage}`,
           );
+          expect(
+            statements.filter((statement: any) =>
+              JSON.stringify(statement.Resource).includes(
+                `table/roadmap-access-audit-${stage}`,
+              ),
+            ),
+          ).toEqual([auditWrites]);
 
           const directWriteAllows = statements.filter(
             (statement: any) =>
@@ -470,6 +550,8 @@ describe('GitHub OIDC bootstrap', () => {
                 'TransactWriteItems',
           );
           expect(directWriteAllows).toEqual([]);
+        } else {
+          expect(policyJson).not.toContain('dynamodb:Scan');
         }
       }
 
@@ -537,6 +619,9 @@ describe('GitHub OIDC bootstrap', () => {
       expect(
         statements.find((statement: any) => statement.Sid === 'UseOnlyOwnStageTable').Action,
       ).not.toContain('dynamodb:TransactWriteItems');
+      expect(
+        statements.find((statement: any) => statement.Sid === 'UseOnlyOwnStageTable').Action,
+      ).not.toContain('dynamodb:Scan');
 
       const data = policies.find(
         (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-data`,

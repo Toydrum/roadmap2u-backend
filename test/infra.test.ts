@@ -446,6 +446,7 @@ describe('stage backend infrastructure', () => {
     const brokerJson = JSON.stringify(brokerStatements);
 
     expect(brokerJson).not.toContain('dynamodb:TransactWriteItems');
+    expect(brokerJson).not.toContain('dynamodb:Scan');
     expect(brokerJson).toContain('dynamodb:GetItem');
     expect(brokerJson).toContain('COMMERCIAL#CONFIG');
     expect(auditTableId).toBeDefined();
@@ -581,6 +582,7 @@ describe('stage backend infrastructure', () => {
       .filter((statement: any) => statement.Effect !== 'Deny');
     expect(JSON.stringify(routerAllows)).toContain('dynamodb:ConditionCheckItem');
     expect(JSON.stringify(routerAllows)).not.toContain('dynamodb:TransactWriteItems');
+    expect(JSON.stringify(routerAllows)).not.toContain('dynamodb:Scan');
   });
 
   it('allows the closure worker to append audit events only inside TransactWrite', () => {

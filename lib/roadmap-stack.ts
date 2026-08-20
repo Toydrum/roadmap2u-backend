@@ -138,6 +138,23 @@ const COMMERCIAL_CONFIG_WRITE_ACTIONS = [
   'dynamodb:UpdateItem',
 ] as const;
 
+const FAMILY_FENCE_SAFE_READ_ATTRIBUTES = [
+  'accountType',
+  'createdAt',
+  'createdMinorIds',
+  'familyFenceVersion',
+  'gsi1pk',
+  'gsi1sk',
+  'guardianId',
+  'kind',
+  'linkId',
+  'minorId',
+  'pk',
+  'sk',
+  'status',
+  'userId',
+] as const;
+
 function denyCommercialConfigWrites(role: iam.Role, table: dynamodb.ITable): void {
   role.addToPolicy(
     new iam.PolicyStatement({
@@ -640,7 +657,6 @@ export class RoadmapStack extends Stack {
           'dynamodb:GetItem',
           'dynamodb:PutItem',
           'dynamodb:Query',
-          'dynamodb:Scan',
           'dynamodb:UpdateItem',
         ],
         resources: [table.tableArn, `${table.tableArn}/index/*`],
@@ -1240,25 +1256,66 @@ export class RoadmapCiBootstrapStack extends Stack {
         policyName: `CommercialMigrationPolicy-${stage}`,
         statements: [
           ...this.commercialBrokerInvokeStatements(stage),
+          // Scan necessarily traverses every partition, so dynamodb:LeadingKeys
+          // cannot scope it. Keep this allow on the exact stage migration role and
+          // table, and require the script's explicit non-PII projection instead.
+          // https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/specifying-conditions.html
           new iam.PolicyStatement({
-            sid: 'ReadOnlyUserMigrationPartitions',
-            actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+            sid: 'ScanOnlyFamilyFenceProjection',
+            actions: ['dynamodb:Scan'],
             resources: [tableArn],
             conditions: {
-              'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' },
+              'ForAllValues:StringEquals': {
+                'dynamodb:Attributes': [...FAMILY_FENCE_SAFE_READ_ATTRIBUTES],
+              },
+              StringEquals: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+              Null: { 'dynamodb:Attributes': 'false' },
             },
           }),
           new iam.PolicyStatement({
-            sid: 'TransactOnlyUserMigration',
-            actions: [
-              'dynamodb:ConditionCheckItem',
-              'dynamodb:PutItem',
-              'dynamodb:UpdateItem',
-            ],
+            sid: 'ReadOnlyUserMigrationPartitions',
+            actions: ['dynamodb:GetItem'],
+            resources: [tableArn],
+            conditions: {
+              'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' },
+              'ForAllValues:StringEquals': {
+                'dynamodb:Attributes': [...FAMILY_FENCE_SAFE_READ_ATTRIBUTES],
+              },
+              Null: { 'dynamodb:Attributes': 'false' },
+            },
+          }),
+          new iam.PolicyStatement({
+            sid: 'ReadOnlyFamilyFenceClosures',
+            actions: ['dynamodb:GetItem'],
+            resources: [tableArn],
+            conditions: {
+              'ForAllValues:StringLike': {
+                'dynamodb:LeadingKeys': 'ACCOUNT_CLOSURE#*',
+              },
+              'ForAllValues:StringEquals': {
+                'dynamodb:Attributes': [...FAMILY_FENCE_SAFE_READ_ATTRIBUTES],
+              },
+              Null: { 'dynamodb:Attributes': 'false' },
+            },
+          }),
+          new iam.PolicyStatement({
+            sid: 'TransactOnlyUserMigrationWrites',
+            actions: ['dynamodb:UpdateItem'],
             resources: [tableArn],
             conditions: {
               'ForAllValues:StringLike': {
                 'dynamodb:LeadingKeys': 'USER#*',
+              },
+              StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+            },
+          }),
+          new iam.PolicyStatement({
+            sid: 'TransactOnlyFamilyFenceChecks',
+            actions: ['dynamodb:ConditionCheckItem'],
+            resources: [tableArn],
+            conditions: {
+              'ForAllValues:StringLike': {
+                'dynamodb:LeadingKeys': ['ACCOUNT_CLOSURE#*', 'USER#*'],
               },
               StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
             },
