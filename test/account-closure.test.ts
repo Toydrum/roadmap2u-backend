@@ -15,6 +15,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { AuditWriter } from '../lambda/commercial/audit';
+import { accountClosureKey } from '../lambda/account-closure';
 import * as authz from '../lambda/authz';
 import type { Ctx } from '../lambda/authz';
 import { K, type Deps, type ProfileItem } from '../lambda/db';
@@ -33,6 +34,7 @@ function profile(overrides: Partial<ProfileItem> = {}): ProfileItem {
     accountType: 'adult',
     socialEnabled: true,
     createdAt: NOW - 10_000,
+    familyFenceVersion: 1,
     email: 'private@example.com',
     friendCode: 'FRIEND12',
     ...overrides,
@@ -166,6 +168,9 @@ describe('account closure request', () => {
     expect(profileUpdate?.ConditionExpression).toContain('#status = :active');
     expect(profileUpdate?.ConditionExpression).toContain('username = :username');
     expect(profileUpdate?.ConditionExpression).toContain('friendCode = :friendCode');
+    expect(profileUpdate?.ConditionExpression).toContain('familyFenceVersion = :familyFenceVersion');
+    expect(profileUpdate?.ConditionExpression).toContain('attribute_not_exists(createdMinorIds)');
+    expect(profileUpdate?.ExpressionAttributeValues).toMatchObject({ ':familyFenceVersion': 1 });
 
     expect(transaction.TransactItems?.[2]?.Put).toMatchObject({
       TableName: 'roadmap-access-audit-dev',
@@ -180,6 +185,39 @@ describe('account closure request', () => {
         subject: 'adult-1',
       },
     });
+  });
+
+  it.each([
+    ['a legacy profile without a completed fence', { familyFenceVersion: undefined }],
+    [
+      'a guardian that still owns a created minor',
+      { familyFenceVersion: 1 as const, createdMinorIds: new Set(['minor-1']) },
+    ],
+  ])('fails closed for %s and never enqueues', async (_label, profileOverrides) => {
+    const module = await loadHandlerModule();
+    expect(module).not.toBeNull();
+    const enqueue = vi.fn(async () => undefined);
+    const deps = closureDeps(enqueue);
+    const cancelled = Object.assign(new Error('family fence rejected closure'), {
+      name: 'TransactionCanceledException',
+    });
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      if (key.pk === K.user('adult-1') && key.sk === 'PROFILE') {
+        return { Item: profile(profileOverrides) };
+      }
+      return {};
+    });
+    ddbMock.on(TransactWriteCommand).rejects(cancelled);
+
+    await expect(
+      module!.requestAccountClosure(deps, 'adult-1', 'request-family-fence'),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(enqueue).not.toHaveBeenCalled();
+    const update = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input
+      .TransactItems?.find((item) => item.Update)?.Update;
+    expect(update?.ConditionExpression).toContain('familyFenceVersion = :familyFenceVersion');
+    expect(update?.ConditionExpression).toContain('attribute_not_exists(createdMinorIds)');
   });
 
   it('reuses an existing closure even when the profile is already gone', async () => {
@@ -229,6 +267,21 @@ describe('account closure request', () => {
       sub: 'adult-1',
       closureId: 'closure-existing',
     });
+  });
+
+  it('keeps the internal blocked state out of the public receipt contract', async () => {
+    const module = await loadHandlerModule();
+    const enqueue = vi.fn(async () => undefined);
+    const deps = closureDeps(enqueue);
+    ddbMock.on(GetCommand).resolves({
+      Item: closureItem({ state: 'blocked', blockReason: 'created_family_link' }),
+    });
+
+    await expect(
+      module!.requestAccountClosure(deps, 'adult-1', 'request-blocked'),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   it('keeps the durable request accepted when its first enqueue fails', async () => {
@@ -502,8 +555,11 @@ describe('account closure worker', () => {
         sk: 'GUARDIAN#adult-1',
         gsi1pk: 'USER#adult-1',
         gsi1sk: 'MINOR#minor-2',
+        linkId: 'adult-1~minor-2',
+        kind: 'invited',
         guardianId: 'adult-1',
         minorId: 'minor-2',
+        createdAt: NOW - 1_000,
       },
       nextPhase: 'directMirrors',
     },
@@ -544,15 +600,81 @@ describe('account closure worker', () => {
       ':pk': 'USER#adult-1',
       ':prefix': fixture.prefix,
     });
-    const batch = ddbMock.commandCalls(BatchWriteCommand)[0].args[0].input;
-    expect(batch.RequestItems?.['roadmap-dev']).toEqual([
-      { DeleteRequest: { Key: { pk: fixture.item.pk, sk: fixture.item.sk } } },
-    ]);
+    if (fixture.phase === 'guardianLinks') {
+      expect(ddbMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
+      const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+      expect(transaction.TransactItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            ConditionCheck: expect.objectContaining({
+              Key: { pk: 'ACCOUNT_CLOSURE#adult-1', sk: 'STATE' },
+            }),
+          }),
+          expect.objectContaining({
+            Delete: expect.objectContaining({
+              Key: { pk: fixture.item.pk, sk: fixture.item.sk },
+              ConditionExpression: expect.stringContaining('linkId = :linkId'),
+            }),
+          }),
+        ]),
+      );
+    } else {
+      const batch = ddbMock.commandCalls(BatchWriteCommand)[0].args[0].input;
+      expect(batch.RequestItems?.['roadmap-dev']).toEqual([
+        { DeleteRequest: { Key: { pk: fixture.item.pk, sk: fixture.item.sk } } },
+      ]);
+    }
     const checkpoint = ddbMock.commandCalls(UpdateCommand)[1].args[0].input;
     expect(checkpoint.ExpressionAttributeValues?.[':checkpoint']).toEqual({
       phase: fixture.phase,
       quietPasses: 0,
     });
+    expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
+  });
+
+  it('treats a legacy closure kind as self-adult and blocks on an outgoing created link', async () => {
+    const module = await loadClosureModule();
+    const processMessage = module?.['processAccountClosureMessage'];
+    expect(processMessage).toBeTypeOf('function');
+    const enqueue = vi.fn(async () => undefined);
+    const deps = closureDeps(enqueue);
+    const purging = closureItem({
+      state: 'purging',
+      revision: 4,
+      checkpoint: { phase: 'guardianLinks' },
+    });
+    const leased = {
+      ...purging,
+      revision: 5,
+      leaseOwner: 'worker-1',
+      leaseUntil: NOW + 60_000,
+    };
+    const created = {
+      pk: 'USER#minor-2',
+      sk: 'GUARDIAN#adult-1',
+      gsi1pk: 'USER#adult-1',
+      gsi1sk: 'MINOR#minor-2',
+      linkId: 'adult-1~minor-2',
+      kind: 'created',
+      guardianId: 'adult-1',
+      minorId: 'minor-2',
+      createdAt: NOW - 1_000,
+    };
+    ddbMock.on(GetCommand).resolves({ Item: purging });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: leased });
+    ddbMock.on(QueryCommand).resolves({ Items: [created] });
+    ddbMock.on(TransactWriteCommand).resolves({});
+
+    await processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' });
+
+    const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+    expect(transaction.TransactItems?.find((item) => item.Update)?.Update)
+      .toMatchObject({
+        Key: accountClosureKey('adult-1'),
+        ExpressionAttributeValues: expect.objectContaining({ ':nextState': 'blocked' }),
+      });
+    expect(transaction.TransactItems?.some((item) => item.Delete)).toBe(false);
+    expect(enqueue).not.toHaveBeenCalled();
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
   });
 
@@ -1120,6 +1242,28 @@ describe('account closure reconciler', () => {
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
+  });
+
+  it('does not enqueue a blocked closure still visible through an eventually consistent GSI', async () => {
+    const module = await loadReconcilerModule();
+    const reconcile = module?.['reconcileOpenAccountClosures'];
+    expect(reconcile).toBeTypeOf('function');
+    const enqueue = vi.fn(async () => undefined);
+    const deps = { ...baseDeps(), queue: { enqueue } };
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        closureItem({
+          state: 'blocked',
+          blockReason: 'created_family_link',
+          nextAttemptAt: NOW - 1,
+        }),
+      ],
+    });
+
+    await reconcile(deps);
+
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(1);
   });
 });
 

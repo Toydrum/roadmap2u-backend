@@ -18,6 +18,7 @@ import {
   type Deps,
   type DynamoKey,
   type FriendItem,
+  type LinkItem,
 } from './db';
 import { instrumentHandler } from './observability';
 import {
@@ -28,11 +29,17 @@ import {
 
 export const ACCOUNT_CLOSURE_OPEN_GSI_PK = 'ACCOUNT_CLOSURE#OPEN';
 
-export type AccountClosureState = 'requested' | 'purging' | 'purgeComplete' | 'completed';
+export type AccountClosureState =
+  | 'requested'
+  | 'purging'
+  | 'purgeComplete'
+  | 'completed'
+  | 'blocked';
 
 export type AccountClosureKind = 'self_adult' | 'guardian_minor';
 
 export type AccountClosurePhase =
+  | 'inboundGuardianLinks'
   | 'friendMirrors'
   | 'outgoingFriendRequests'
   | 'guardianLinks'
@@ -67,6 +74,8 @@ export interface AccountClosureItem {
   readonly checkpoint?: AccountClosureCheckpoint;
   readonly purgeCompleteAt?: number;
   readonly completedAt?: number;
+  readonly blockedAt?: number;
+  readonly blockReason?: 'created_family_link';
   readonly ttl?: number;
   readonly leaseOwner?: string;
   readonly leaseUntil?: number;
@@ -103,6 +112,7 @@ export interface AccountClosureDeps extends Deps {
   readonly queue: AccountClosureQueue;
   readonly nextClosureId: () => string;
   readonly nextWorkerId: () => string;
+  readonly recordBlocked?: (reason: 'created_family_link') => void | Promise<void>;
 }
 
 export function accountClosureKey(sub: string): { pk: string; sk: 'STATE' } {
@@ -121,6 +131,90 @@ const WORKER_LEASE_MS = 60_000;
 const GSI_STABILITY_DELAY_MS = 30_000;
 // Keep completed tombstones for 30 days so delayed/duplicate deliveries remain idempotent.
 const COMPLETED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+function isTerminalClosureState(state: AccountClosureState): boolean {
+  return state === 'completed' || state === 'blocked';
+}
+
+function exactClosureLeaseCheck(
+  deps: AccountClosureDeps,
+  closure: AccountClosureItem,
+) {
+  return {
+    ConditionCheck: {
+      TableName: deps.table,
+      Key: accountClosureKey(closure.sub),
+      ConditionExpression:
+        'closureId = :closureId AND revision = :expectedRevision AND #state = :state AND leaseOwner = :leaseOwner',
+      ExpressionAttributeNames: { '#state': 'state' },
+      ExpressionAttributeValues: {
+        ':closureId': closure.closureId,
+        ':expectedRevision': closure.revision,
+        ':state': 'purging',
+        ':leaseOwner': closure.leaseOwner,
+      },
+    },
+  } as const;
+}
+
+function exactLinkDelete(deps: AccountClosureDeps, link: LinkItem) {
+  return {
+    Delete: {
+      TableName: deps.table,
+      Key: { pk: link.pk, sk: link.sk },
+      ConditionExpression: [
+        'attribute_exists(pk)',
+        '#kind = :kind',
+        'guardianId = :guardianId',
+        'minorId = :minorId',
+        'linkId = :linkId',
+        'createdAt = :createdAt',
+        'gsi1pk = :gsi1pk',
+        'gsi1sk = :gsi1sk',
+      ].join(' AND '),
+      ExpressionAttributeNames: { '#kind': 'kind' },
+      ExpressionAttributeValues: {
+        ':kind': link.kind,
+        ':guardianId': link.guardianId,
+        ':minorId': link.minorId,
+        ':linkId': link.linkId,
+        ':createdAt': link.createdAt,
+        ':gsi1pk': link.gsi1pk,
+        ':gsi1sk': link.gsi1sk,
+      },
+    },
+  } as const;
+}
+
+function exactLinkCheck(deps: AccountClosureDeps, link: LinkItem) {
+  const deletion = exactLinkDelete(deps, link).Delete;
+  return { ConditionCheck: deletion } as const;
+}
+
+function removeGuardianFenceMember(
+  deps: AccountClosureDeps,
+  guardianSub: string,
+  minorSub: string,
+) {
+  return {
+    Update: {
+      TableName: deps.table,
+      Key: K.profile(guardianSub),
+      UpdateExpression: 'DELETE createdMinorIds :createdMinorIds',
+      ConditionExpression: [
+        'attribute_exists(pk)',
+        'accountType = :adult',
+        '(attribute_not_exists(familyFenceVersion) OR (familyFenceVersion = :familyFenceVersion AND contains(createdMinorIds, :minorId)))',
+      ].join(' AND '),
+      ExpressionAttributeValues: {
+        ':adult': 'adult',
+        ':familyFenceVersion': 1,
+        ':createdMinorIds': new Set([minorSub]),
+        ':minorId': minorSub,
+      },
+    },
+  } as const;
+}
 
 function parseClosureMessage(body: string): AccountClosureMessage | null {
   try {
@@ -196,6 +290,95 @@ async function saveClosureCheckpoint(
       },
     }),
   );
+}
+
+async function blockClosureOnCreatedLink(
+  deps: AccountClosureDeps,
+  closure: AccountClosureItem,
+  link: LinkItem,
+): Promise<void> {
+  const now = deps.now();
+  await deps.ddb.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Update: {
+            TableName: deps.table,
+            Key: accountClosureKey(closure.sub),
+            UpdateExpression:
+              'SET #state = :nextState, revision = :nextRevision, updatedAt = :now, blockedAt = :now, blockReason = :blockReason REMOVE gsi1pk, gsi1sk, nextAttemptAt, leaseOwner, leaseUntil, checkpoint',
+            ConditionExpression:
+              'closureId = :closureId AND revision = :expectedRevision AND #state = :expectedState AND leaseOwner = :leaseOwner',
+            ExpressionAttributeNames: { '#state': 'state' },
+            ExpressionAttributeValues: {
+              ':closureId': closure.closureId,
+              ':expectedRevision': closure.revision,
+              ':expectedState': 'purging',
+              ':leaseOwner': closure.leaseOwner,
+              ':nextState': 'blocked',
+              ':nextRevision': closure.revision + 1,
+              ':now': now,
+              ':blockReason': 'created_family_link',
+            },
+          },
+        },
+        exactLinkCheck(deps, link),
+        deps.auditWriter.transactPut({
+          targetKind: 'USER',
+          targetId: closure.sub,
+          timestamp: now,
+          requestId: `${closure.closureId}-blocked-${closure.revision + 1}`,
+          action: 'account_closure.blocked',
+          actor: 'system:account-closure-worker',
+          subject: closure.sub,
+          details: {
+            closureId: closure.closureId,
+            reason: 'created_family_link',
+            from: 'purging',
+            to: 'blocked',
+          },
+        }),
+      ],
+    }),
+  );
+  await Promise.resolve(deps.recordBlocked?.('created_family_link')).catch(() => undefined);
+}
+
+/**
+ * Removes links stored inside the closing account's own partition. Created
+ * links also remove the minor from the external guardian's authoritative set.
+ */
+async function purgeInboundGuardianLink(
+  deps: AccountClosureDeps,
+  closure: AccountClosureItem,
+): Promise<'continue' | 'blocked'> {
+  const page = await queryPrefixPage<LinkItem>(deps, K.user(closure.sub), 'GUARDIAN#', {
+    limit: 1,
+    consistentRead: true,
+  });
+  const link = page.items[0];
+  if (!link) {
+    await saveClosureCheckpoint(deps, closure, { phase: 'friendMirrors' });
+    return 'continue';
+  }
+  if ((closure.kind ?? 'self_adult') === 'self_adult' && link.kind === 'created') {
+    await blockClosureOnCreatedLink(deps, closure, link);
+    return 'blocked';
+  }
+  await deps.ddb.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        exactClosureLeaseCheck(deps, closure),
+        exactLinkDelete(deps, link),
+        ...(link.kind === 'created'
+          ? [removeGuardianFenceMember(deps, link.guardianId, link.minorId)]
+          : []),
+      ],
+    }),
+  );
+  // The exact delete is the checkpoint: a retry re-queries from the beginning.
+  await saveClosureCheckpoint(deps, closure, { phase: 'inboundGuardianLinks' });
+  return 'continue';
 }
 
 async function purgeFriendMirrorPage(
@@ -274,6 +457,48 @@ async function purgeIndexedMirrorPage(
   return undefined;
 }
 
+/** GSI-discovered links are always deleted exactly; never through BatchWrite. */
+async function purgeOutgoingGuardianLink(
+  deps: AccountClosureDeps,
+  closure: AccountClosureItem,
+): Promise<{ delaySeconds?: number; blocked?: true }> {
+  const page = await queryPrefixPage<LinkItem>(deps, K.user(closure.sub), 'MINOR#', {
+    index: 'gsi1',
+    limit: 1,
+  });
+  const link = page.items[0];
+  if (link) {
+    if ((closure.kind ?? 'self_adult') === 'self_adult' && link.kind === 'created') {
+      await blockClosureOnCreatedLink(deps, closure, link);
+      return { blocked: true };
+    }
+    await deps.ddb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          exactClosureLeaseCheck(deps, closure),
+          exactLinkDelete(deps, link),
+          ...(link.kind === 'created'
+            ? [removeGuardianFenceMember(deps, link.guardianId, link.minorId)]
+            : []),
+        ],
+      }),
+    );
+    await saveClosureCheckpoint(deps, closure, { phase: 'guardianLinks', quietPasses: 0 });
+    return {};
+  }
+  if ((closure.checkpoint?.quietPasses ?? 0) < 1) {
+    await saveClosureCheckpoint(
+      deps,
+      closure,
+      { phase: 'guardianLinks', quietPasses: 1 },
+      GSI_STABILITY_DELAY_MS,
+    );
+    return { delaySeconds: GSI_STABILITY_DELAY_MS / 1000 };
+  }
+  await saveClosureCheckpoint(deps, closure, { phase: 'guardianInvites' });
+  return {};
+}
+
 async function purgeGuardianInvitePage(
   deps: AccountClosureDeps,
   closure: AccountClosureItem,
@@ -328,12 +553,17 @@ async function purgeDirectMirrors(
 async function purgeUserPartitionPage(
   deps: AccountClosureDeps,
   closure: AccountClosureItem,
-): Promise<boolean> {
+): Promise<'complete' | 'pending' | 'blocked'> {
   const page = await queryPrefixPage<{ pk: string; sk: string }>(deps, K.user(closure.sub), '', {
     limit: 25,
     exclusiveStartKey: closure.checkpoint?.exclusiveStartKey,
     consistentRead: true,
   });
+  if (page.items.some(({ sk }) => sk.startsWith('GUARDIAN#'))) {
+    return (await purgeInboundGuardianLink(deps, closure)) === 'blocked'
+      ? 'blocked'
+      : 'pending';
+  }
   await batchWriteAll(
     deps,
     page.items.map(({ pk, sk }) => ({ DeleteRequest: { Key: { pk, sk } } })),
@@ -346,9 +576,9 @@ async function purgeUserPartitionPage(
         ? { phase: 'userPartition', exclusiveStartKey: page.lastEvaluatedKey }
         : { phase: 'userPartition' },
     );
-    return false;
+    return 'pending';
   }
-  return true;
+  return 'complete';
 }
 
 async function markPurgeComplete(
@@ -461,7 +691,9 @@ export async function processAccountClosureMessage(
   );
   const closure = result.Item as AccountClosureItem | undefined;
   if (!closure || closure.closureId !== message.closureId) return 'ignored';
-  if (closure.state === 'completed') return 'completed';
+  if (isTerminalClosureState(closure.state)) {
+    return closure.state === 'completed' ? 'completed' : 'pending';
+  }
   const observedAt = deps.now();
   if (typeof closure.nextAttemptAt === 'number' && closure.nextAttemptAt > observedAt) {
     const delaySeconds = Math.min(
@@ -487,6 +719,9 @@ export async function processAccountClosureMessage(
     }
     let continuationDelay: number | undefined;
     switch (leased.checkpoint?.phase) {
+      case 'inboundGuardianLinks':
+        if ((await purgeInboundGuardianLink(deps, leased)) === 'blocked') return 'pending';
+        break;
       case 'friendMirrors':
         await purgeFriendMirrorPage(deps, leased);
         break;
@@ -500,13 +735,11 @@ export async function processAccountClosureMessage(
         );
         break;
       case 'guardianLinks':
-        continuationDelay = await purgeIndexedMirrorPage(
-          deps,
-          leased,
-          'MINOR#',
-          'guardianLinks',
-          'guardianInvites',
-        );
+        {
+          const outcome = await purgeOutgoingGuardianLink(deps, leased);
+          if (outcome.blocked) return 'pending';
+          continuationDelay = outcome.delaySeconds;
+        }
         break;
       case 'guardianInvites':
         await purgeGuardianInvitePage(deps, leased);
@@ -515,8 +748,12 @@ export async function processAccountClosureMessage(
         await purgeDirectMirrors(deps, leased);
         break;
       case 'userPartition':
-        if (await purgeUserPartitionPage(deps, leased)) {
-          await markPurgeComplete(deps, leased);
+        {
+          const outcome = await purgeUserPartitionPage(deps, leased);
+          if (outcome === 'blocked') return 'pending';
+          if (outcome === 'complete') {
+            await markPurgeComplete(deps, leased);
+          }
         }
         break;
       default:
@@ -537,7 +774,7 @@ export async function processAccountClosureMessage(
             TableName: deps.table,
             Key: accountClosureKey(message.sub),
             UpdateExpression:
-              'SET #state = :nextState, revision = :nextRevision, updatedAt = :now, nextAttemptAt = :now, gsi1sk = :gsi1sk',
+              'SET #state = :nextState, revision = :nextRevision, updatedAt = :now, nextAttemptAt = :now, gsi1sk = :gsi1sk, checkpoint = :checkpoint',
             ConditionExpression:
               'closureId = :closureId AND revision = :expectedRevision AND #state = :expectedState',
             ExpressionAttributeNames: { '#state': 'state' },
@@ -549,6 +786,7 @@ export async function processAccountClosureMessage(
               ':nextRevision': closure.revision + 1,
               ':now': now,
               ':gsi1sk': closureOpenSortKey(now, closure.sub),
+              ':checkpoint': { phase: 'inboundGuardianLinks' },
             },
           },
         },

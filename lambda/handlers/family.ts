@@ -74,10 +74,57 @@ import {
   sameCode,
   sameLink,
   sameRequest,
+  type TransactItem,
 } from './guarded-mutation';
 
 const INVITE_TTL_MS = 72 * 3600 * 1000;
 const IDENTITY_OPERATION_LEASE_MS = 60_000;
+const FAMILY_FENCE_VERSION = 1;
+
+/**
+ * Adds a created child to the guardian's lifecycle fence. Legacy profiles may
+ * mutate while backfill is running, but an unknown fence version fails closed.
+ */
+function addCreatedMinorToFence(ctx: Ctx, guardianId: string, minorId: string): TransactItem {
+  return {
+    Update: {
+      TableName: ctx.deps.table,
+      Key: K.profile(guardianId),
+      UpdateExpression: 'ADD createdMinorIds :createdMinorIds',
+      ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND ((attribute_not_exists(familyFenceVersion) OR familyFenceVersion = :familyFenceVersion) AND (attribute_not_exists(createdMinorIds) OR size(createdMinorIds) < :maxCreatedMinors))`,
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':active': 'active',
+        ':familyFenceVersion': FAMILY_FENCE_VERSION,
+        ':createdMinorIds': new Set([minorId]),
+        ':maxCreatedMinors': LIMITS.maxChildrenPerGuardian,
+      },
+    },
+  };
+}
+
+/** Version 1 proves the set is authoritative, so deleting requires membership. */
+function removeCreatedMinorFromFence(
+  ctx: Ctx,
+  guardianId: string,
+  minorId: string,
+): TransactItem {
+  return {
+    Update: {
+      TableName: ctx.deps.table,
+      Key: K.profile(guardianId),
+      UpdateExpression: 'DELETE createdMinorIds :createdMinorIds',
+      ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND (attribute_not_exists(familyFenceVersion) OR (familyFenceVersion = :familyFenceVersion AND contains(createdMinorIds, :minorId)))`,
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':active': 'active',
+        ':familyFenceVersion': FAMILY_FENCE_VERSION,
+        ':createdMinorIds': new Set([minorId]),
+        ':minorId': minorId,
+      },
+    },
+  };
+}
 
 async function requireCreatedGuardianConsistent(ctx: Ctx, minorId: string): Promise<LinkItem> {
   const current = await requireGuardianOfConsistent(ctx, minorId);
@@ -198,6 +245,7 @@ export async function createChild(
             ConditionExpression: 'attribute_not_exists(pk)',
           },
         },
+        addCreatedMinorToFence(ctx, ctx.callerId, sub),
       ],
       async () => {
         const [closure, reservation] = await Promise.all([
@@ -207,6 +255,7 @@ export async function createChild(
         if (closure) throw new ApiError('CONFLICT', 'account closure is in progress');
         if (reservation) throw new ApiError('USERNAME_TAKEN');
       },
+      { [ctx.callerId]: { profile: true } },
     );
   } catch (error) {
     // Compensate the identity so a failed transact never leaves a ghost login.
@@ -407,6 +456,9 @@ export async function deleteFamilyLink(ctx: Ctx, linkId: string): Promise<void> 
     [guardianId, minorId],
     [
       exactLinkOperation(ctx.deps, link, 'delete'),
+      ...(link.kind === 'created'
+        ? [removeCreatedMinorFromFence(ctx, guardianId, minorId)]
+        : []),
       ...remaining.map((current) => exactLinkOperation(ctx.deps, current, 'check')),
     ],
     async () => {
@@ -414,6 +466,7 @@ export async function deleteFamilyLink(ctx: Ctx, linkId: string): Promise<void> 
       if (!current) throw new ApiError('NOT_FOUND');
       if (!sameLink(current, link)) return;
     },
+    link.kind === 'created' ? { [guardianId]: { profile: true } } : {},
   );
 }
 
@@ -521,6 +574,7 @@ export async function acceptFamilyInvite(
             ConditionExpression: 'attribute_not_exists(pk)',
           },
         },
+        addCreatedMinorToFence(ctx, ctx.callerId, minorId),
         ...familyInviteDeleteOperations(ctx, invite),
         exactLinkOperation(ctx.deps, issuerLink, 'check'),
       ],
@@ -540,6 +594,7 @@ export async function acceptFamilyInvite(
         if (currentLink) throw new ApiError('CONFLICT', 'already a guardian');
         if (!sameCode(currentInvite, invite) || !sameLink(currentIssuerLink, issuerLink)) return;
       },
+      { [ctx.callerId]: { profile: true } },
     );
     return linkView(link, minor, true);
   }

@@ -37,6 +37,7 @@ export async function reconcileOpenAccountClosures(
     for (const closure of (page.Items ?? []) as AccountClosureItem[]) {
       if (
         closure.state !== 'completed' &&
+        closure.state !== 'blocked' &&
         typeof closure.sub === 'string' &&
         typeof closure.closureId === 'string' &&
         typeof closure.nextAttemptAt === 'number' &&

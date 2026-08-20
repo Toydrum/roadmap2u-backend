@@ -485,8 +485,25 @@ describe('family mutations serialize with account closure', () => {
 
     await createChild(ctxOf(profile('rocio')), { username: 'nico', displayName: 'Nico' });
 
-    expectOwnerGuards(['rocio']);
+    expect(conditionKeys()).toContainEqual(accountClosureKey('rocio'));
+    expect(conditionKeys()).not.toContainEqual(K.profile('rocio'));
     expect(conditionKeys()).toContainEqual(accountClosureKey('nico-sub'));
+    const familyFence = transactionInput().TransactItems?.find(
+      (item) => item.Update?.Key?.['pk'] === K.profile('rocio').pk,
+    )?.Update;
+    expect(familyFence).toMatchObject({
+      Key: K.profile('rocio'),
+      UpdateExpression: 'ADD createdMinorIds :createdMinorIds',
+      ExpressionAttributeValues: expect.objectContaining({
+        ':familyFenceVersion': 1,
+        ':createdMinorIds': new Set(['nico-sub']),
+        ':maxCreatedMinors': 8,
+      }),
+    });
+    expect(familyFence?.ConditionExpression).toContain(WRITABLE_PROFILE_CONDITION);
+    expect(familyFence?.ConditionExpression).toContain('attribute_not_exists(familyFenceVersion)');
+    expect(familyFence?.ConditionExpression).toContain('familyFenceVersion = :familyFenceVersion');
+    expect(familyFence?.ConditionExpression).toContain('size(createdMinorIds) < :maxCreatedMinors');
     const childPut = transactionInput().TransactItems?.find(
       (item) => item.Put?.Item?.['userId'] === 'nico-sub' && item.Put?.Item?.['sk'] === 'PROFILE',
     )?.Put;
@@ -590,7 +607,24 @@ describe('family mutations serialize with account closure', () => {
 
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
-    expectOwnerGuards(['abuela', 'rocio', 'nico']);
+    expect(conditionKeys()).toEqual(
+      expect.arrayContaining([
+        accountClosureKey('abuela'),
+        K.profile('rocio'),
+        accountClosureKey('rocio'),
+        K.profile('nico'),
+        accountClosureKey('nico'),
+      ]),
+    );
+    expect(conditionKeys()).not.toContainEqual(K.profile('abuela'));
+    const coGuardianFence = transactionInput().TransactItems?.find(
+      (item) => item.Update?.Key?.['pk'] === K.profile('abuela').pk,
+    )?.Update;
+    expect(coGuardianFence?.UpdateExpression).toBe('ADD createdMinorIds :createdMinorIds');
+    expect(coGuardianFence?.ExpressionAttributeValues).toMatchObject({
+      ':createdMinorIds': new Set(['nico']),
+      ':familyFenceVersion': 1,
+    });
     expect(conditionKeys()).toContainEqual(K.link('nico', 'rocio'));
     const inviteDelete = transactionInput().TransactItems?.find(
       (item) => item.Delete?.Key?.['pk'] === familyInvite.pk,
@@ -639,10 +673,29 @@ describe('family mutations serialize with account closure', () => {
     await deleteFamilyLink(ctxOf(profile('rocio')), leaving.linkId);
 
     expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
-    expectOwnerGuards(['rocio', 'nico']);
+    expect(conditionKeys()).toEqual(
+      expect.arrayContaining([
+        accountClosureKey('rocio'),
+        K.profile('nico'),
+        accountClosureKey('nico'),
+      ]),
+    );
+    expect(conditionKeys()).not.toContainEqual(K.profile('rocio'));
     expect(conditionKeys()).toContainEqual(K.link('nico', 'abuela'));
     const deletion = transactionInput().TransactItems?.find((item) => item.Delete)?.Delete;
     expect(deletion?.ConditionExpression).toContain('linkId = :linkId');
+    const familyFence = transactionInput().TransactItems?.find(
+      (item) => item.Update?.Key?.['pk'] === K.profile('rocio').pk,
+    )?.Update;
+    expect(familyFence?.UpdateExpression).toBe('DELETE createdMinorIds :createdMinorIds');
+    expect(familyFence?.ConditionExpression).toContain('attribute_not_exists(familyFenceVersion)');
+    expect(familyFence?.ConditionExpression).toContain(
+      'familyFenceVersion = :familyFenceVersion AND contains(createdMinorIds, :minorId)',
+    );
+    expect(familyFence?.ExpressionAttributeValues).toMatchObject({
+      ':createdMinorIds': new Set(['nico']),
+      ':minorId': 'nico',
+    });
   });
 
   it('guards child friendship removal with the exact guardian link and every affected owner', async () => {

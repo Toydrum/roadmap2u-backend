@@ -131,7 +131,9 @@ describe('post-confirmation closure guard', () => {
     expect(transaction.TransactItems?.[0]?.Put?.Item).toMatchObject({
       ...K.profile('sub-rocio'),
       status: 'active',
+      familyFenceVersion: 1,
     });
+    expect(transaction.TransactItems?.[0]?.Put?.Item).not.toHaveProperty('createdMinorIds');
     expect(conditionChecks(transaction)).toContainEqual(
       expect.objectContaining({
         Key: accountClosureKey('sub-rocio'),

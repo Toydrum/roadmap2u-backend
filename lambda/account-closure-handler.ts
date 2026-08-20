@@ -20,7 +20,7 @@ interface ProfileWithStatus extends ProfileItem {
 
 export interface AccountClosureReceipt {
   readonly closureId: string;
-  readonly state: AccountClosureState;
+  readonly state: Exclude<AccountClosureState, 'blocked'>;
 }
 
 function requiredEnvironment(name: string): string {
@@ -70,6 +70,9 @@ export async function requestAccountClosure(
   );
   const existing = existingResult.Item as AccountClosureItem | undefined;
   if (typeof existing?.closureId === 'string') {
+    if (existing.state === 'blocked') {
+      throw new ApiError('CONFLICT', 'account closure is blocked by family ownership');
+    }
     if (existing.state !== 'completed') {
       await enqueueDurableClosure(deps, sub, existing.closureId);
     }
@@ -105,12 +108,14 @@ export async function requestAccountClosure(
     nextAttemptAt: now,
     gsi1pk: ACCOUNT_CLOSURE_OPEN_GSI_PK,
     gsi1sk: closureOpenSortKey(now, sub),
-    checkpoint: { phase: 'friendMirrors' },
+    checkpoint: { phase: 'inboundGuardianLinks' },
   };
   const profileCondition = [
     'attribute_exists(pk)',
     'accountType = :adult',
     '(attribute_not_exists(#status) OR #status = :active)',
+    'familyFenceVersion = :familyFenceVersion',
+    'attribute_not_exists(createdMinorIds)',
     'username = :username',
     profile.friendCode ? 'friendCode = :friendCode' : 'attribute_not_exists(friendCode)',
   ].join(' AND ');
@@ -137,6 +142,7 @@ export async function requestAccountClosure(
                 ':adult': 'adult',
                 ':active': 'active',
                 ':closing': 'closing',
+                ':familyFenceVersion': 1,
                 ':username': profile.username,
                 ...(profile.friendCode ? { ':friendCode': profile.friendCode } : {}),
               },
@@ -165,7 +171,19 @@ export async function requestAccountClosure(
       }),
     );
     const winner = winnerResult.Item as AccountClosureItem | undefined;
-    if (typeof winner?.closureId !== 'string') throw error;
+    if (typeof winner?.closureId !== 'string') {
+      const currentProfile = await readConsistent<ProfileWithStatus>(deps, K.profile(sub));
+      if (
+        currentProfile?.familyFenceVersion !== 1 ||
+        currentProfile.createdMinorIds !== undefined
+      ) {
+        throw new ApiError('CONFLICT', 'family ownership must be reconciled before closure');
+      }
+      throw error;
+    }
+    if (winner.state === 'blocked') {
+      throw new ApiError('CONFLICT', 'account closure is blocked by family ownership');
+    }
     if (winner.state !== 'completed') {
       await enqueueDurableClosure(deps, sub, winner.closureId);
     }
@@ -190,6 +208,13 @@ function sameGuardianMinorClosure(
 
 function isWritableProfile(profile: ProfileWithStatus | undefined): profile is ProfileWithStatus {
   return Boolean(profile && (profile.status === undefined || profile.status === 'active'));
+}
+
+function guardianFenceAllowsMinor(profile: ProfileWithStatus, minorSub: string): boolean {
+  const version = (profile as { familyFenceVersion?: unknown }).familyFenceVersion;
+  if (version === undefined) return true;
+  if (version !== 1) return false;
+  return profile.createdMinorIds instanceof Set && profile.createdMinorIds.has(minorSub);
 }
 
 async function readConsistent<T>(
@@ -217,6 +242,9 @@ export async function requestGuardianMinorClosure(
     if (!sameGuardianMinorClosure(existing, guardianSub, minorSub)) {
       throw new ApiError('CONFLICT', 'account closure belongs to another actor');
     }
+    if (existing.state === 'blocked') {
+      throw new ApiError('CONFLICT', 'minor closure is blocked by family ownership');
+    }
     if (existing.state !== 'completed') {
       await enqueueDurableClosure(deps, minorSub, existing.closureId);
     }
@@ -231,6 +259,9 @@ export async function requestGuardianMinorClosure(
   ]);
   if (!isWritableProfile(guardian) || guardian.accountType !== 'adult' || guardianClosure) {
     throw new ApiError('CONFLICT', 'guardian account is not writable');
+  }
+  if (!guardianFenceAllowsMinor(guardian, minorSub)) {
+    throw new ApiError('CONFLICT', 'guardian family ownership is not authoritative');
   }
   if (!isWritableProfile(minor) || minor.accountType !== 'minor') {
     throw new ApiError('NOT_FOUND');
@@ -261,7 +292,7 @@ export async function requestGuardianMinorClosure(
     nextAttemptAt: now,
     gsi1pk: ACCOUNT_CLOSURE_OPEN_GSI_PK,
     gsi1sk: closureOpenSortKey(now, minorSub),
-    checkpoint: { phase: 'friendMirrors' },
+    checkpoint: { phase: 'inboundGuardianLinks' },
   };
   const requestId = `${closureId}-requested`;
 
@@ -312,6 +343,8 @@ export async function requestGuardianMinorClosure(
                 '(attribute_not_exists(#status) OR #status = :active)',
                 'userId = :guardianSub',
                 'username = :guardianUsername',
+                '(attribute_not_exists(familyFenceVersion) OR familyFenceVersion = :familyFenceVersion)',
+                '(attribute_not_exists(familyFenceVersion) OR contains(createdMinorIds, :minorSub))',
               ].join(' AND '),
               ExpressionAttributeNames: { '#status': 'status' },
               ExpressionAttributeValues: {
@@ -319,6 +352,8 @@ export async function requestGuardianMinorClosure(
                 ':active': 'active',
                 ':guardianSub': guardianSub,
                 ':guardianUsername': guardian.username,
+                ':familyFenceVersion': 1,
+                ':minorSub': minorSub,
               },
             },
           },
@@ -379,6 +414,9 @@ export async function requestGuardianMinorClosure(
     const winner = await readConsistent<AccountClosureItem>(deps, closureKey);
     if (!sameGuardianMinorClosure(winner, guardianSub, minorSub)) {
       throw new ApiError('CONFLICT', 'minor closure request raced another mutation');
+    }
+    if (winner.state === 'blocked') {
+      throw new ApiError('CONFLICT', 'minor closure is blocked by family ownership');
     }
     if (winner.state !== 'completed') {
       await enqueueDurableClosure(deps, minorSub, winner.closureId);

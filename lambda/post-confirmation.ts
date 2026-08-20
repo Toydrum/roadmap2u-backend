@@ -63,6 +63,7 @@ export async function handleEvent(
     socialEnabled: true,
     createdAt: d.now(),
     status: 'active',
+    familyFenceVersion: 1,
     email: event.request.userAttributes['email'],
   };
   try {

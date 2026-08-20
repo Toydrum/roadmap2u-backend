@@ -53,6 +53,13 @@ export interface ProfileItem {
   createdAt: number;
   /** Missing on legacy profiles and therefore treated exactly like `active`. */
   status?: 'active' | 'closing';
+  /**
+   * Family-link serialization fence. Missing is a legacy profile still awaiting
+   * backfill; new adults are born at version 1. Unknown versions fail closed.
+   */
+  familyFenceVersion?: 1;
+  /** Created-minor ids owned by this guardian. An absent set is the empty set. */
+  createdMinorIds?: Set<string>;
   email?: string;
   /** Current friend code (CODE#F item is the authority; this is the pointer). */
   friendCode?: string;

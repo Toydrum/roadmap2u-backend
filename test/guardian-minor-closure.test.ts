@@ -128,7 +128,10 @@ describe('guardian-owned minor closure request', () => {
   });
 
   it('atomically snapshots the guardian actor, closes the minor, verifies the exact created link and audits before enqueue', async () => {
-    const guardian = profile('guardian-1', 'adult');
+    const guardian = profile('guardian-1', 'adult', {
+      familyFenceVersion: 1,
+      createdMinorIds: new Set(['minor-1']),
+    });
     const minor = profile('minor-1', 'minor', { friendCode: 'MINORCODE' });
     const link = createdLink();
     const enqueue = vi.fn(async () => undefined);
@@ -189,7 +192,11 @@ describe('guardian-owned minor closure request', () => {
       expect.arrayContaining([
         expect.objectContaining({
           Key: K.profile('guardian-1'),
-          ConditionExpression: expect.stringContaining('accountType = :adult'),
+          ConditionExpression: expect.stringContaining('familyFenceVersion = :familyFenceVersion'),
+          ExpressionAttributeValues: expect.objectContaining({
+            ':familyFenceVersion': 1,
+            ':minorSub': 'minor-1',
+          }),
         }),
         expect.objectContaining({
           Key: { pk: 'ACCOUNT_CLOSURE#guardian-1', sk: 'STATE' },
@@ -226,6 +233,32 @@ describe('guardian-owned minor closure request', () => {
         }),
       },
     });
+  });
+
+  it('rejects a version-1 guardian whose authoritative set does not contain the minor', async () => {
+    const guardian = profile('guardian-1', 'adult', {
+      familyFenceVersion: 1,
+      createdMinorIds: new Set(['other-minor']),
+    });
+    const minor = profile('minor-1', 'minor');
+    const link = createdLink();
+    const enqueue = vi.fn(async () => undefined);
+    const deps = closureDeps(enqueue);
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      if (key.pk === 'ACCOUNT_CLOSURE#minor-1') return {};
+      if (key.pk === K.user('guardian-1') && key.sk === 'PROFILE') return { Item: guardian };
+      if (key.pk === K.user('minor-1') && key.sk === 'PROFILE') return { Item: minor };
+      if (key.pk === link.pk && key.sk === link.sk) return { Item: link };
+      if (key.pk === 'ACCOUNT_CLOSURE#guardian-1') return {};
+      return {};
+    });
+
+    await expect(
+      requestGuardianMinorClosure(deps, 'guardian-1', 'minor-1'),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it('returns the same receipt for a duplicate request from the same guardian even after purge starts', async () => {
@@ -645,6 +678,209 @@ describe('guardian-minor closure worker coverage', () => {
     const deletes = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
     expect(deletes).toHaveLength(75);
     expect(deletes.length).toBeLessThanOrEqual(100);
+  });
+
+  it('removes an inbound created link and the guardian fence in one leased exact transaction', async () => {
+    const enqueue = vi.fn(async () => undefined);
+    const deps = closureDeps(enqueue);
+    const closure = guardianClosure({
+      state: 'purging',
+      revision: 8,
+      checkpoint: { phase: 'inboundGuardianLinks' } as never,
+    });
+    const leased = {
+      ...closure,
+      revision: 9,
+      leaseOwner: 'worker-1',
+      leaseUntil: NOW + 60_000,
+    };
+    const link = createdLink();
+    ddbMock.on(GetCommand).resolves({ Item: closure });
+    let updates = 0;
+    ddbMock.on(UpdateCommand).callsFake(() => {
+      updates += 1;
+      return updates === 1 ? { Attributes: leased } : {};
+    });
+    ddbMock.on(QueryCommand).resolves({ Items: [link] });
+    ddbMock.on(TransactWriteCommand).resolves({});
+
+    await processAccountClosureMessage(deps, {
+      sub: 'minor-1',
+      closureId: 'minor-closure-1',
+    });
+
+    const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(query).toMatchObject({
+      ConsistentRead: true,
+      Limit: 1,
+      ExpressionAttributeValues: {
+        ':pk': K.user('minor-1'),
+        ':prefix': 'GUARDIAN#',
+      },
+    });
+    expect(query.IndexName).toBeUndefined();
+    expect(ddbMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
+    const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            Key: { pk: 'ACCOUNT_CLOSURE#minor-1', sk: 'STATE' },
+            ConditionExpression: expect.stringContaining('leaseOwner = :leaseOwner'),
+          }),
+        }),
+        expect.objectContaining({
+          Delete: expect.objectContaining({
+            Key: K.link('minor-1', 'guardian-1'),
+            ConditionExpression: expect.stringContaining('linkId = :linkId'),
+          }),
+        }),
+        expect.objectContaining({
+          Update: expect.objectContaining({
+            Key: K.profile('guardian-1'),
+            UpdateExpression: 'DELETE createdMinorIds :createdMinorIds',
+            ConditionExpression: expect.stringContaining(
+              'familyFenceVersion = :familyFenceVersion AND contains(createdMinorIds, :minorId)',
+            ),
+            ExpressionAttributeValues: expect.objectContaining({
+              ':createdMinorIds': new Set(['minor-1']),
+              ':minorId': 'minor-1',
+            }),
+          }),
+        }),
+      ]),
+    );
+    expect(enqueue).toHaveBeenCalledWith({ sub: 'minor-1', closureId: 'minor-closure-1' });
+  });
+
+  it('re-reads an empty inbound-link phase on retry before advancing the checkpoint', async () => {
+    const enqueue = vi.fn(async () => undefined);
+    const deps = closureDeps(enqueue);
+    const closure = guardianClosure({
+      state: 'purging',
+      revision: 8,
+      checkpoint: { phase: 'inboundGuardianLinks' } as never,
+    });
+    const leased = {
+      ...closure,
+      revision: 9,
+      leaseOwner: 'worker-1',
+      leaseUntil: NOW + 60_000,
+    };
+    ddbMock.on(GetCommand).resolves({ Item: closure });
+    let updates = 0;
+    ddbMock.on(UpdateCommand).callsFake(() => {
+      updates += 1;
+      return updates === 1 ? { Attributes: leased } : {};
+    });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    await processAccountClosureMessage(deps, {
+      sub: 'minor-1',
+      closureId: 'minor-closure-1',
+    });
+
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    const checkpoint = ddbMock.commandCalls(UpdateCommand)[1].args[0].input;
+    expect(checkpoint.ExpressionAttributeValues?.[':checkpoint']).toEqual({
+      phase: 'friendMirrors',
+    });
+  });
+
+  it('durably blocks a self-adult closure that discovers a created link', async () => {
+    const enqueue = vi.fn(async () => undefined);
+    const deps = closureDeps(enqueue);
+    const closure = guardianClosure({
+      pk: 'ACCOUNT_CLOSURE#adult-1',
+      closureId: 'adult-closure-1',
+      kind: 'self_adult',
+      actorSub: 'adult-1',
+      sub: 'adult-1',
+      username: 'adult-1',
+      state: 'purging',
+      revision: 8,
+      checkpoint: { phase: 'inboundGuardianLinks' } as never,
+    });
+    const leased = {
+      ...closure,
+      revision: 9,
+      leaseOwner: 'worker-1',
+      leaseUntil: NOW + 60_000,
+    };
+    const drift = createdLink('guardian-1', 'adult-1');
+    ddbMock.on(GetCommand).resolves({ Item: closure });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: leased });
+    ddbMock.on(QueryCommand).resolves({ Items: [drift] });
+    ddbMock.on(TransactWriteCommand).resolves({});
+
+    await processAccountClosureMessage(deps, {
+      sub: 'adult-1',
+      closureId: 'adult-closure-1',
+    });
+
+    const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
+    const blocked = items.find((item) => item.Update)?.Update;
+    expect(blocked).toMatchObject({
+      Key: { pk: 'ACCOUNT_CLOSURE#adult-1', sk: 'STATE' },
+      ConditionExpression: expect.stringContaining('leaseOwner = :leaseOwner'),
+      ExpressionAttributeValues: expect.objectContaining({ ':nextState': 'blocked' }),
+    });
+    expect(blocked?.UpdateExpression).toContain('REMOVE gsi1pk, gsi1sk, nextAttemptAt');
+    expect(items.some((item) => item.Delete)).toBe(false);
+    expect(items.find((item) => item.ConditionCheck)?.ConditionCheck?.Key).toEqual(
+      K.link('adult-1', 'guardian-1'),
+    );
+    expect(items.find((item) => item.Put?.TableName === 'roadmap-access-audit-dev')?.Put?.Item)
+      .toMatchObject({
+        action: 'account_closure.blocked',
+        details: expect.objectContaining({ reason: 'created_family_link' }),
+      });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
+  });
+
+  it('routes a GUARDIAN record found during generic purge back through the exact leased path', async () => {
+    const deps = closureDeps();
+    const closure = guardianClosure({
+      state: 'purging',
+      revision: 8,
+      checkpoint: { phase: 'userPartition' },
+    });
+    const leased = {
+      ...closure,
+      revision: 9,
+      leaseOwner: 'worker-1',
+      leaseUntil: NOW + 60_000,
+    };
+    ddbMock.on(GetCommand).resolves({ Item: closure });
+    let updates = 0;
+    ddbMock.on(UpdateCommand).callsFake(() => {
+      updates += 1;
+      return updates === 1 ? { Attributes: leased } : {};
+    });
+    let queries = 0;
+    ddbMock.on(QueryCommand).callsFake(() => {
+      queries += 1;
+      return { Items: [createdLink(), { ...K.profile('minor-1'), userId: 'minor-1' }] };
+    });
+    ddbMock.on(TransactWriteCommand).resolves({});
+
+    await processAccountClosureMessage(deps, {
+      sub: 'minor-1',
+      closureId: 'minor-closure-1',
+    });
+
+    expect(queries).toBe(2);
+    expect(ddbMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
+    const exact = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
+    expect(exact.find((item) => item.Delete)?.Delete?.Key).toEqual(
+      K.link('minor-1', 'guardian-1'),
+    );
+    expect(exact.find((item) => item.Update)?.Update?.Key).toEqual(K.profile('guardian-1'));
+    const checkpoint = ddbMock.commandCalls(UpdateCommand)[1].args[0].input;
+    expect(checkpoint.ExpressionAttributeValues?.[':checkpoint']).toEqual({
+      phase: 'inboundGuardianLinks',
+    });
   });
 
   it('never swallows a transient Cognito delete failure for guardian-minor closures', async () => {
