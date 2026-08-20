@@ -5,7 +5,7 @@ import {
   closureAbsenceConditionCheck,
   guardiansOf,
   minorsOf,
-  profileOf,
+  profileOfConsistent,
   requireWritableOwner,
   toPublic,
 } from '../authz';
@@ -30,14 +30,14 @@ export async function getMe(ctx: Ctx): Promise<MeResponse> {
 
   const guardians: FamilyLinkView[] = [];
   for (const link of guardianLinks) {
-    const other = await profileOf(ctx.deps, link.guardianId);
-    if (!other) continue; // dangling link — deletion cascade raced; hide it
+    const other = await profileOfConsistent(ctx.deps, link.guardianId);
+    if (!other || (other.status !== undefined && other.status !== 'active')) continue;
     guardians.push({ linkId: link.linkId, kind: link.kind, user: toPublic(other, false), createdAt: link.createdAt });
   }
   const minors: FamilyLinkView[] = [];
   for (const link of minorLinks) {
-    const other = await profileOf(ctx.deps, link.minorId);
-    if (!other) continue;
+    const other = await profileOfConsistent(ctx.deps, link.minorId);
+    if (!other || (other.status !== undefined && other.status !== 'active')) continue;
     minors.push({ linkId: link.linkId, kind: link.kind, user: toPublic(other, true), createdAt: link.createdAt });
   }
   return { profile: profileView(ctx.caller), family: { guardians, minors } };

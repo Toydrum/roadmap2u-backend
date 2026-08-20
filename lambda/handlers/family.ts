@@ -3,6 +3,8 @@
   AdminDeleteUserCommand,
   AdminSetUserPasswordCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
+import { randomUUID } from 'node:crypto';
+import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
   ApiError,
   CodeGrant,
@@ -38,22 +40,28 @@ import {
   requireWritableOwner,
   toPublic,
 } from '../authz';
-import { accountClosureKey } from '../account-closure';
+import { accountClosureKey, type AccountClosureDeps } from '../account-closure';
+import {
+  realAccountClosureRequestDeps,
+  requestGuardianMinorClosure,
+} from '../account-closure-handler';
 import {
   CodeItem,
-  FriendItem,
   FriendRequestItem,
   K,
   LinkItem,
   ProfileItem,
   RecordItem,
-  batchWriteAll,
   composite,
   getItem,
   queryPrefix,
   readRateCount,
 } from '../db';
 import { friendCode, tempPassword } from '../codes';
+import {
+  guardianInviteMirrors,
+  idempotentGuardianInviteMirrorDelete,
+} from '../guardian-invites';
 import { profileView } from './me';
 import { friendsOf, removeFriendshipAs } from './friends';
 import {
@@ -69,6 +77,7 @@ import {
 } from './guarded-mutation';
 
 const INVITE_TTL_MS = 72 * 3600 * 1000;
+const IDENTITY_OPERATION_LEASE_MS = 60_000;
 
 async function requireCreatedGuardianConsistent(ctx: Ctx, minorId: string): Promise<LinkItem> {
   const current = await requireGuardianOfConsistent(ctx, minorId);
@@ -212,20 +221,83 @@ export async function createChild(
 export async function resetChildPassword(
   ctx: Ctx,
   minorId: string,
+  nextIdentityLeaseId: () => string = randomUUID,
 ): Promise<{ tempPassword: string }> {
-  await requireCreatedGuardianConsistent(ctx, minorId);
+  const guardianLink = await requireCreatedGuardianConsistent(ctx, minorId);
   await requireWritableOwner(ctx, ctx.callerId);
   const child = await requireWritableOwner(ctx, minorId);
   const password = tempPassword();
-  await ctx.deps.cognito.send(
-    new AdminSetUserPasswordCommand({
-      UserPoolId: ctx.deps.userPoolId,
-      Username: child.username,
-      Password: password,
-      Permanent: false, // next sign-in lands in the newPasswordRequired step
-    }),
+  const identityLeaseOwner = nextIdentityLeaseId();
+  const now = ctx.deps.now();
+  await guardedWrite(
+    ctx,
+    [ctx.callerId, minorId],
+    [
+      {
+        Update: {
+          TableName: ctx.deps.table,
+          Key: K.profile(minorId),
+          UpdateExpression:
+            'SET identityLeaseOwner = :identityLeaseOwner, identityLeaseUntil = :identityLeaseUntil',
+          ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND (attribute_not_exists(identityLeaseUntil) OR identityLeaseUntil < :now)`,
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: {
+            ':active': 'active',
+            ':identityLeaseOwner': identityLeaseOwner,
+            ':identityLeaseUntil': now + IDENTITY_OPERATION_LEASE_MS,
+            ':now': now,
+          },
+        },
+      },
+      closureAbsenceConditionCheck(ctx.deps, minorId),
+      exactLinkOperation(ctx.deps, guardianLink, 'check'),
+    ],
+    async () => {
+      const currentLink = await requireCreatedGuardianConsistent(ctx, minorId);
+      if (!sameLink(currentLink, guardianLink)) return;
+    },
+    { [minorId]: { profile: true, closure: true } },
   );
+
+  let failure: unknown;
+  try {
+    await ctx.deps.cognito.send(
+      new AdminSetUserPasswordCommand({
+        UserPoolId: ctx.deps.userPoolId,
+        Username: child.username,
+        Password: password,
+        Permanent: false, // next sign-in lands in the newPasswordRequired step
+      }),
+    );
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    await ctx.deps.ddb.send(
+      new UpdateCommand({
+        TableName: ctx.deps.table,
+        Key: K.profile(minorId),
+        UpdateExpression: 'REMOVE identityLeaseOwner, identityLeaseUntil',
+        ConditionExpression: 'identityLeaseOwner = :identityLeaseOwner',
+        ExpressionAttributeValues: { ':identityLeaseOwner': identityLeaseOwner },
+      }),
+    );
+  } catch (error) {
+    failure ??= error;
+  }
+  if (failure) throw failure;
   return { tempPassword: password };
+}
+
+function familyInviteDeleteOperations(ctx: Ctx, invite: CodeItem) {
+  return [
+    exactCodeOperation(ctx.deps, invite, 'delete'),
+    ...(invite.closureMirrorVersion === 1
+      ? guardianInviteMirrors(invite).map((mirror) =>
+          idempotentGuardianInviteMirrorDelete(ctx.deps, mirror),
+        )
+      : []),
+  ];
 }
 
 export async function patchChild(
@@ -301,32 +373,12 @@ export async function exportChild(ctx: Ctx, minorId: string): Promise<ExportEnve
 }
 
 /** Export-first is the CLIENT flow; the server purge is total and final. */
-export async function deleteChild(ctx: Ctx, minorId: string): Promise<void> {
-  await requireCreatedGuardianOf(ctx, minorId);
-  const child = await profileOf(ctx.deps, minorId);
-  if (!child) throw new ApiError('NOT_FOUND');
-
-  await ctx.deps.cognito
-    .send(new AdminDeleteUserCommand({ UserPoolId: ctx.deps.userPoolId, Username: child.username }))
-    .catch(() => {}); // identity may already be gone; the purge still runs
-
-  // Friendship mirrors live on OTHER users' partitions — collect before purge.
-  const friendEdges = await queryPrefix<FriendItem>(ctx.deps, K.user(minorId), 'FRIEND#');
-  const partition = await queryPrefix<{ pk: string; sk: string }>(ctx.deps, K.user(minorId), '');
-  const keys: { pk: string; sk: string }[] = [
-    ...partition.map(({ pk, sk }) => ({ pk, sk })),
-    ...friendEdges.map((edge) => {
-      const otherId = edge.userA === minorId ? edge.userB : edge.userA;
-      return K.friend(otherId, minorId);
-    }),
-    K.uniqUsername(child.username),
-  ];
-  if (child.friendCode) keys.push(K.codeF(child.friendCode));
-  await batchWriteAll(
-    ctx.deps,
-    keys.map((key) => ({ DeleteRequest: { Key: key } })),
-  );
-  // Guardian invites for this minor expire via TTL (≤72 h) — acceptable orphan.
+export async function deleteChild(
+  ctx: Ctx,
+  minorId: string,
+  closureDeps: AccountClosureDeps = realAccountClosureRequestDeps(ctx.deps),
+): Promise<void> {
+  await requestGuardianMinorClosure(closureDeps, ctx.callerId, minorId);
 }
 
 // ── Links & invites ─────────────────────────────────────────────────────────
@@ -386,6 +438,7 @@ export async function createFamilyInvite(ctx: Ctx, body: FamilyInviteRequest): P
     kind: body.kind,
     userId: ctx.callerId,
     ...(minorId ? { minorId } : {}),
+    closureMirrorVersion: 1,
     expiresAt,
     ttl: Math.ceil(expiresAt / 1000),
   } satisfies CodeItem & { pk: string; sk: string };
@@ -401,6 +454,13 @@ export async function createFamilyInvite(ctx: Ctx, body: FamilyInviteRequest): P
           ConditionExpression: 'attribute_not_exists(pk)',
         },
       },
+      ...guardianInviteMirrors(item).map((mirror) => ({
+        Put: {
+          TableName: ctx.deps.table,
+          Item: mirror,
+          ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+        },
+      })),
       ...(issuerLink ? [exactLinkOperation(ctx.deps, issuerLink, 'check')] : []),
     ],
     issuerLink
@@ -461,7 +521,7 @@ export async function acceptFamilyInvite(
             ConditionExpression: 'attribute_not_exists(pk)',
           },
         },
-        exactCodeOperation(ctx.deps, invite, 'delete'),
+        ...familyInviteDeleteOperations(ctx, invite),
         exactLinkOperation(ctx.deps, issuerLink, 'check'),
       ],
       async () => {
@@ -506,7 +566,7 @@ export async function acceptFamilyInvite(
           ConditionExpression: 'attribute_not_exists(pk)',
         },
       },
-      exactCodeOperation(ctx.deps, invite, 'delete'),
+      ...familyInviteDeleteOperations(ctx, invite),
     ],
     async () => {
       const [currentInvite, currentLink] = await Promise.all([
@@ -531,7 +591,7 @@ export async function revokeFamilyInvite(ctx: Ctx, code: string): Promise<void> 
   await guardedWrite(
     ctx,
     [ctx.callerId, ...(invite.minorId ? [invite.minorId] : [])],
-    [exactCodeOperation(ctx.deps, invite, 'delete')],
+    familyInviteDeleteOperations(ctx, invite),
     async () => {
       const current = await getConsistent<CodeItem>(ctx, K.codeG(code));
       if (!current || current.userId !== ctx.callerId) throw new ApiError('NOT_FOUND');

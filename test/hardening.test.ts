@@ -1,28 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import {
-  AdminDeleteUserCommand,
-  CognitoIdentityProviderClient,
-} from '@aws-sdk/client-cognito-identity-provider';
+import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import {
   BatchWriteCommand,
   DynamoDBDocumentClient,
-  GetCommand,
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
-import { Ctx } from '../lambda/authz';
 import {
   Deps,
-  FriendItem,
-  K,
-  LinkItem,
-  ProfileItem,
   batchWriteAll,
   queryPrefix,
   queryPrefixPage,
 } from '../lambda/db';
-import { deleteChild } from '../lambda/handlers/family';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
@@ -200,71 +190,4 @@ describe('DynamoDB hardening', () => {
     expect(ddbMock.commandCalls(BatchWriteCommand)).toHaveLength(8);
   });
 
-  it('deleteChild retries an unprocessed deletion before reporting success', async () => {
-    vi.useFakeTimers();
-    vi.spyOn(Math, 'random').mockReturnValue(0);
-    const guardian: ProfileItem = {
-      ...K.profile('guardian'),
-      userId: 'guardian',
-      username: 'guardian',
-      displayName: 'Guardian',
-      accountType: 'adult',
-      socialEnabled: true,
-      createdAt: 1,
-    };
-    const child: ProfileItem = {
-      ...K.profile('child'),
-      userId: 'child',
-      username: 'child-name',
-      displayName: 'Child',
-      accountType: 'minor',
-      socialEnabled: false,
-      createdAt: 2,
-    };
-    const guardianLink: LinkItem = {
-      ...K.link('child', 'guardian'),
-      gsi1pk: K.user('guardian'),
-      gsi1sk: 'MINOR#child',
-      linkId: 'guardian~child',
-      kind: 'created',
-      guardianId: 'guardian',
-      minorId: 'child',
-      createdAt: 3,
-    };
-    const friendEdge: FriendItem = {
-      ...K.friend('child', 'friend'),
-      friendshipId: 'child~friend',
-      userA: 'child',
-      userB: 'friend',
-      createdAt: 4,
-    };
-    const pendingDelete = { DeleteRequest: { Key: K.friend('friend', 'child') } };
-    const context: Ctx = { callerId: 'guardian', caller: guardian, deps: deps() };
-    ddbMock.on(GetCommand).callsFake((input) => {
-      const key = input.Key as { pk: string; sk: string };
-      if (key.pk === guardianLink.pk && key.sk === guardianLink.sk) return { Item: guardianLink };
-      if (key.pk === child.pk && key.sk === child.sk) return { Item: child };
-      return { Item: undefined };
-    });
-    ddbMock.on(QueryCommand).callsFake((input) => {
-      const values = input.ExpressionAttributeValues as Record<string, string>;
-      if (values[':prefix'] === 'FRIEND#') return { Items: [friendEdge] };
-      return { Items: [{ pk: child.pk, sk: child.sk }] };
-    });
-    cognitoMock.on(AdminDeleteUserCommand).resolves({});
-    ddbMock
-      .on(BatchWriteCommand)
-      .resolvesOnce({ UnprocessedItems: { roadmap: [pendingDelete] } })
-      .resolvesOnce({});
-
-    const deletion = deleteChild(context, 'child');
-    await vi.runAllTimersAsync();
-
-    await expect(deletion).resolves.toBeUndefined();
-    const batches = ddbMock
-      .commandCalls(BatchWriteCommand)
-      .map(({ args }) => args[0].input.RequestItems?.['roadmap']);
-    expect(batches).toHaveLength(2);
-    expect(batches[1]).toEqual([pendingDelete]);
-  });
 });

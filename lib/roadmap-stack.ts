@@ -499,6 +499,19 @@ export class RoadmapStack extends Stack {
         },
       }),
     );
+    accountClosureWorkerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyGuardianInviteDeletes',
+        actions: ['dynamodb:DeleteItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'CODE#G#*'],
+          },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
     accountClosureWorker.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['cognito-idp:AdminDeleteUser'],
@@ -602,14 +615,57 @@ export class RoadmapStack extends Stack {
       timeout: Duration.seconds(15),
       role: routerRole,
       logGroup: createFunctionLogGroup(this, 'RouterLogs', routerName, stage),
-      environment: { TABLE_NAME: table.tableName, USER_POOL_ID: pool.userPoolId },
+      environment: {
+        TABLE_NAME: table.tableName,
+        USER_POOL_ID: pool.userPoolId,
+        AUDIT_TABLE_NAME: accessAuditTable.tableName,
+        ACCOUNT_CLOSURE_QUEUE_URL: accountClosureQueue.queueUrl,
+      },
       bundling: {
         format: OutputFormat.ESM,
         tsconfig: join(here, '../tsconfig.json'),
         target: 'node22',
       },
     });
-    table.grantReadWriteData(router);
+    routerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'RouterPrimaryDataAccess',
+        actions: [
+          'dynamodb:BatchGetItem',
+          'dynamodb:BatchWriteItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:DescribeTable',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:Query',
+          'dynamodb:Scan',
+          'dynamodb:UpdateItem',
+        ],
+        resources: [table.tableArn, `${table.tableArn}/index/*`],
+      }),
+    );
+    routerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyRouterConditionChecks',
+        actions: ['dynamodb:ConditionCheckItem'],
+        resources: [table.tableArn],
+        conditions: {
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    accountClosureQueue.grantSendMessages(router);
+    routerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyRouterClosureAudit',
+        actions: ['dynamodb:PutItem'],
+        resources: [accessAuditTable.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#*' },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
     denyCommercialConfigWrites(routerRole, table);
     router.addToRolePolicy(
       new iam.PolicyStatement({

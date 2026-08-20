@@ -132,6 +132,7 @@ describe('account closure infrastructure', () => {
     expect(workerActions).toEqual(
       expect.arrayContaining([
         'dynamodb:BatchWriteItem',
+        'dynamodb:DeleteItem',
         'dynamodb:GetItem',
         'dynamodb:PutItem',
         'dynamodb:Query',
@@ -149,7 +150,18 @@ describe('account closure infrastructure', () => {
       'cognito-idp:AdminDeleteUser',
     ]);
     expect(workerActions).not.toContain('dynamodb:Scan');
-    expect(workerActions).not.toContain('dynamodb:DeleteItem');
+    const transactionalDeletes = workerAllowStatements.filter((statement) =>
+      (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).includes(
+        'dynamodb:DeleteItem',
+      ),
+    );
+    expect(transactionalDeletes).toHaveLength(1);
+    expect(transactionalDeletes[0].Condition).toEqual({
+      'ForAllValues:StringLike': {
+        'dynamodb:LeadingKeys': ['USER#*', 'CODE#G#*'],
+      },
+      StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+    });
 
     const reconcilerStatements = roleStatementsFor(template, reconciler);
     const reconcilerAllowStatements = reconcilerStatements.filter(

@@ -20,15 +20,23 @@ import {
   type FriendItem,
 } from './db';
 import { instrumentHandler } from './observability';
+import {
+  guardianInviteClosureDeletes,
+  guardianInviteFromMirror,
+  type GuardianInviteMirrorItem,
+} from './guardian-invites';
 
 export const ACCOUNT_CLOSURE_OPEN_GSI_PK = 'ACCOUNT_CLOSURE#OPEN';
 
 export type AccountClosureState = 'requested' | 'purging' | 'purgeComplete' | 'completed';
 
+export type AccountClosureKind = 'self_adult' | 'guardian_minor';
+
 export type AccountClosurePhase =
   | 'friendMirrors'
   | 'outgoingFriendRequests'
   | 'guardianLinks'
+  | 'guardianInvites'
   | 'directMirrors'
   | 'userPartition';
 
@@ -42,6 +50,10 @@ export interface AccountClosureItem {
   readonly pk: string;
   readonly sk: 'STATE';
   readonly closureId: string;
+  /** Optional only for closure records created before closure kinds were introduced. */
+  readonly kind?: AccountClosureKind;
+  /** Actor snapshot; guardian-minor retries are authorized against this value. */
+  readonly actorSub?: string;
   readonly sub: string;
   readonly username: string;
   readonly friendCode?: string;
@@ -216,7 +228,7 @@ async function purgeIndexedMirrorPage(
   closure: AccountClosureItem,
   prefix: 'FREQ#' | 'MINOR#',
   currentPhase: 'outgoingFriendRequests' | 'guardianLinks',
-  nextPhase: 'guardianLinks' | 'directMirrors',
+  nextPhase: 'guardianLinks' | 'guardianInvites',
 ): Promise<number | undefined> {
   const page = await queryPrefixPage<{ pk: string; sk: string }>(
     deps,
@@ -260,6 +272,42 @@ async function purgeIndexedMirrorPage(
   }
   await saveClosureCheckpoint(deps, closure, { phase: nextPhase });
   return undefined;
+}
+
+async function purgeGuardianInvitePage(
+  deps: AccountClosureDeps,
+  closure: AccountClosureItem,
+): Promise<void> {
+  // One mirrored co-guardian invite expands to CODE + issuer mirror + minor
+  // mirror. A 25-record page produces at most 75 of DynamoDB's 100 actions.
+  const page = await queryPrefixPage<GuardianInviteMirrorItem>(
+    deps,
+    K.user(closure.sub),
+    'GINVITE#',
+    {
+      limit: 25,
+      exclusiveStartKey: closure.checkpoint?.exclusiveStartKey,
+      consistentRead: true,
+    },
+  );
+  if (page.items.length) {
+    await deps.ddb.send(
+      new TransactWriteCommand({
+        TransactItems: page.items.flatMap((mirror) =>
+          guardianInviteClosureDeletes(deps, guardianInviteFromMirror(mirror)),
+        ),
+      }),
+    );
+    await saveClosureCheckpoint(
+      deps,
+      closure,
+      page.lastEvaluatedKey
+        ? { phase: 'guardianInvites', exclusiveStartKey: page.lastEvaluatedKey }
+        : { phase: 'guardianInvites' },
+    );
+    return;
+  }
+  await saveClosureCheckpoint(deps, closure, { phase: 'directMirrors' });
 }
 
 async function purgeDirectMirrors(
@@ -457,8 +505,11 @@ export async function processAccountClosureMessage(
           leased,
           'MINOR#',
           'guardianLinks',
-          'directMirrors',
+          'guardianInvites',
         );
+        break;
+      case 'guardianInvites':
+        await purgeGuardianInvitePage(deps, leased);
         break;
       case 'directMirrors':
         await purgeDirectMirrors(deps, leased);
@@ -509,7 +560,13 @@ export async function processAccountClosureMessage(
           action: 'account_closure.purging',
           actor: 'system:account-closure-worker',
           subject: closure.sub,
-          details: { closureId: closure.closureId, from: closure.state, to: 'purging' },
+          details: {
+            closureId: closure.closureId,
+            kind: closure.kind ?? 'self_adult',
+            ...(closure.actorSub ? { actorSub: closure.actorSub } : {}),
+            from: closure.state,
+            to: 'purging',
+          },
         }),
       ],
     }),

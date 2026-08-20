@@ -69,6 +69,21 @@ export async function profileOf(deps: Deps, userId: string): Promise<ProfileItem
   return getItem<ProfileItem>(deps, K.profile(userId));
 }
 
+/** Strong read for lifecycle-sensitive listings and authorization decisions. */
+export async function profileOfConsistent(
+  deps: Deps,
+  userId: string,
+): Promise<ProfileItem | null> {
+  const result = await deps.ddb.send(
+    new GetCommand({
+      TableName: deps.table,
+      Key: K.profile(userId),
+      ConsistentRead: true,
+    }),
+  );
+  return (result.Item as ProfileItem | undefined) ?? null;
+}
+
 /** Consistent preflight for every mutation owned by one account. */
 export async function requireWritableOwner(ctx: Ctx, ownerId: string): Promise<ProfileItem> {
   const [profileResult, closureResult] = await Promise.all([

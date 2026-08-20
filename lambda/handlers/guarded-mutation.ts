@@ -180,6 +180,9 @@ export function exactCodeOperation(
     'expiresAt = :expiresAt',
     '#ttl = :ttl',
     item.minorId === undefined ? 'attribute_not_exists(#minorId)' : '#minorId = :minorId',
+    item.closureMirrorVersion === undefined
+      ? 'attribute_not_exists(#closureMirrorVersion)'
+      : '#closureMirrorVersion = :closureMirrorVersion',
   ].join(' AND ');
   const common = {
     TableName: deps.table,
@@ -191,6 +194,7 @@ export function exactCodeOperation(
       '#userId': 'userId',
       '#ttl': 'ttl',
       '#minorId': 'minorId',
+      '#closureMirrorVersion': 'closureMirrorVersion',
     },
     ExpressionAttributeValues: {
       ':code': item.code,
@@ -199,6 +203,9 @@ export function exactCodeOperation(
       ':expiresAt': item.expiresAt,
       ':ttl': item.ttl,
       ...(item.minorId === undefined ? {} : { ':minorId': item.minorId }),
+      ...(item.closureMirrorVersion === undefined
+        ? {}
+        : { ':closureMirrorVersion': item.closureMirrorVersion }),
     },
   };
   return operation === 'check' ? { ConditionCheck: common } : { Delete: common };
@@ -303,6 +310,7 @@ export function sameCode(a: CodeItem, b: CodeItem): boolean {
     a.kind === b.kind &&
     a.userId === b.userId &&
     a.minorId === b.minorId &&
+    a.closureMirrorVersion === b.closureMirrorVersion &&
     a.expiresAt === b.expiresAt &&
     a.ttl === b.ttl
   );

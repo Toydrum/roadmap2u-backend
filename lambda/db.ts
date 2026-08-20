@@ -56,6 +56,9 @@ export interface ProfileItem {
   email?: string;
   /** Current friend code (CODE#F item is the authority; this is the pointer). */
   friendCode?: string;
+  /** Short-lived lease for Cognito mutations that must serialize with closure. */
+  identityLeaseOwner?: string;
+  identityLeaseUntil?: number;
 }
 
 export interface LinkItem {
@@ -99,6 +102,8 @@ export interface CodeItem {
   kind: 'friend' | 'coGuardian' | 'linkExisting';
   userId: string;
   minorId?: string;
+  /** New family invites have discoverable closure mirrors; legacy codes omit it. */
+  closureMirrorVersion?: 1;
   expiresAt: number;
   ttl: number;
 }
