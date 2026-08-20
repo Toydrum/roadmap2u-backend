@@ -206,9 +206,9 @@ describe('GitHub OIDC bootstrap', () => {
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
     ) as any[];
 
-    expect(managedPolicies).toHaveLength(18);
+    expect(managedPolicies).toHaveLength(21);
     expect(new Set(managedPolicies.map((policy) => policy.Properties.ManagedPolicyName)).size).toBe(
-      18,
+      21,
     );
     for (const stage of ['dev', 'test', 'prod']) {
       const stagePolicies = managedPolicies.filter(
@@ -220,6 +220,7 @@ describe('GitHub OIDC bootstrap', () => {
         `roadmap2u-${stage}-cfn-data`,
         `roadmap2u-${stage}-cfn-edge`,
         `roadmap2u-${stage}-cfn-observability`,
+        `roadmap2u-${stage}-inventory-runtime-boundary`,
         `roadmap2u-${stage}-runtime-boundary`,
       ]);
 
@@ -330,13 +331,16 @@ describe('GitHub OIDC bootstrap', () => {
       expect(JSON.stringify(commercialHttpFunctions.Resource)).not.toContain(
         `roadmap-catalog-${stage === 'dev' ? 'test' : 'dev'}`,
       );
-      expect(commercialHttpLogs.Resource).toHaveLength(2);
-      expect(commercialHttpLogTags.Resource).toHaveLength(2);
+      expect(commercialHttpLogs.Resource).toHaveLength(3);
+      expect(commercialHttpLogTags.Resource).toHaveLength(3);
       expect(JSON.stringify(commercialHttpLogs.Resource)).toContain(
         `/aws/lambda/roadmap-catalog-${stage}:*`,
       );
       expect(JSON.stringify(commercialHttpLogs.Resource)).toContain(
         `/aws/lambda/roadmap-access-reader-${stage}:*`,
+      );
+      expect(JSON.stringify(commercialHttpLogs.Resource)).toContain(
+        `/aws/lambda/roadmap-commercial-inventory-executor-${stage}:*`,
       );
       expect(JSON.stringify(commercialHttpLogTags.Resource)).not.toContain(':*');
 
@@ -1568,6 +1572,34 @@ describe('GitHub OIDC bootstrap', () => {
       });
     }
     expect(JSON.stringify(statements)).not.toMatch(/logs:(Delete|PutRetention|Create)/);
+  });
+
+  it('lets each backend deployment gate read only its inventory boundary and the control-plane outputs', () => {
+    const statements = Object.values(bootstrapTemplate().toJSON().Resources)
+      .filter((resource: any) => resource.Type === 'AWS::IAM::Policy')
+      .flatMap((resource: any) => resource.Properties.PolicyDocument.Statement);
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const stackRead = statements.find(
+        (statement: any) =>
+          statement.Sid === `ReadCommercialInventoryControlPlaneStack${stage}`,
+      );
+      const boundaryRead = statements.find(
+        (statement: any) => statement.Sid === `ReadCommercialInventoryBoundary${stage}`,
+      );
+      expect(stackRead).toMatchObject({
+        Action: 'cloudformation:DescribeStacks',
+        Effect: 'Allow',
+      });
+      expect(JSON.stringify(stackRead.Resource)).toContain(':stack/Roadmap-CiBootstrap/*');
+      expect(boundaryRead).toMatchObject({
+        Action: 'iam:GetPolicy',
+        Effect: 'Allow',
+      });
+      expect(JSON.stringify(boundaryRead.Resource)).toContain(
+        `:policy/roadmap2u/${stage}/roadmap2u-${stage}-inventory-runtime-boundary`,
+      );
+    }
   });
 
   it('lets the dedicated DNS role write only the captured DNS backup', () => {

@@ -132,6 +132,7 @@ describe('commercial alarms', () => {
         'roadmap-account-closure-worker-dev',
         'roadmap-catalog-dev',
         'roadmap-commercial-config-broker-dev',
+        'roadmap-commercial-inventory-executor-dev',
         'roadmap-post-confirmation-dev',
         'roadmap-pre-signup-dev',
         'roadmap-router-dev',
@@ -309,7 +310,7 @@ describe('commercial alarms', () => {
         resource.Type === 'AWS::SNS::Topic' || resource.Type === 'AWS::CloudWatch::Alarm',
     ) as any[];
 
-    expect(protectedResources).toHaveLength(40);
+    expect(protectedResources).toHaveLength(43);
     for (const resource of protectedResources) {
       expect(resource.DeletionPolicy).toBe('Retain');
       expect(resource.UpdateReplacePolicy).toBe('Retain');

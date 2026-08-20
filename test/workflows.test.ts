@@ -270,6 +270,21 @@ describe('backend GitHub Actions', () => {
     expect(contents).not.toContain('[[ "$STATUS" == *_COMPLETE ]]');
   });
 
+  it('fails closed unless the stage inventory boundary exists before CDK diff', () => {
+    const contents = workflow('deploy.yml');
+    const gate = namedStep(contents, 'Validate commercial inventory control plane');
+    const diff = contents.indexOf('Review CDK diff');
+
+    expect(gate).toContain("--stack-name 'Roadmap-CiBootstrap'");
+    expect(gate).toContain('${STAGE}InventoryRuntimeBoundaryArn');
+    expect(gate).toContain(
+      'policy/roadmap2u/${STAGE}/roadmap2u-${STAGE}-inventory-runtime-boundary',
+    );
+    expect(gate).toContain('aws iam get-policy');
+    expect(gate).toContain('test "$BOUNDARY_OUTPUT" = "$EXPECTED_BOUNDARY_ARN"');
+    expect(contents.indexOf('Validate commercial inventory control plane')).toBeLessThan(diff);
+  });
+
   it('keeps deployment behind one stage environment approval', () => {
     const contents = workflow('deploy.yml');
     expect(contents.match(/^\s+environment:/gm) ?? []).toHaveLength(1);
@@ -320,17 +335,27 @@ describe('backend GitHub Actions', () => {
 
   it('verifies every application log group with the exact stage retention after deploy', () => {
     const contents = workflow('deploy.yml');
+    const retentionStep = namedStep(contents, 'Validate application log retention');
     expect(contents).toContain('dev) EXPECTED_LOG_RETENTION=7');
     expect(contents).toContain('test) EXPECTED_LOG_RETENTION=14');
     expect(contents).toContain('prod) EXPECTED_LOG_RETENTION=30');
-    for (const group of [
+    const expectedLogGroups = [
       '/aws/lambda/roadmap-pre-signup-${STAGE}',
       '/aws/lambda/roadmap-post-confirmation-${STAGE}',
+      '/aws/lambda/roadmap-commercial-config-broker-${STAGE}',
+      '/aws/lambda/roadmap-commercial-inventory-executor-${STAGE}',
+      '/aws/lambda/roadmap-account-closure-worker-${STAGE}',
+      '/aws/lambda/roadmap-account-closure-reconciler-${STAGE}',
       '/aws/lambda/roadmap-router-${STAGE}',
+      '/aws/lambda/roadmap-catalog-${STAGE}',
+      '/aws/lambda/roadmap-access-reader-${STAGE}',
+      '/aws/lambda/roadmap-account-closure-request-${STAGE}',
       '/aws/apigateway/roadmap-api-${STAGE}',
-    ]) {
-      expect(contents).toContain(group);
-    }
+    ];
+    const listedLogGroups = [...retentionStep.matchAll(/^\s+"(\/aws\/[^"\r\n]+)"$/gm)]
+      .map((match) => match[1]);
+    expect(listedLogGroups).toEqual(expectedLogGroups);
+    expect(new Set(listedLogGroups).size).toBe(listedLogGroups.length);
     expect(contents).toContain('.retentionInDays == $retention');
     expect(contents.indexOf('Deploy selected stage')).toBeLessThan(
       contents.indexOf('Validate application log retention'),
@@ -460,7 +485,10 @@ describe('backend GitHub Actions', () => {
     expect(setup).toContain('repo:Toydrum@61118847/RoadMap2U@741787733:environment:<stage>');
     expect(setup).toContain('proveedor OIDC existente');
     expect(setup).toContain('BootstraplessSynthesizer');
-    expect(setup).toContain('bootstrap canónico v33');
+    expect(setup).toContain('bootstrap canónico v34');
+    expect(setup).toContain('StageBootstrapTemplateSha256');
+    expect(setup).toContain('InventoryRuntimeBoundaryArn');
+    expect(deployRunbook).toContain('Validate commercial inventory control plane');
     expect(setup).toContain('cfn-observability');
     expect(setup).toContain('oidc-preflight.yml');
     expect(setup).toContain("'X-GitHub-Api-Version: 2026-03-10'");

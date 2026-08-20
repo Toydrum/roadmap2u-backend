@@ -241,6 +241,21 @@ jobs:
             fi
           done
 
+      - name: Validate commercial inventory control plane
+        run: |
+          set -euo pipefail
+          EXPECTED_BOUNDARY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/roadmap2u/${STAGE}/roadmap2u-${STAGE}-inventory-runtime-boundary"
+          BOUNDARY_OUTPUT="$(aws cloudformation describe-stacks \
+            --stack-name 'Roadmap-CiBootstrap' \
+            --query "Stacks[0].Outputs[?OutputKey=='${STAGE}InventoryRuntimeBoundaryArn'].OutputValue" \
+            --output text)"
+          test "$BOUNDARY_OUTPUT" = "$EXPECTED_BOUNDARY_ARN"
+          BOUNDARY_POLICY_ARN="$(aws iam get-policy \
+            --policy-arn "$EXPECTED_BOUNDARY_ARN" \
+            --query 'Policy.Arn' \
+            --output text)"
+          test "$BOUNDARY_POLICY_ARN" = "$EXPECTED_BOUNDARY_ARN"
+
       - name: Review CDK diff
         env:
           ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}
@@ -321,7 +336,14 @@ jobs:
           LOG_GROUPS=(
             "/aws/lambda/roadmap-pre-signup-${STAGE}"
             "/aws/lambda/roadmap-post-confirmation-${STAGE}"
+            "/aws/lambda/roadmap-commercial-config-broker-${STAGE}"
+            "/aws/lambda/roadmap-commercial-inventory-executor-${STAGE}"
+            "/aws/lambda/roadmap-account-closure-worker-${STAGE}"
+            "/aws/lambda/roadmap-account-closure-reconciler-${STAGE}"
             "/aws/lambda/roadmap-router-${STAGE}"
+            "/aws/lambda/roadmap-catalog-${STAGE}"
+            "/aws/lambda/roadmap-access-reader-${STAGE}"
+            "/aws/lambda/roadmap-account-closure-request-${STAGE}"
             "/aws/apigateway/roadmap-api-${STAGE}"
           )
           for LOG_GROUP in "${LOG_GROUPS[@]}"; do

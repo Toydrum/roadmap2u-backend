@@ -98,7 +98,11 @@ function logRetentionFor(stage: DeploymentStage): logs.RetentionDays {
   }[stage];
 }
 
-function runtimeBoundaryArn(stack: Stack, stage: DeploymentStage): string {
+function runtimeBoundaryArn(
+  stack: Stack,
+  stage: DeploymentStage,
+  boundaryName = `roadmap2u-${stage}-runtime-boundary`,
+): string {
   return Arn.format(
     {
       partition: Aws.PARTITION,
@@ -106,7 +110,7 @@ function runtimeBoundaryArn(stack: Stack, stage: DeploymentStage): string {
       region: '',
       account: stack.account,
       resource: 'policy',
-      resourceName: `roadmap2u/${stage}/roadmap2u-${stage}-runtime-boundary`,
+      resourceName: `roadmap2u/${stage}/${boundaryName}`,
     },
     stack,
   );
@@ -116,14 +120,17 @@ function createRuntimeRole(
   scope: Stack,
   id: string,
   stage: DeploymentStage,
+  boundaryName?: string,
+  roleName?: string,
 ): iam.Role {
   return new iam.Role(scope, id, {
+    roleName,
     assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
     path: `/roadmap2u/${stage}/runtime/`,
     permissionsBoundary: iam.ManagedPolicy.fromManagedPolicyArn(
       scope,
       `${id}Boundary`,
-      runtimeBoundaryArn(scope, stage),
+      runtimeBoundaryArn(scope, stage, boundaryName),
     ),
     managedPolicies: [
       iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
@@ -153,6 +160,23 @@ const FAMILY_FENCE_SAFE_READ_ATTRIBUTES = [
   'sk',
   'status',
   'userId',
+] as const;
+
+const COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES = [
+  'accountType',
+  'createdAt',
+  'gsi2pk',
+  'gsi2sk',
+  'owner',
+  'pk',
+  'record',
+  'rev',
+  'sk',
+  'status',
+  'store',
+  'syncedAt',
+  'timestamp',
+  'updatedAt',
 ] as const;
 
 const COMMERCIAL_ACCESS_SAFE_ATTRIBUTES = [
@@ -487,6 +511,70 @@ export class RoadmapStack extends Stack {
     const commercialConfigBrokerUrl = commercialConfigBroker.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.AWS_IAM,
     });
+
+    const commercialInventoryExecutorName =
+      `roadmap-commercial-inventory-executor-${stage}`;
+    const commercialInventoryExecutorRole = createRuntimeRole(
+      this,
+      'CommercialInventoryExecutorRole',
+      stage,
+      `roadmap2u-${stage}-inventory-runtime-boundary`,
+      `roadmap-commercial-inventory-executor-${stage}`,
+    );
+    const commercialInventoryExecutor = new NodejsFunction(
+      this,
+      'CommercialInventoryExecutor',
+      {
+        functionName: commercialInventoryExecutorName,
+        entry: join(here, '../lambda/commercial-inventory-executor.mjs'),
+        runtime: lambda.Runtime.NODEJS_22_X,
+        memorySize: 1024,
+        timeout: Duration.minutes(15),
+        role: commercialInventoryExecutorRole,
+        logGroup: createFunctionLogGroup(
+          this,
+          'CommercialInventoryExecutorLogs',
+          commercialInventoryExecutorName,
+          stage,
+        ),
+        environment: {
+          TABLE_NAME: table.tableName,
+          COMMERCIAL_STAGE: stage,
+          COMMERCIAL_INVENTORY_ALLOWLIST: JSON.stringify([
+            {
+              accountId: this.account,
+              roleName: `roadmap2u-${stage}-commercial-migration`,
+              stage,
+            },
+          ]),
+        },
+        bundling: {
+          format: OutputFormat.ESM,
+          tsconfig: join(here, '../tsconfig.json'),
+          target: 'node22',
+        },
+      },
+    );
+    commercialInventoryExecutorRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ScanOnlyCommercialInventoryProjection',
+        actions: ['dynamodb:Scan'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringEquals': {
+            'dynamodb:Attributes': [
+              ...COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES,
+            ],
+          },
+          StringEquals: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+          Null: { 'dynamodb:Attributes': 'false' },
+        },
+      }),
+    );
+    const commercialInventoryExecutorUrl =
+      commercialInventoryExecutor.addFunctionUrl({
+        authType: lambda.FunctionUrlAuthType.AWS_IAM,
+      });
 
     const accountClosureWorkerName = `roadmap-account-closure-worker-${stage}`;
     const accountClosureWorkerRole = createRuntimeRole(this, 'AccountClosureWorkerRole', stage);
@@ -1007,6 +1095,9 @@ export class RoadmapStack extends Stack {
     new CfnOutput(this, 'CommercialConfigBrokerFunctionUrl', {
       value: commercialConfigBrokerUrl.url,
     });
+    new CfnOutput(this, 'CommercialInventoryExecutorFunctionUrl', {
+      value: commercialInventoryExecutorUrl.url,
+    });
 
     const commercialObservability = createCommercialObservability(
       this,
@@ -1028,6 +1119,11 @@ export class RoadmapStack extends Stack {
             key: 'config-broker',
             function: commercialConfigBroker,
             durationWarningMilliseconds: 8_000,
+          },
+          {
+            key: 'inventory-executor',
+            function: commercialInventoryExecutor,
+            durationWarningMilliseconds: 720_000,
           },
           {
             key: 'closure-worker',
@@ -1071,6 +1167,9 @@ export class RoadmapStack extends Stack {
     );
     new CfnOutput(this, 'CommercialConfigBrokerFunctionArn', {
       value: commercialConfigBroker.functionArn,
+    });
+    new CfnOutput(this, 'CommercialInventoryExecutorFunctionArn', {
+      value: commercialInventoryExecutor.functionArn,
     });
     new CfnOutput(this, 'CommercialAlarmTopicArn', {
       value: commercialObservability.topic.topicArn,
@@ -1256,6 +1355,9 @@ export class RoadmapCiBootstrapStack extends Stack {
       new CfnOutput(this, `${stage}RuntimeBoundaryArn`, {
         value: policies.runtimeBoundary.managedPolicyArn,
       });
+      new CfnOutput(this, `${stage}InventoryRuntimeBoundaryArn`, {
+        value: policies.inventoryRuntimeBoundary.managedPolicyArn,
+      });
     }
 
     const breakGlassRole = this.createNonProdBreakGlassRole(props.operationsPrincipalArn);
@@ -1426,6 +1528,10 @@ export class RoadmapCiBootstrapStack extends Stack {
     return `arn:${Aws.PARTITION}:lambda:us-east-1:${this.account}:function:roadmap-commercial-config-broker-${stage}`;
   }
 
+  private commercialInventoryExecutorArn(stage: DeploymentStage): string {
+    return `arn:${Aws.PARTITION}:lambda:us-east-1:${this.account}:function:roadmap-commercial-inventory-executor-${stage}`;
+  }
+
   private denyCommercialConfigStatement(stage: DeploymentStage): iam.PolicyStatement {
     return new iam.PolicyStatement({
       sid: 'DenyCommercialConfigWrites',
@@ -1462,6 +1568,30 @@ export class RoadmapCiBootstrapStack extends Stack {
     ];
   }
 
+  private commercialInventoryInvokeStatements(
+    stage: DeploymentStage,
+  ): iam.PolicyStatement[] {
+    const executorArn = this.commercialInventoryExecutorArn(stage);
+    return [
+      new iam.PolicyStatement({
+        sid: 'InvokeCommercialInventoryFunctionUrl',
+        actions: ['lambda:InvokeFunctionUrl'],
+        resources: [executorArn],
+        conditions: {
+          StringEquals: { 'lambda:FunctionUrlAuthType': 'AWS_IAM' },
+        },
+      }),
+      new iam.PolicyStatement({
+        sid: 'InvokeCommercialInventoryOnlyViaFunctionUrl',
+        actions: ['lambda:InvokeFunction'],
+        resources: [executorArn],
+        conditions: {
+          Bool: { 'lambda:InvokedViaFunctionUrl': 'true' },
+        },
+      }),
+    ];
+  }
+
   private createCommercialMigrationRole(
     principalArn: string,
     stage: DeploymentStage,
@@ -1483,6 +1613,7 @@ export class RoadmapCiBootstrapStack extends Stack {
         policyName: `CommercialMigrationPolicy-${stage}`,
         statements: [
           ...this.commercialBrokerInvokeStatements(stage),
+          ...this.commercialInventoryInvokeStatements(stage),
           // Scan necessarily traverses every partition, so dynamodb:LeadingKeys
           // cannot scope it. Keep this allow on the exact stage migration role and
           // table, and require the script's explicit non-PII projection instead.
@@ -1763,6 +1894,24 @@ export class RoadmapCiBootstrapStack extends Stack {
         sid: `InspectStageLogRetention${stage}`,
         actions: ['logs:DescribeLogGroups'],
         resources: ['*'],
+      }),
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: `ReadCommercialInventoryControlPlaneStack${stage}`,
+        actions: ['cloudformation:DescribeStacks'],
+        resources: [
+          `arn:${Aws.PARTITION}:cloudformation:us-east-1:${this.account}:stack/Roadmap-CiBootstrap/*`,
+        ],
+      }),
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: `ReadCommercialInventoryBoundary${stage}`,
+        actions: ['iam:GetPolicy'],
+        resources: [
+          `arn:${Aws.PARTITION}:iam::${this.account}:policy/roadmap2u/${stage}/roadmap2u-${stage}-inventory-runtime-boundary`,
+        ],
       }),
     );
     role.addToPolicy(

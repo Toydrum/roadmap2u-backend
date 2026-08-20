@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
   createAwsCredentialLoader,
   createAwsJsonRunner,
+  signFunctionUrlRequest,
 } from './lib/commercial-config-cli.mjs';
 
 const STAGES = new Set(['dev', 'test', 'prod']);
@@ -23,18 +23,14 @@ const VISIBLE_BRANCH_LIMIT = 10;
 const ACCOUNT_ID = '765932874577';
 const REGION = 'us-east-1';
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const FUNCTION_URL_HOST = /^[a-z0-9]+\.lambda-url\.us-east-1\.on\.aws$/;
 const ASSUMED_ROLE_ARN =
   /^arn:aws:sts::([0-9]{12}):assumed-role\/([A-Za-z0-9_+=,.@-]{1,64})\/[A-Za-z0-9_+=,.@/-]{1,128}$/;
 
-/**
- * Live authorization is deliberately unresolved. DynamoDB evaluates
- * `dynamodb:Attributes` at the top-level `record` map even when this runner
- * requests only `record.id`. Granting `record` to MigrationRole would also
- * authorize the complete content map, so TASK-034 does not change IAM.
- */
-export const COMMERCIAL_INVENTORY_AUTHORIZATION_BLOCKER = Object.freeze({
-  code: 'NESTED_RECORD_PROJECTION_REQUIRES_TOP_LEVEL_RECORD_AUTHORIZATION',
-  resolution: 'broker-or-explicit-record-map-exception-required-before-live-use',
+export const COMMERCIAL_INVENTORY_EXECUTION_LIMIT = Object.freeze({
+  timeoutSeconds: 900,
+  durableCheckpoint: false,
+  behavior: 'single-invocation-or-fail-without-partial-manifest',
 });
 
 const ATTRIBUTE_NAMES = Object.freeze({
@@ -558,6 +554,7 @@ export async function runCommercialInventory(options = {}) {
     ddb,
     loadCheckpoint = async () => null,
     saveCheckpoint = async () => undefined,
+    beforePage = async () => undefined,
   } = options;
   if (has(options, 'apply') || has(options, 'repair')) {
     throw new Error('commercial inventory is always read-only');
@@ -567,8 +564,12 @@ export async function runCommercialInventory(options = {}) {
     throw new Error('primary table must exactly match the selected stage');
   }
   if (!ddb || typeof ddb.send !== 'function') throw new Error('ddb is required');
-  if (typeof loadCheckpoint !== 'function' || typeof saveCheckpoint !== 'function') {
-    throw new Error('checkpoint seams must be functions');
+  if (
+    typeof loadCheckpoint !== 'function' ||
+    typeof saveCheckpoint !== 'function' ||
+    typeof beforePage !== 'function'
+  ) {
+    throw new Error('inventory lifecycle seams must be functions');
   }
 
   const checkpoint = validateCheckpoint(await loadCheckpoint(), stage, tableName);
@@ -580,6 +581,7 @@ export async function runCommercialInventory(options = {}) {
 
   if (phase === 'structure') {
     do {
+      await beforePage();
       const result = await ddb.send(
         new ScanCommand(scanInput(tableName, 'structure', cursor)),
       );
@@ -601,6 +603,7 @@ export async function runCommercialInventory(options = {}) {
   }
 
   do {
+    await beforePage();
     const result = await ddb.send(
       new ScanCommand(scanInput(tableName, 'nodes', cursor)),
     );
@@ -620,8 +623,7 @@ export async function runCommercialInventory(options = {}) {
 const CLI_OPTIONS = new Set([
   'stage',
   'profile',
-  'checkpoint-file',
-  'manifest-file',
+  'url',
 ]);
 
 function parseCliOptions(argv) {
@@ -655,21 +657,26 @@ function parseCliOptions(argv) {
   if (profile !== undefined && !/^[A-Za-z0-9_.-]{1,128}$/.test(profile)) {
     throw new Error('profile has an invalid format');
   }
-  const checkpointFile = resolve(required('checkpoint-file'));
-  const manifestFile = resolve(required('manifest-file'));
-  if (!checkpointFile.toLowerCase().endsWith('.json')) {
-    throw new Error('checkpoint file must use a .json extension');
-  }
-  if (!manifestFile.toLowerCase().endsWith('.json')) {
-    throw new Error('manifest file must use a .json extension');
+  const rawUrl = required('url');
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error('URL must be an AWS Lambda Function URL');
   }
   if (
-    checkpointFile.toLocaleLowerCase('en-US') ===
-    manifestFile.toLocaleLowerCase('en-US')
+    url.protocol !== 'https:' ||
+    !FUNCTION_URL_HOST.test(url.hostname) ||
+    url.pathname !== '/' ||
+    url.search !== '' ||
+    url.hash !== '' ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.port !== ''
   ) {
-    throw new Error('checkpoint and manifest files must differ');
+    throw new Error('URL must be an AWS Lambda Function URL in us-east-1');
   }
-  return { stage, profile, checkpointFile, manifestFile };
+  return { stage, profile, url: url.href };
 }
 
 function validateInventoryIdentity(identity, stage) {
@@ -688,7 +695,7 @@ function validateInventoryIdentity(identity, stage) {
   }
 }
 
-function validateManifest(manifest, stage, tableName) {
+export function validateCommercialInventoryManifest(manifest, stage, tableName) {
   if (
     !hasExactKeys(
       manifest,
@@ -814,114 +821,169 @@ async function defaultCallerIdentity(profile, region) {
   ]);
 }
 
-async function defaultCreateDdb(profile, region) {
-  if (region !== REGION) throw new Error(`DynamoDB region must be ${REGION}`);
-  const credentials = await loadAwsCredentials(profile);
-  const client = new DynamoDBClient({
-    region: REGION,
-    credentials: {
-      accessKeyId: credentials.AccessKeyId,
-      secretAccessKey: credentials.SecretAccessKey,
-      ...(credentials.SessionToken
-        ? { sessionToken: credentials.SessionToken }
-        : {}),
-    },
-  });
-  return {
-    ddb: DynamoDBDocumentClient.from(client, {
-      marshallOptions: { removeUndefinedValues: true },
-    }),
-    region: REGION,
-    destroy: () => client.destroy(),
+async function defaultCredentials(profile) {
+  return loadAwsCredentials(profile);
+}
+
+function resolveEvidenceRoot(evidenceRoot, cwd) {
+  if (
+    typeof evidenceRoot !== 'string' ||
+    evidenceRoot.length === 0 ||
+    evidenceRoot !== evidenceRoot.trim() ||
+    !isAbsolute(evidenceRoot)
+  ) {
+    throw new Error('EVIDENCE_ROOT must be an absolute path');
+  }
+  const root = resolve(evidenceRoot);
+  const segments = root.toLowerCase().split(/[\\/]+/);
+  if (segments.at(-2) !== 'evidence' || segments.at(-1) !== 'commercial-launch') {
+    throw new Error('EVIDENCE_ROOT must end with evidence/commercial-launch');
+  }
+  const checkout = resolve(cwd);
+  const fromCheckout = relative(checkout, root);
+  if (
+    fromCheckout === '' ||
+    (!fromCheckout.startsWith(`..${sep}`) &&
+      fromCheckout !== '..' &&
+      !isAbsolute(fromCheckout))
+  ) {
+    throw new Error('EVIDENCE_ROOT must remain outside the backend checkout');
+  }
+  return root;
+}
+
+export function createCommercialInventoryEvidenceWriter({
+  makeDirectory = mkdir,
+  writeFile: writeEvidenceFile = writeFile,
+  readFile: readEvidenceFile = readFile,
+  cwd = process.cwd(),
+} = {}) {
+  if (
+    typeof makeDirectory !== 'function' ||
+    typeof writeEvidenceFile !== 'function' ||
+    typeof readEvidenceFile !== 'function'
+  ) {
+    throw new Error('inventory evidence filesystem seams must be functions');
+  }
+  return async ({ evidenceRoot, stage, manifest } = {}) => {
+    const root = resolveEvidenceRoot(evidenceRoot, cwd);
+    validateCommercialInventoryManifest(manifest, stage, `roadmap-${stage}`);
+    const directory = resolve(root, 'inventory', stage);
+    const path = resolve(directory, `${manifest.manifestHash}.json`);
+    const content = `${canonicalJson(manifest)}\n`;
+    await makeDirectory(directory, { recursive: true });
+    try {
+      await writeEvidenceFile(path, content, {
+        encoding: 'utf8',
+        mode: 0o600,
+        flag: 'wx',
+      });
+      return { path, created: true };
+    } catch (error) {
+      if (!isObject(error) || error.code !== 'EEXIST') {
+        throw new Error('commercial inventory evidence could not be written');
+      }
+      let existing;
+      try {
+        existing = await readEvidenceFile(path, 'utf8');
+      } catch {
+        throw new Error('existing commercial inventory evidence is unreadable');
+      }
+      if (existing !== content) {
+        throw new Error('existing commercial inventory evidence has different contents');
+      }
+      return { path, created: false };
+    }
   };
 }
 
-async function defaultReadJsonFile(path) {
-  try {
-    return JSON.parse(await readFile(path, 'utf8'));
-  } catch (error) {
-    if (isObject(error) && error.code === 'ENOENT') return null;
-    throw new Error('checkpoint file is unreadable or invalid');
-  }
-}
-
-async function defaultWriteJsonFile(path, value) {
-  await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.${sha256(path).slice(0, 12)}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600,
-    flag: 'w',
-  });
-  await rename(temporary, path);
-}
+const writeInventoryEvidence = createCommercialInventoryEvidenceWriter();
 
 export async function runCommercialInventoryCli({
   argv = process.argv.slice(2),
   write = (line) => console.log(line),
   getCallerIdentity = defaultCallerIdentity,
-  createDdb = defaultCreateDdb,
-  runInventory = runCommercialInventory,
-  readJsonFile = defaultReadJsonFile,
-  writeJsonFile = defaultWriteJsonFile,
+  getCredentials = defaultCredentials,
+  fetch: fetchRequest = globalThis.fetch,
+  writeManifestEvidence = writeInventoryEvidence,
+  evidenceRoot = process.env.EVIDENCE_ROOT,
+  now = () => new Date(),
 } = {}) {
   const options = parseCliOptions(argv);
   if (typeof write !== 'function') throw new Error('write must be a function');
   const identity = await getCallerIdentity(options.profile, REGION);
   validateInventoryIdentity(identity, options.stage);
-  const connection = await createDdb(options.profile, REGION);
-  try {
-    if (connection?.region !== REGION) {
-      throw new Error(`DynamoDB region must be ${REGION}`);
-    }
-    if (!connection.ddb || typeof connection.ddb.send !== 'function') {
-      throw new Error('DynamoDB client is unavailable');
-    }
-    const tableName = `roadmap-${options.stage}`;
-    write(
-      `commercial-inventory mode=dry-run stage=${options.stage} region=${REGION}`,
-    );
-    write(`authorizationBlocker=${COMMERCIAL_INVENTORY_AUTHORIZATION_BLOCKER.code}`);
-    const manifest = validateManifest(
-      await runInventory({
-        stage: options.stage,
-        tableName,
-        ddb: connection.ddb,
-        loadCheckpoint: () => readJsonFile(options.checkpointFile),
-        saveCheckpoint: (checkpoint) =>
-          writeJsonFile(options.checkpointFile, checkpoint),
-      }),
-      options.stage,
-      tableName,
-    );
-    await writeJsonFile(options.manifestFile, manifest);
-    write(`manifestHash=${manifest.manifestHash}`);
-    write(
-      [
-        'totals',
-        `profiles=${manifest.totals.profiles}`,
-        `records=${manifest.totals.recordItems}`,
-        `activeTrees=${manifest.totals.activeTrees}`,
-        `visibleBranches=${manifest.totals.visibleBranches}`,
-      ].join(' '),
-    );
-    write(
-      [
-        'classifications',
-        `missingHeart=${manifest.classifications.missingHeart.trees}`,
-        `invalidRecordShape=${manifest.classifications.invalidRecordShape.records}`,
-        `profileWithoutCreationTimestamp=${manifest.classifications.profileWithoutCreationTimestamp.profiles}`,
-        `overQuotaOwners=${manifest.classifications.overQuota.owners}`,
-      ].join(' '),
-    );
-    return 0;
-  } finally {
-    try {
-      await Promise.resolve(connection?.destroy?.());
-    } catch {
-      // Cleanup is best-effort and must never expose SDK or credential details.
-    }
+  const resolvedEvidenceRoot = resolveEvidenceRoot(evidenceRoot, process.cwd());
+  if (
+    typeof getCredentials !== 'function' ||
+    typeof fetchRequest !== 'function' ||
+    typeof writeManifestEvidence !== 'function'
+  ) {
+    throw new Error('inventory executor dependencies are unavailable');
   }
+  const body = JSON.stringify({
+    command: 'commercial-inventory',
+    stage: options.stage,
+  });
+  const credentials = await getCredentials(options.profile);
+  const headers = signFunctionUrlRequest({
+    url: options.url,
+    body,
+    credentials,
+    now: now(),
+  });
+  const response = await fetchRequest(options.url, {
+    method: 'POST',
+    headers,
+    body,
+    redirect: 'error',
+  });
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(`inventory executor rejected request with status ${response.status}`);
+  }
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    throw new Error('inventory executor returned invalid JSON');
+  }
+  const manifest = validateCommercialInventoryManifest(
+    payload,
+    options.stage,
+    `roadmap-${options.stage}`,
+  );
+  await writeManifestEvidence({
+    evidenceRoot: resolvedEvidenceRoot,
+    stage: options.stage,
+    manifest,
+  });
+  write(
+    `commercial-inventory mode=dry-run stage=${options.stage} region=${REGION}`,
+  );
+  write(
+    `executionLimit=single-invocation-no-checkpoint timeoutSeconds=${COMMERCIAL_INVENTORY_EXECUTION_LIMIT.timeoutSeconds}`,
+  );
+  write(`manifestHash=${manifest.manifestHash}`);
+  write(
+    [
+      'totals',
+      `profiles=${manifest.totals.profiles}`,
+      `records=${manifest.totals.recordItems}`,
+      `activeTrees=${manifest.totals.activeTrees}`,
+      `visibleBranches=${manifest.totals.visibleBranches}`,
+    ].join(' '),
+  );
+  write(
+    [
+      'classifications',
+      `missingHeart=${manifest.classifications.missingHeart.trees}`,
+      `invalidRecordShape=${manifest.classifications.invalidRecordShape.records}`,
+      `profileWithoutCreationTimestamp=${manifest.classifications.profileWithoutCreationTimestamp.profiles}`,
+      `overQuotaOwners=${manifest.classifications.overQuota.owners}`,
+    ].join(' '),
+  );
+  return 0;
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -936,4 +998,6 @@ export async function main(argv = process.argv.slice(2)) {
 const invokedPath = process.argv[1]
   ? pathToFileURL(resolve(process.argv[1])).href
   : '';
-if (invokedPath === import.meta.url) await main();
+if (!process.env.AWS_LAMBDA_FUNCTION_NAME && invokedPath === import.meta.url) {
+  await main();
+}

@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -11,6 +11,30 @@ async function inventoryModule(): Promise<Record<string, unknown>> {
 }
 
 const OWNER = 'owner-sensitive-a';
+const FUNCTION_URL = 'https://abc123.lambda-url.us-east-1.on.aws/';
+const EVIDENCE_ROOT = resolve(
+  process.cwd(),
+  '..',
+  '..',
+  'evidence',
+  'commercial-launch',
+);
+const CREDENTIALS = {
+  AccessKeyId: 'ASIAEXAMPLE',
+  SecretAccessKey: 'not-a-real-secret',
+  SessionToken: 'not-a-real-session-token',
+};
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
 
 function syncRecord(
   store: string,
@@ -154,6 +178,7 @@ describe('commercial inventory', () => {
       }),
     };
     const checkpoints: unknown[] = [];
+    const beforePage = vi.fn(async () => undefined);
 
     const manifest = await runCommercialInventory({
       stage: 'dev',
@@ -161,6 +186,7 @@ describe('commercial inventory', () => {
       ddb,
       loadCheckpoint: vi.fn(async () => null),
       saveCheckpoint: vi.fn(async (checkpoint) => checkpoints.push(checkpoint)),
+      beforePage,
     });
 
     expect(commands.map(({ name }) => name)).toEqual([
@@ -169,6 +195,7 @@ describe('commercial inventory', () => {
       'ScanCommand',
       'ScanCommand',
     ]);
+    expect(beforePage).toHaveBeenCalledTimes(4);
     expect(commands[1].input.ExclusiveStartKey).toEqual(structureCursor);
     expect(commands[3].input.ExclusiveStartKey).toEqual(nodeCursor);
     for (const { input } of commands) {
@@ -440,21 +467,9 @@ describe('commercial inventory', () => {
     });
   });
 
-  it('runs the operational CLI only under the exact account, stage role and region', async () => {
-    const {
-      COMMERCIAL_INVENTORY_AUTHORIZATION_BLOCKER,
-      runCommercialInventoryCli,
-      withStableInventoryManifestHash,
-    } = (await inventoryModule()) as {
-      COMMERCIAL_INVENTORY_AUTHORIZATION_BLOCKER: {
-        code: string;
-        resolution: string;
-      };
-      runCommercialInventoryCli(options: Record<string, unknown>): Promise<number>;
-      withStableInventoryManifestHash(manifest: Record<string, unknown>): any;
-    };
-    const checkpointPath = join(process.cwd(), '.local', 'inventory-checkpoint.json');
-    const manifestPath = join(process.cwd(), '.local', 'inventory-manifest.json');
+  it('invokes the dedicated executor with SigV4 and writes only its validated manifest under EVIDENCE_ROOT', async () => {
+    const { runCommercialInventoryCli, withStableInventoryManifestHash } =
+      (await inventoryModule()) as Record<string, any>;
     const profile = 'private-operator-profile';
     const manifest = withStableInventoryManifestHash({
       schemaVersion: 1,
@@ -490,88 +505,85 @@ describe('commercial inventory', () => {
         },
       },
     });
-    const storedCheckpoint = { checkpointHash: 'b'.repeat(64) };
-    const writtenCheckpoint = { checkpointHash: 'c'.repeat(64) };
-    const ddb = { send: vi.fn() };
-    const destroy = vi.fn();
     const getCallerIdentity = vi.fn(async () => ({
       Account: '765932874577',
       Arn: 'arn:aws:sts::765932874577:assumed-role/roadmap2u-dev-commercial-migration/private-session',
     }));
-    const createDdb = vi.fn(async () => ({
-      ddb,
-      region: 'us-east-1',
-      destroy,
+    const getCredentials = vi.fn(async () => CREDENTIALS);
+    const fetch = vi.fn(async (_url: string, _request: Record<string, any>) => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(manifest),
     }));
-    const readJsonFile = vi.fn(async () => storedCheckpoint);
-    const writeJsonFile = vi.fn(async () => undefined);
-    const runInventory = vi.fn(async (options: any) => {
-      expect(options).toMatchObject({
-        stage: 'dev',
-        tableName: 'roadmap-dev',
-        ddb,
-      });
-      expect(await options.loadCheckpoint()).toBe(storedCheckpoint);
-      await options.saveCheckpoint(writtenCheckpoint);
-      return manifest;
-    });
+    const writeManifestEvidence = vi.fn(async () => ({ created: true }));
     const lines: string[] = [];
 
     await expect(
       runCommercialInventoryCli({
         argv: [
           '--stage', 'dev',
+          '--url', FUNCTION_URL,
           '--profile', profile,
-          '--checkpoint-file', checkpointPath,
-          '--manifest-file', manifestPath,
         ],
+        evidenceRoot: EVIDENCE_ROOT,
         write: (line: string) => lines.push(line),
         getCallerIdentity,
-        createDdb,
-        runInventory,
-        readJsonFile,
-        writeJsonFile,
+        getCredentials,
+        fetch,
+        writeManifestEvidence,
+        now: () => new Date('2026-08-19T22:00:00.000Z'),
       }),
     ).resolves.toBe(0);
 
     expect(getCallerIdentity).toHaveBeenCalledWith(profile, 'us-east-1');
-    expect(createDdb).toHaveBeenCalledWith(profile, 'us-east-1');
-    expect(readJsonFile).toHaveBeenCalledWith(checkpointPath);
-    expect(writeJsonFile).toHaveBeenCalledWith(checkpointPath, writtenCheckpoint);
-    expect(writeJsonFile).toHaveBeenCalledWith(manifestPath, manifest);
-    expect(destroy).toHaveBeenCalledOnce();
+    expect(getCredentials).toHaveBeenCalledWith(profile);
+    expect(fetch).toHaveBeenCalledOnce();
+    const [url, request] = fetch.mock.calls[0]!;
+    expect(url).toBe(FUNCTION_URL);
+    expect(request).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify({ command: 'commercial-inventory', stage: 'dev' }),
+      redirect: 'error',
+    });
+    expect(request.headers.Authorization).toContain(
+      'AWS4-HMAC-SHA256 Credential=ASIAEXAMPLE/',
+    );
+    expect(request.headers.Authorization).toContain(
+      '/us-east-1/lambda/aws4_request',
+    );
+    expect(writeManifestEvidence).toHaveBeenCalledWith({
+      evidenceRoot: EVIDENCE_ROOT,
+      stage: 'dev',
+      manifest,
+    });
     expect(lines).toEqual([
       'commercial-inventory mode=dry-run stage=dev region=us-east-1',
-      `authorizationBlocker=${COMMERCIAL_INVENTORY_AUTHORIZATION_BLOCKER.code}`,
+      'executionLimit=single-invocation-no-checkpoint timeoutSeconds=900',
       `manifestHash=${manifest.manifestHash}`,
       'totals profiles=1 records=3 activeTrees=1 visibleBranches=2',
       'classifications missingHeart=0 invalidRecordShape=0 profileWithoutCreationTimestamp=0 overQuotaOwners=0',
     ]);
     expect(lines.join('\n')).not.toMatch(
-      /private|assumed-role|checkpoint|manifest\.json|treeId|record\.id/i,
+      /private|assumed-role|credential|secret|evidence|manifest\.json|treeId|record\.id/i,
     );
   });
 
-  it('rejects mutation flags, wrong identities and a non-us-east-1 connection before inventory', async () => {
-    const { runCommercialInventoryCli } = (await inventoryModule()) as {
-      runCommercialInventoryCli(options: Record<string, unknown>): Promise<number>;
-    };
-    const baseArgv = [
-      '--stage', 'test',
-      '--checkpoint-file', join(process.cwd(), '.local', 'checkpoint.json'),
-      '--manifest-file', join(process.cwd(), '.local', 'manifest.json'),
-    ];
+  it('rejects direct-Dynamo options, wrong identity, unsafe URLs and invalid responses before evidence', async () => {
+    const { runCommercialInventoryCli, withStableInventoryManifestHash } =
+      (await inventoryModule()) as Record<string, any>;
+    const baseArgv = ['--stage', 'test', '--url', FUNCTION_URL];
     const getCallerIdentity = vi.fn();
 
     await expect(
       runCommercialInventoryCli({
-        argv: [...baseArgv, '--apply'],
+        argv: [...baseArgv, '--checkpoint-file', 'private.json'],
         getCallerIdentity,
       }),
-    ).rejects.toThrow('unknown option --apply');
+    ).rejects.toThrow('unknown option --checkpoint-file');
     expect(getCallerIdentity).not.toHaveBeenCalled();
 
-    const createDdb = vi.fn();
+    const getCredentials = vi.fn();
+    const fetch = vi.fn();
     await expect(
       runCommercialInventoryCli({
         argv: baseArgv,
@@ -579,45 +591,154 @@ describe('commercial inventory', () => {
           Account: '000000000000',
           Arn: 'arn:aws:sts::000000000000:assumed-role/roadmap2u-test-commercial-migration/session',
         }),
-        createDdb,
+        getCredentials,
+        fetch,
       }),
     ).rejects.toThrow('AWS account must be 765932874577');
-    expect(createDdb).not.toHaveBeenCalled();
+    expect(getCredentials).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
 
     await expect(
       runCommercialInventoryCli({
-        argv: baseArgv,
-        getCallerIdentity: async () => ({
-          Account: '765932874577',
-          Arn: 'arn:aws:sts::765932874577:assumed-role/roadmap2u-dev-commercial-migration/session',
-        }),
-        createDdb,
+        argv: ['--stage', 'test', '--url', 'https://example.com/'],
+        getCallerIdentity,
       }),
-    ).rejects.toThrow('caller does not match the selected stage migration role');
-    expect(createDdb).not.toHaveBeenCalled();
+    ).rejects.toThrow('Lambda Function URL');
+    expect(getCallerIdentity).not.toHaveBeenCalled();
 
-    const destroy = vi.fn();
-    const runInventory = vi.fn();
+    const manifest = withStableInventoryManifestHash({
+      schemaVersion: 1,
+      operation: 'commercial-inventory',
+      mode: 'dry-run',
+      stage: 'test',
+      resources: { primaryTable: 'roadmap-test' },
+      scan: { passes: 2, pages: 0, scannedItems: 0, returnedItems: 0 },
+      totals: {
+        profiles: 0,
+        recordItems: 0,
+        validRecords: 0,
+        ownersEvaluated: 0,
+        trees: 0,
+        restorableTrees: 0,
+        activeTrees: 0,
+        visibleBranches: 0,
+      },
+      classifications: {
+        missingHeart: { trees: 0 },
+        invalidRecordShape: { records: 0 },
+        profileWithoutCreationTimestamp: { profiles: 0 },
+        overQuota: {
+          activeTreeLimit: 2,
+          visibleBranchLimit: 10,
+          owners: 0,
+          ownersOverActiveTreeLimit: 0,
+          ownersOverBranchLimit: 0,
+          treesOverVisibleBranchLimit: 0,
+          treesOnly: 0,
+          branchesOnly: 0,
+          both: 0,
+        },
+      },
+    });
+    const writeManifestEvidence = vi.fn();
     await expect(
       runCommercialInventoryCli({
         argv: baseArgv,
+        evidenceRoot: EVIDENCE_ROOT,
         getCallerIdentity: async () => ({
           Account: '765932874577',
           Arn: 'arn:aws:sts::765932874577:assumed-role/roadmap2u-test-commercial-migration/session',
         }),
-        createDdb: async () => ({
-          ddb: { send: vi.fn() },
-          region: 'us-west-2',
-          destroy,
+        getCredentials: async () => CREDENTIALS,
+        fetch: async () => ({
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ...manifest, email: 'private@example.test' }),
         }),
-        runInventory,
+        writeManifestEvidence,
       }),
-    ).rejects.toThrow('DynamoDB region must be us-east-1');
-    expect(runInventory).not.toHaveBeenCalled();
-    expect(destroy).toHaveBeenCalledOnce();
+    ).rejects.toThrow('invalid sanitized manifest');
+    expect(writeManifestEvidence).not.toHaveBeenCalled();
   });
 
-  it('contains no DynamoDB mutation command and documents the nested-map IAM blocker', async () => {
+  it('writes the canonical manifest content-addressed and never overwrites evidence', async () => {
+    const {
+      createCommercialInventoryEvidenceWriter,
+      withStableInventoryManifestHash,
+    } = (await inventoryModule()) as Record<string, any>;
+    const manifest = withStableInventoryManifestHash({
+      schemaVersion: 1,
+      operation: 'commercial-inventory',
+      mode: 'dry-run',
+      stage: 'dev',
+      resources: { primaryTable: 'roadmap-dev' },
+      scan: { passes: 2, pages: 0, scannedItems: 0, returnedItems: 0 },
+      totals: {
+        profiles: 0,
+        recordItems: 0,
+        validRecords: 0,
+        ownersEvaluated: 0,
+        trees: 0,
+        restorableTrees: 0,
+        activeTrees: 0,
+        visibleBranches: 0,
+      },
+      classifications: {
+        missingHeart: { trees: 0 },
+        invalidRecordShape: { records: 0 },
+        profileWithoutCreationTimestamp: { profiles: 0 },
+        overQuota: {
+          activeTreeLimit: 2,
+          visibleBranchLimit: 10,
+          owners: 0,
+          ownersOverActiveTreeLimit: 0,
+          ownersOverBranchLimit: 0,
+          treesOverVisibleBranchLimit: 0,
+          treesOnly: 0,
+          branchesOnly: 0,
+          both: 0,
+        },
+      },
+    });
+    const makeDirectory = vi.fn(async () => undefined);
+    const writeFile = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error('exists'), { code: 'EEXIST' }));
+    const readFile = vi.fn(async () => `${canonicalJson(manifest)}\n`);
+    const writer = createCommercialInventoryEvidenceWriter({
+      makeDirectory,
+      writeFile,
+      readFile,
+      cwd: resolve(process.cwd(), 'artifact', 'backend'),
+    });
+    const evidenceRoot = resolve(
+      process.cwd(),
+      'artifact',
+      'evidence',
+      'commercial-launch',
+    );
+
+    const first = await writer({ evidenceRoot, stage: 'dev', manifest });
+
+    expect(first.path).toMatch(
+      new RegExp(`[\\\\/]inventory[\\\\/]dev[\\\\/]${manifest.manifestHash}\\.json$`),
+    );
+    expect(writeFile).toHaveBeenCalledWith(
+      first.path,
+      `${canonicalJson(manifest)}\n`,
+      { encoding: 'utf8', mode: 0o600, flag: 'wx' },
+    );
+    await expect(
+      writer({ evidenceRoot, stage: 'dev', manifest }),
+    ).resolves.toEqual({ path: first.path, created: false });
+    expect(readFile).toHaveBeenCalledWith(first.path, 'utf8');
+    expect(JSON.stringify(writeFile.mock.calls)).not.toMatch(
+      /title|note|email|displayName|username|private/i,
+    );
+  });
+
+  it('contains no DynamoDB mutation or direct-client CLI and declares the bounded executor limit', async () => {
     const module = (await inventoryModule()) as Record<string, any>;
     const source = readFileSync(
       join(process.cwd(), 'scripts', 'commercial-inventory.mjs'),
@@ -627,9 +748,12 @@ describe('commercial inventory', () => {
     expect(source).not.toMatch(
       /\b(?:Put|Update|Delete|TransactWrite|BatchWrite)Command\b/,
     );
-    expect(module.COMMERCIAL_INVENTORY_AUTHORIZATION_BLOCKER).toEqual({
-      code: 'NESTED_RECORD_PROJECTION_REQUIRES_TOP_LEVEL_RECORD_AUTHORIZATION',
-      resolution: 'broker-or-explicit-record-map-exception-required-before-live-use',
+    expect(source).not.toMatch(/DynamoDBClient|DynamoDBDocumentClient|createDdb/);
+    expect(source).not.toContain('checkpoint-file');
+    expect(module.COMMERCIAL_INVENTORY_EXECUTION_LIMIT).toEqual({
+      timeoutSeconds: 900,
+      durableCheckpoint: false,
+      behavior: 'single-invocation-or-fail-without-partial-manifest',
     });
   });
 });

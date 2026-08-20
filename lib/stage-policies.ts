@@ -10,6 +10,7 @@ export interface StageManagedPolicies {
   readonly edge: iam.ManagedPolicy;
   readonly observability: iam.ManagedPolicy;
   readonly runtimeBoundary: iam.ManagedPolicy;
+  readonly inventoryRuntimeBoundary: iam.ManagedPolicy;
 }
 
 const ROOT_DOMAIN = 'roadmap2u.com';
@@ -28,6 +29,22 @@ const BOOTSTRAP_QUALIFIERS: Record<PolicyStage, string> = {
   test: 'rmap2utst',
   prod: 'rmap2uprd',
 };
+const COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES = [
+  'accountType',
+  'createdAt',
+  'gsi2pk',
+  'gsi2sk',
+  'owner',
+  'pk',
+  'record',
+  'rev',
+  'sk',
+  'status',
+  'store',
+  'syncedAt',
+  'timestamp',
+  'updatedAt',
+] as const;
 
 function resourceArn(
   stack: Stack,
@@ -143,6 +160,24 @@ function commercialConfigBrokerLogGroupArn(stack: Stack, stage: PolicyStage): st
       account: stack.account,
       resource: 'log-group',
       resourceName: `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
+}
+
+function commercialInventoryExecutorLogGroupArn(
+  stack: Stack,
+  stage: PolicyStage,
+): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'logs',
+      region: stack.region,
+      account: stack.account,
+      resource: 'log-group',
+      resourceName: `/aws/lambda/roadmap-commercial-inventory-executor-${stage}`,
       arnFormat: ArnFormat.COLON_RESOURCE_NAME,
     },
     stack,
@@ -415,6 +450,36 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         ],
         resources: [userPoolArn(stack)],
         conditions: stageTagConditions(stage),
+      }),
+    ],
+  });
+}
+
+function createInventoryRuntimeBoundary(
+  stack: Stack,
+  stage: PolicyStage,
+): iam.ManagedPolicy {
+  return new iam.ManagedPolicy(stack, `InventoryRuntimeBoundary${stage}`, {
+    managedPolicyName: `roadmap2u-${stage}-inventory-runtime-boundary`,
+    path: `/roadmap2u/${stage}/`,
+    description: `Maximum permissions for the RoadMap2U ${stage} commercial inventory executor`,
+    statements: [
+      new iam.PolicyStatement({
+        sid: 'WriteOnlyCommercialInventoryLogs',
+        actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [`${commercialInventoryExecutorLogGroupArn(stack, stage)}:*`],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ScanOnlyCommercialInventoryProjection',
+        actions: ['dynamodb:Scan'],
+        resources: [primaryTableArns(stack, stage)[0]],
+        conditions: {
+          'ForAllValues:StringEquals': {
+            'dynamodb:Attributes': [...COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES],
+          },
+          StringEquals: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+          Null: { 'dynamodb:Attributes': 'false' },
+        },
       }),
     ],
   });
@@ -989,6 +1054,18 @@ function createObservabilityPolicy(
   stage: PolicyStage,
 ): iam.ManagedPolicy {
   const topicArn = commercialAlarmTopicArn(stack, stage);
+  const inventoryBoundary = policyArn(
+    stack,
+    stage,
+    `roadmap2u-${stage}-inventory-runtime-boundary`,
+  );
+  const inventoryRoleArn = resourceArn(
+    stack,
+    'iam',
+    'role',
+    `roadmap2u/${stage}/runtime/roadmap-commercial-inventory-executor-${stage}`,
+    { region: '' },
+  );
   const topicActions = [
     'sns:CreateTopic',
     'sns:GetTopicAttributes',
@@ -1012,6 +1089,52 @@ function createObservabilityPolicy(
     path: `/roadmap2u/${stage}/`,
     description: `CloudFormation observability permissions for RoadMap2U ${stage}`,
     statements: [
+      new iam.PolicyStatement({
+        sid: 'CreateBoundedCommercialInventoryRole',
+        actions: ['iam:CreateRole'],
+        resources: [inventoryRoleArn],
+        conditions: {
+          StringEquals: {
+            'iam:PermissionsBoundary': inventoryBoundary,
+            'aws:RequestTag/roadmap2u-project': 'RoadMap2U',
+            'aws:RequestTag/roadmap2u-stage': stage,
+          },
+        },
+      }),
+      new iam.PolicyStatement({
+        sid: 'SetCommercialInventoryRuntimeBoundary',
+        actions: ['iam:PutRolePermissionsBoundary'],
+        resources: [inventoryRoleArn],
+        conditions: {
+          StringEquals: { 'iam:PermissionsBoundary': inventoryBoundary },
+        },
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyCommercialInventoryFunctionUrl',
+        actions: [
+          'lambda:AddPermission',
+          'lambda:CreateFunction',
+          'lambda:CreateFunctionUrlConfig',
+          'lambda:DeleteFunction',
+          'lambda:DeleteFunctionUrlConfig',
+          'lambda:GetFunction',
+          'lambda:GetFunctionCodeSigningConfig',
+          'lambda:GetFunctionConfiguration',
+          'lambda:GetFunctionRecursionConfig',
+          'lambda:GetFunctionScalingConfig',
+          'lambda:GetFunctionUrlConfig',
+          'lambda:GetPolicy',
+          'lambda:GetRuntimeManagementConfig',
+          'lambda:ListTags',
+          'lambda:RemovePermission',
+          'lambda:TagResource',
+          'lambda:UntagResource',
+          'lambda:UpdateFunctionCode',
+          'lambda:UpdateFunctionConfiguration',
+          'lambda:UpdateFunctionUrlConfig',
+        ],
+        resources: [functionArn(stack, stage, 'commercial-inventory-executor')],
+      }),
       new iam.PolicyStatement({
         sid: 'ManageOnlyCommercialHttpFunctions',
         actions: [
@@ -1042,12 +1165,18 @@ function createObservabilityPolicy(
           'logs:PutRetentionPolicy',
           'logs:TagResource',
         ],
-        resources: commercialHttpLogArns(stack, stage),
+        resources: [
+          ...commercialHttpLogArns(stack, stage),
+          `${commercialInventoryExecutorLogGroupArn(stack, stage)}:*`,
+        ],
       }),
       new iam.PolicyStatement({
         sid: 'ManageOnlyCommercialHttpLogGroupTags',
         actions: ['logs:ListTagsForResource', 'logs:TagResource', 'logs:UntagResource'],
-        resources: commercialHttpLogGroupArns(stack, stage),
+        resources: [
+          ...commercialHttpLogGroupArns(stack, stage),
+          commercialInventoryExecutorLogGroupArn(stack, stage),
+        ],
       }),
       new iam.PolicyStatement({
         sid: 'ManageOnlyCommercialAlarmTopic',
@@ -1080,8 +1209,17 @@ export function createStageManagedPolicies(
   hostedZoneId: string,
 ): StageManagedPolicies {
   const runtimeBoundary = createRuntimeBoundary(stack, stage);
+  const inventoryRuntimeBoundary = createInventoryRuntimeBoundary(stack, stage);
   const { core, api, data } = createCorePolicies(stack, stage, hostedZoneId);
   const edge = createEdgePolicy(stack, stage, hostedZoneId);
   const observability = createObservabilityPolicy(stack, stage);
-  return { core, api, data, edge, observability, runtimeBoundary };
+  return {
+    core,
+    api,
+    data,
+    edge,
+    observability,
+    runtimeBoundary,
+    inventoryRuntimeBoundary,
+  };
 }

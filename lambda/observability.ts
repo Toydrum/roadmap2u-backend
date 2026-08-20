@@ -25,6 +25,7 @@ const OBSERVED_SERVICES = [
   'account-closure-worker',
   'account-closure-reconciler',
   'commercial-config-broker',
+  'commercial-inventory-executor',
   'catalog',
   'access-reader',
   'account-closure-request',

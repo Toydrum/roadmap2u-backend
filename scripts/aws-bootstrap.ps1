@@ -101,6 +101,35 @@ function Assert-GitHubOidcProvider {
   }
 }
 
+function Assert-CommercialInventoryControlPlane {
+  $outputsJson = & $awsCli cloudformation describe-stacks `
+    --region $Region `
+    --stack-name 'Roadmap-CiBootstrap' `
+    --query 'Stacks[0].Outputs' `
+    --output json
+  Assert-LastCommand 'Reading Roadmap-CiBootstrap commercial inventory outputs'
+  $outputs = @($outputsJson | ConvertFrom-Json)
+
+  foreach ($stage in @('dev', 'test', 'prod')) {
+    $outputKey = "${stage}InventoryRuntimeBoundaryArn"
+    $expectedArn = "arn:aws:iam::$AccountId`:policy/roadmap2u/$stage/roadmap2u-$stage-inventory-runtime-boundary"
+    $matches = @($outputs | Where-Object { $_.OutputKey -ceq $outputKey })
+    if ($matches.Count -ne 1 -or $matches[0].OutputValue -cne $expectedArn) {
+      throw "Roadmap-CiBootstrap must expose exactly $outputKey=$expectedArn before toolkit or workload deployment."
+    }
+
+    $policyArn = & $awsCli iam get-policy `
+      --region $Region `
+      --policy-arn $expectedArn `
+      --query 'Policy.Arn' `
+      --output text
+    Assert-LastCommand "Reading $stage commercial inventory runtime boundary"
+    if ("$policyArn".Trim() -cne $expectedArn) {
+      throw "Commercial inventory runtime boundary mismatch for $stage."
+    }
+  }
+}
+
 function Enter-BootstrapOperatorSession {
   if ([string]::IsNullOrWhiteSpace($MfaCode) -or $MfaCode -notmatch '^\d{6}$') {
     throw 'deploy-control-plane, deploy-stage-toolkits, and deploy-all require -MfaCode with six digits.'
@@ -255,6 +284,10 @@ try {
         Remove-Item -LiteralPath $resolvedTemporaryPath -Recurse -Force
       }
     }
+  }
+
+  if ($Phase -in @('deploy-control-plane', 'deploy-stage-toolkits', 'deploy-all')) {
+    Assert-CommercialInventoryControlPlane
   }
 
   if ($Phase -in @('deploy-stage-toolkits', 'deploy-all')) {

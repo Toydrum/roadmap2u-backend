@@ -1,6 +1,16 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "RoadMap2U stage-isolated CDK bootstrap (template version 33)",
+  "Description": "RoadMap2U stage-isolated CDK bootstrap (template version 34)",
+  "Metadata": {
+    "RoadMap2U": {
+      "TemplateVersion": 34,
+      "StackName": "RoadMap2U-CDK-test",
+      "Qualifier": "rmap2utst",
+      "Stage": "test",
+      "TerminationProtection": true,
+      "SourceTemplateSha256": "1b42c36334b316ae1b756004943558bfb2dc0e58afa24b20481ec7e65ac8fae1"
+    }
+  },
   "Parameters": {
     "Stage": {
       "Type": "String",
@@ -564,7 +574,7 @@
           "Fn::Sub": "/cdk-bootstrap/${Qualifier}/version"
         },
         "Type": "String",
-        "Value": "33",
+        "Value": "34",
         "Description": "Version of the RoadMap2U stage-isolated CDK bootstrap resources",
         "Tags": {
           "roadmap2u-project": "RoadMap2U",
@@ -634,15 +644,7 @@
       }
     },
     "BootstrapVersion": {
-      "Value": "33"
-    }
-  },
-  "Metadata": {
-    "RoadMap2U": {
-      "StackName": "RoadMap2U-CDK-test",
-      "Qualifier": "rmap2utst",
-      "Stage": "test",
-      "TerminationProtection": true
+      "Value": "34"
     }
   }
 }

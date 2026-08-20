@@ -246,13 +246,14 @@ describe('observability', () => {
     expect(true).toBe(true);
   });
 
-  it('allows only the three bounded commercial HTTP entrypoint service names', async () => {
+  it('allows only the bounded commercial entrypoint service names', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
 
     for (const service of [
       'catalog',
       'access-reader',
       'account-closure-request',
+      'commercial-inventory-executor',
     ] as const) {
       const wrapped = instrumentHandler(service, async () => ({ statusCode: 204 }));
       await expect(wrapped({})).resolves.toEqual({ statusCode: 204 });
@@ -262,6 +263,7 @@ describe('observability', () => {
     expect(capture).toContain('"service":"catalog"');
     expect(capture).toContain('"service":"access-reader"');
     expect(capture).toContain('"service":"account-closure-request"');
+    expect(capture).toContain('"service":"commercial-inventory-executor"');
   });
 
   it('instruments the real public catalog and JWT access entrypoints without logging requests', async () => {

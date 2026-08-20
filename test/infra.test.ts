@@ -174,6 +174,7 @@ describe('stage backend infrastructure', () => {
         `/aws/lambda/roadmap-account-closure-worker-${stage}`,
         `/aws/lambda/roadmap-catalog-${stage}`,
         `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
+        `/aws/lambda/roadmap-commercial-inventory-executor-${stage}`,
         `/aws/lambda/roadmap-post-confirmation-${stage}`,
         `/aws/lambda/roadmap-pre-signup-${stage}`,
         `/aws/lambda/roadmap-router-${stage}`,
@@ -213,6 +214,7 @@ describe('stage backend infrastructure', () => {
           `roadmap-account-closure-worker-${stage}`,
           `roadmap-catalog-${stage}`,
           `roadmap-commercial-config-broker-${stage}`,
+          `roadmap-commercial-inventory-executor-${stage}`,
           `roadmap-post-confirmation-${stage}`,
           `roadmap-pre-signup-${stage}`,
           `roadmap-router-${stage}`,
@@ -222,8 +224,13 @@ describe('stage backend infrastructure', () => {
         const roleLogicalId = fn.Properties.Role['Fn::GetAtt'][0] as string;
         const role = template.Resources[roleLogicalId] as any;
         expect(role.Properties.Path).toBe(`/roadmap2u/${stage}/runtime/`);
+        const boundaryName =
+          fn.Properties.FunctionName ===
+          `roadmap-commercial-inventory-executor-${stage}`
+            ? `roadmap2u-${stage}-inventory-runtime-boundary`
+            : `roadmap2u-${stage}-runtime-boundary`;
         expect(JSON.stringify(role.Properties.PermissionsBoundary)).toContain(
-          `/roadmap2u/${stage}/roadmap2u-${stage}-runtime-boundary`,
+          `/roadmap2u/${stage}/${boundaryName}`,
         );
         expect(role.Properties.Tags).toEqual(
           expect.arrayContaining([
