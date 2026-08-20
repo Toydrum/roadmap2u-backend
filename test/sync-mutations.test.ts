@@ -435,6 +435,34 @@ describe('sync mutation groups v2', () => {
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
+  it('rejects an adversarially nested unknown field before hashing or DynamoDB access', async () => {
+    const nestedRoot: Record<string, unknown> = {};
+    let nested = nestedRoot;
+    for (let depth = 0; depth < 20_000; depth += 1) {
+      const next: Record<string, unknown> = {};
+      nested['next'] = next;
+      nested = next;
+    }
+    const malformed = { ...tree('tree-deep-unknown'), unexpected: nestedRoot };
+
+    await expect(
+      pushSync(ctx(), {
+        schemaVersion: 13,
+        contractVersion: CONTRACT_VERSION,
+        mutationGroups: [
+          {
+            id: 'mg-deep-unknown',
+            expectedCount: 1,
+            records: [{ store: 'trees', record: malformed as never }],
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'SYNC_SCHEMA_INVALID' });
+
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
   it('maps a cross-tree parent relation to SYNC_SCHEMA_INVALID without masking it as conflict', async () => {
     const owningTree = tree('tree-owning');
     const foreignParent = node('foreign-parent', 'tree-foreign');
@@ -1634,6 +1662,131 @@ describe('sync mutation groups v2', () => {
       code: 'MUTATION_GROUP_INVALID',
     });
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
+  it('accepts an exact pre-TTL marker retry after revalidating guards without reapplying records', async () => {
+    const before = tree('tree-legacy-marker');
+    const incoming = { ...before, rev: 2, updatedAt: before.updatedAt + 10 };
+    const payload = {
+      schemaVersion: 13,
+      contractVersion: CONTRACT_VERSION,
+      mutationGroups: [
+        {
+          id: 'mg-legacy-marker',
+          expectedCount: 1,
+          records: [{ store: 'trees' as const, record: incoming }],
+        },
+      ],
+    } as const;
+    stubCommercialReads([recordItem(before)]);
+    ddbMock.on(TransactWriteCommand).resolves({});
+    await pushSync(ctx(), payload as never);
+
+    const firstTransaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+    const retainedMarker = firstTransaction.TransactItems?.find(
+      (item) => item.Put?.Item?.['sk'] === 'MUTATION#mg-legacy-marker',
+    )?.Put?.Item as Record<string, unknown>;
+    const { ttl: removedTtl, ...historicalMarker } = retainedMarker;
+    expect(removedTtl).toBeDefined();
+    expect(Object.keys(historicalMarker).sort()).toEqual(
+      ['pk', 'sk', 'requestHash', 'expectedCount', 'result', 'createdAt'].sort(),
+    );
+
+    stubCommercialReads([recordItem(incoming)], historicalMarker);
+    const readsBeforeRetry = ddbMock.commandCalls(GetCommand).length;
+    await expect(pushSync(ctx(), payload as never)).resolves.toEqual({
+      applied: ['tree-legacy-marker'],
+      rejected: [],
+      serverRecords: [],
+    });
+
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+    const retryReads = ddbMock
+      .commandCalls(GetCommand)
+      .slice(readsBeforeRetry)
+      .map((call) => call.args[0].input.Key);
+    expect(retryReads).toHaveLength(3);
+    expect(retryReads).toEqual(
+      expect.arrayContaining([
+        { pk: K.user(OWNER), sk: 'MUTATION#mg-legacy-marker' },
+        K.profile(OWNER),
+        accountClosureKey(OWNER),
+      ]),
+    );
+    expect(retryReads.some((key) => String(key?.['sk']).startsWith('REC#'))).toBe(false);
+  });
+
+  it.each([
+    {
+      label: 'an incorrect ttl',
+      caseId: 'wrong-ttl',
+      tamper: (marker: Record<string, unknown>) => ({
+        ...marker,
+        ttl: Number(marker['ttl']) + 1,
+      }),
+    },
+    {
+      label: 'an extra field',
+      caseId: 'extra-field',
+      tamper: (marker: Record<string, unknown>) => ({ ...marker, unexpected: true }),
+    },
+  ])('rejects a marker with $label without reapplying records', async ({ caseId, tamper }) => {
+    const before = tree(`tree-marker-${caseId}`);
+    const incoming = { ...before, rev: 2, updatedAt: before.updatedAt + 10 };
+    const groupId = `mg-marker-${caseId}`;
+    const payload = {
+      schemaVersion: 13,
+      contractVersion: CONTRACT_VERSION,
+      mutationGroups: [
+        {
+          id: groupId,
+          expectedCount: 1,
+          records: [{ store: 'trees' as const, record: incoming }],
+        },
+      ],
+    } as const;
+    stubCommercialReads([recordItem(before)]);
+    ddbMock.on(TransactWriteCommand).resolves({});
+    await pushSync(ctx(), payload as never);
+
+    const firstTransaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+    const marker = firstTransaction.TransactItems?.find(
+      (item) => item.Put?.Item?.['sk'] === `MUTATION#${groupId}`,
+    )?.Put?.Item as Record<string, unknown>;
+    stubCommercialReads([recordItem(incoming)], tamper(marker));
+
+    await expect(pushSync(ctx(), payload as never)).rejects.toMatchObject({
+      code: 'MUTATION_GROUP_INVALID',
+    });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
+  it('gives every mutation marker a bounded thirty-day DynamoDB retention', async () => {
+    const { before, archived } = archivedTreeUpdate('tree-marker-retention');
+    stubCommercialReads([recordItem(before)]);
+    ddbMock.on(TransactWriteCommand).resolves({});
+
+    await pushSync(ctx(), {
+      schemaVersion: 13,
+      contractVersion: CONTRACT_VERSION,
+      mutationGroups: [
+        {
+          id: 'mg-marker-retention',
+          expectedCount: 1,
+          records: [{ store: 'trees', record: archived }],
+        },
+      ],
+    });
+
+    const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+    const marker = transaction.TransactItems?.find(
+      (item) => item.Put?.Item?.['sk'] === 'MUTATION#mg-marker-retention',
+    )?.Put?.Item;
+
+    expect(marker).toMatchObject({
+      createdAt: NOW,
+      ttl: Math.ceil(NOW / 1_000) + 30 * 24 * 60 * 60,
+    });
   });
 
   it('keeps a mixed stale and new group wholly pending and returns only available winners', async () => {

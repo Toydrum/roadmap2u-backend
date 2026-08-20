@@ -354,15 +354,6 @@ function parseEntry(value: unknown): { store: SyncStore; record: RawRecord } {
   if (!isPlainRecord(value.record)) invalid('sync record must be a plain object');
   const store = value.store as SyncStore;
   const record = value.record;
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(record);
-  } catch {
-    return invalid('sync record is not JSON serializable');
-  }
-  if (byteLength(serialized) > SYNC_VALIDATION_LIMITS.maxRecordBytes) {
-    invalid(`sync record exceeds ${SYNC_VALIDATION_LIMITS.maxRecordBytes} UTF-8 bytes`);
-  }
   exactShape(store, record);
   validateBase(record);
   ({
@@ -373,10 +364,28 @@ function parseEntry(value: unknown): { store: SyncStore; record: RawRecord } {
     harvests: validateHarvest,
     preserves: validatePreserve,
   } satisfies Record<SyncStore, (record: RawRecord) => void>)[store](record);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(record);
+  } catch {
+    return invalid('sync record is not JSON serializable');
+  }
+  if (byteLength(serialized) > SYNC_VALIDATION_LIMITS.maxRecordBytes) {
+    invalid(`sync record exceeds ${SYNC_VALIDATION_LIMITS.maxRecordBytes} UTF-8 bytes`);
+  }
   return { store, record };
 }
 
 type ParsedEntry = ReturnType<typeof parseEntry>;
+
+/**
+ * Validates bounded record shapes before callers derive hashes from untrusted input.
+ * Relationship checks remain in validateSyncBatch because they may require storage reads.
+ */
+export function validateSyncEntryShapes(entries: readonly unknown[]): void {
+  if (!Array.isArray(entries)) invalid('entries must be an array');
+  entries.forEach(parseEntry);
+}
 
 function recordKey(store: SyncStore, id: string): string {
   return `${store}\u0000${id}`;

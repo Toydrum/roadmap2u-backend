@@ -31,7 +31,7 @@ import {
   type CommercialMutationSnapshot,
   type MutationCommitProposal,
 } from '../commercial/mutation-writer';
-import { validateSyncBatch } from '../commercial/sync-validation';
+import { validateSyncBatch, validateSyncEntryShapes } from '../commercial/sync-validation';
 import {
   evaluateNodeUsageMutation,
   evaluateTreeUsageMutation,
@@ -60,6 +60,7 @@ const STORES: ReadonlySet<string> = new Set<SyncStore>([
   'preserves',
 ]);
 const SAFE_MUTATION_GROUP_ID = /^[A-Za-z0-9:._/-]{1,160}$/;
+const MUTATION_MARKER_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 type TransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
 
@@ -76,7 +77,22 @@ interface MutationMarkerItem {
   readonly expectedCount: number;
   readonly result: { readonly outcome: 'applied'; readonly count: number };
   readonly createdAt: number;
+  readonly ttl?: number;
 }
+
+interface RetainedMutationMarkerItem extends MutationMarkerItem {
+  readonly ttl: number;
+}
+
+const PRE_TTL_MUTATION_MARKER_KEYS = [
+  'pk',
+  'sk',
+  'requestHash',
+  'expectedCount',
+  'result',
+  'createdAt',
+] as const;
+const RETAINED_MUTATION_MARKER_KEYS = [...PRE_TTL_MUTATION_MARKER_KEYS, 'ttl'] as const;
 
 interface CommercialGroupRequest {
   readonly ownerSub: string;
@@ -345,12 +361,13 @@ function hasCommercialGrowth(delta: UsageMutationDelta): boolean {
 }
 
 function markerPut(tableName: string, request: CommercialGroupRequest): TransactItem {
-  const item: MutationMarkerItem = {
+  const item: RetainedMutationMarkerItem = {
     ...mutationKey(request.ownerSub, request.group.id),
     requestHash: request.requestHash,
     expectedCount: request.group.expectedCount,
     result: { outcome: 'applied', count: request.group.records.length },
     createdAt: request.syncedAt,
+    ttl: Math.ceil((request.syncedAt + MUTATION_MARKER_RETENTION_MS) / 1_000),
   };
   return {
     Put: {
@@ -361,19 +378,25 @@ function markerPut(tableName: string, request: CommercialGroupRequest): Transact
   };
 }
 
+function mutationMarkerFormat(
+  marker: MutationMarkerItem,
+): 'pre-ttl' | 'retained' | null {
+  // Previously deployed pre-TTL writers may have produced six-field markers.
+  // They remain retry receipts only; every new write uses the retained form.
+  if (hasExactKeys(marker, PRE_TTL_MUTATION_MARKER_KEYS)) return 'pre-ttl';
+  if (!hasExactKeys(marker, RETAINED_MUTATION_MARKER_KEYS)) return null;
+  return Number.isSafeInteger(marker.ttl) &&
+    marker.ttl === Math.ceil((marker.createdAt + MUTATION_MARKER_RETENTION_MS) / 1_000)
+    ? 'retained'
+    : null;
+}
+
 function isCanonicalMarker(
   marker: MutationMarkerItem,
   request: CommercialGroupRequest,
 ): boolean {
   return (
-    hasExactKeys(marker, [
-      'pk',
-      'sk',
-      'requestHash',
-      'expectedCount',
-      'result',
-      'createdAt',
-    ]) &&
+    mutationMarkerFormat(marker) !== null &&
     marker.pk === K.user(request.ownerSub) &&
     marker.sk === `MUTATION#${request.group.id}` &&
     marker.requestHash === request.requestHash &&
@@ -926,6 +949,14 @@ async function pushInto(
       }
     }
     if (totalRecords > LIMITS.syncPushMax) throw new ApiError('LIMIT_EXCEEDED');
+    try {
+      validateSyncEntryShapes(req.mutationGroups.flatMap((group) => group.records));
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'VALIDATION') {
+        throw new ApiError('SYNC_SCHEMA_INVALID', error.message);
+      }
+      throw error;
+    }
     const response: SyncPushResponse = { applied: [], rejected: [], serverRecords: [] };
     for (const group of req.mutationGroups) {
       const result = await applyV2Group(ctx, ownerId, group, expectedGuardianLink);
