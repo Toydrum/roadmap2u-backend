@@ -108,7 +108,8 @@ function Assert-CommercialInventoryControlPlane {
     --query 'Stacks[0].Outputs' `
     --output json
   Assert-LastCommand 'Reading Roadmap-CiBootstrap commercial inventory outputs'
-  $outputs = @($outputsJson | ConvertFrom-Json)
+  # Windows PowerShell 5.1 already returns JSON arrays as Object[]; @() would nest the collection.
+  $outputs = $outputsJson | ConvertFrom-Json
 
   foreach ($stage in @('dev', 'test', 'prod')) {
     $outputKey = "${stage}InventoryRuntimeBoundaryArn"

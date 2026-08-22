@@ -860,6 +860,8 @@ describe('custom stage CDK bootstrap template', () => {
       script.indexOf("Assert-LastCommand 'Deploying Roadmap-CiBootstrap directly with CloudFormation'"),
     );
     expect(script).toContain('function Assert-CommercialInventoryControlPlane');
+    expect(script).toContain('$outputs = $outputsJson | ConvertFrom-Json');
+    expect(script).not.toContain('$outputs = @($outputsJson | ConvertFrom-Json)');
     expect(script).toContain("foreach ($stage in @('dev', 'test', 'prod'))");
     expect(script).toContain('${stage}InventoryRuntimeBoundaryArn');
     expect(script).toContain('roadmap2u-$stage-inventory-runtime-boundary');
