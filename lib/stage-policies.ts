@@ -184,6 +184,19 @@ function commercialInventoryExecutorLogGroupArn(
   );
 }
 
+function commercialInventoryExecutorRoleNameArn(
+  stack: Stack,
+  stage: PolicyStage,
+): string {
+  return resourceArn(
+    stack,
+    'iam',
+    'role',
+    `roadmap-commercial-inventory-executor-${stage}`,
+    { region: '' },
+  );
+}
+
 function commercialAlarmTopicArn(stack: Stack, stage: PolicyStage): string {
   return `arn:${Aws.PARTITION}:sns:${stack.region}:${stack.account}:roadmap-commercial-alerts-${stage}`;
 }
@@ -1066,6 +1079,7 @@ function createObservabilityPolicy(
     `roadmap2u/${stage}/runtime/roadmap-commercial-inventory-executor-${stage}`,
     { region: '' },
   );
+  const inventoryRoleNameArn = commercialInventoryExecutorRoleNameArn(stack, stage);
   const topicActions = [
     'sns:CreateTopic',
     'sns:GetTopicAttributes',
@@ -1104,9 +1118,38 @@ function createObservabilityPolicy(
       new iam.PolicyStatement({
         sid: 'SetCommercialInventoryRuntimeBoundary',
         actions: ['iam:PutRolePermissionsBoundary'],
-        resources: [inventoryRoleArn],
+        resources: [inventoryRoleArn, inventoryRoleNameArn],
         conditions: {
           StringEquals: { 'iam:PermissionsBoundary': inventoryBoundary },
+        },
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyNamedCommercialInventoryRole',
+        actions: [
+          'iam:DeleteRole',
+          'iam:DeleteRolePolicy',
+          'iam:GetRole',
+          'iam:GetRolePolicy',
+          'iam:ListAttachedRolePolicies',
+          'iam:ListRolePolicies',
+          'iam:ListRoleTags',
+          'iam:PutRolePolicy',
+          'iam:TagRole',
+          'iam:UntagRole',
+          'iam:UpdateAssumeRolePolicy',
+          'iam:UpdateRole',
+          'iam:UpdateRoleDescription',
+        ],
+        resources: [inventoryRoleNameArn],
+      }),
+      new iam.PolicyStatement({
+        sid: 'AttachOnlyLambdaBasicExecutionToNamedCommercialInventoryRole',
+        actions: ['iam:AttachRolePolicy', 'iam:DetachRolePolicy'],
+        resources: [inventoryRoleNameArn],
+        conditions: {
+          StringEquals: {
+            'iam:PolicyARN': `arn:${Aws.PARTITION}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole`,
+          },
         },
       }),
       new iam.PolicyStatement({
