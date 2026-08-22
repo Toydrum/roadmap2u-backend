@@ -646,7 +646,7 @@ describe('custom stage CDK bootstrap template', () => {
     });
   });
 
-  it('manages CloudFormation role-name lookups only for the twenty exact control-plane roles', () => {
+  it('manages CloudFormation role-name lookups only for the exact control-plane roles', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
     const statements =
       template.Resources.BootstrapOperatorRole.Properties.Policies[0].PolicyDocument.Statement;
@@ -677,17 +677,20 @@ describe('custom stage CDK bootstrap template', () => {
       'arn:aws:iam::765932874577:role/roadmap2u-dev-commercial-migration',
       'arn:aws:iam::765932874577:role/roadmap2u-dev-commercial-flag-operator',
       'arn:aws:iam::765932874577:role/roadmap2u-dev-commercial-e2e-fixture',
+      'arn:aws:iam::765932874577:role/roadmap2u-dev-sponsored-access-operator',
       'arn:aws:iam::765932874577:role/roadmap2u-test-backend-deploy',
       'arn:aws:iam::765932874577:role/roadmap2u-test-frontend-deploy',
       'arn:aws:iam::765932874577:role/roadmap2u-test-smoke-cleanup',
       'arn:aws:iam::765932874577:role/roadmap2u-test-commercial-migration',
       'arn:aws:iam::765932874577:role/roadmap2u-test-commercial-flag-operator',
       'arn:aws:iam::765932874577:role/roadmap2u-test-commercial-e2e-fixture',
+      'arn:aws:iam::765932874577:role/roadmap2u-test-sponsored-access-operator',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-backend-deploy',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-frontend-deploy',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-smoke-cleanup',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-commercial-migration',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-commercial-flag-operator',
+      'arn:aws:iam::765932874577:role/roadmap2u-prod-sponsored-access-operator',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-dns-plan',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-dns-cutover',
       'arn:aws:iam::765932874577:role/roadmap2u-nonprod-break-glass',
