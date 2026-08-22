@@ -100,6 +100,21 @@ function functionArns(stack: Stack, stage: PolicyStage): string[] {
   ].map((name) => functionArn(stack, stage, name));
 }
 
+function eventSourceMappingArn(stack: Stack): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'lambda',
+      region: stack.region,
+      account: stack.account,
+      resource: 'event-source-mapping',
+      resourceName: '*',
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
+}
+
 function commercialHttpFunctionArns(stack: Stack, stage: PolicyStage): string[] {
   return ['catalog', 'access-reader'].map((name) => functionArn(stack, stage, name));
 }
@@ -776,6 +791,11 @@ function createCorePolicies(
         conditions: {
           StringEquals: { 'aws:RequestedRegion': stack.region },
         },
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyAccountClosureEventSourceMappingTags',
+        actions: ['lambda:ListTags', 'lambda:TagResource', 'lambda:UntagResource'],
+        resources: [eventSourceMappingArn(stack)],
       }),
       new iam.PolicyStatement({
         sid: 'ManageAccountClosureReconcileRule',
