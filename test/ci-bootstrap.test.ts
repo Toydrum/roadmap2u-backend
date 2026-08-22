@@ -30,7 +30,7 @@ describe('GitHub OIDC bootstrap', () => {
   it('reuses the existing GitHub provider and trusts immutable repo identities', () => {
     const template = bootstrapTemplate();
     template.resourceCountIs('AWS::IAM::OIDCProvider', 0);
-    template.resourceCountIs('AWS::IAM::Role', 12);
+    template.resourceCountIs('AWS::IAM::Role', 20);
 
     const rendered = JSON.stringify(template.toJSON());
     for (const stage of ['dev', 'test', 'prod']) {
@@ -150,7 +150,8 @@ describe('GitHub OIDC bootstrap', () => {
         'cognito-idp:AdminGetUser',
       ]);
       expect(dynamo.Action).toEqual(['dynamodb:DeleteItem', 'dynamodb:Query']);
-      expect(JSON.stringify(statements)).not.toContain('dynamodb:BatchWriteItem');
+      const allowedStatements = statements.filter((statement: any) => statement.Effect !== 'Deny');
+      expect(JSON.stringify(allowedStatements)).not.toContain('dynamodb:BatchWriteItem');
       const policyJson = JSON.stringify(statements);
       expect(policyJson).toContain(`table/roadmap-${stage}`);
       expect(policyJson).toContain(`/roadmap2u/${stage}/user-pool-id`);
@@ -163,6 +164,8 @@ describe('GitHub OIDC bootstrap', () => {
       expect(policyJson).not.toContain('cloudformation:');
       expect(policyJson).toContain('aws:ResourceTag/roadmap2u-project');
       expect(policyJson).toContain('RoadMap2U');
+      expect(policyJson).toContain('DenyCommercialConfigWrites');
+      expect(policyJson).toContain('COMMERCIAL#CONFIG');
       expect(rendered.Outputs).toHaveProperty(`${stage}SmokeCleanupRoleArn`);
     }
   });
@@ -203,9 +206,9 @@ describe('GitHub OIDC bootstrap', () => {
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
     ) as any[];
 
-    expect(managedPolicies).toHaveLength(15);
+    expect(managedPolicies).toHaveLength(21);
     expect(new Set(managedPolicies.map((policy) => policy.Properties.ManagedPolicyName)).size).toBe(
-      15,
+      21,
     );
     for (const stage of ['dev', 'test', 'prod']) {
       const stagePolicies = managedPolicies.filter(
@@ -216,6 +219,8 @@ describe('GitHub OIDC bootstrap', () => {
         `roadmap2u-${stage}-cfn-core`,
         `roadmap2u-${stage}-cfn-data`,
         `roadmap2u-${stage}-cfn-edge`,
+        `roadmap2u-${stage}-cfn-observability`,
+        `roadmap2u-${stage}-inventory-runtime-boundary`,
         `roadmap2u-${stage}-runtime-boundary`,
       ]);
 
@@ -271,6 +276,400 @@ describe('GitHub OIDC bootstrap', () => {
     expect(prodActions).not.toContain('s3:DeleteBucket');
     expect(prodActions).not.toContain('dynamodb:DeleteTable');
     expect(prodActions).not.toContain('cognito-idp:DeleteUserPool');
+  });
+
+  it('isolates observability provisioning in one bounded stage policy', () => {
+    const template = bootstrapTemplate().toJSON();
+    const managedPolicies = Object.values(template.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+    const roles = Object.values(template.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Role',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const policy = managedPolicies.find(
+        (candidate) =>
+          candidate.Properties.ManagedPolicyName ===
+          `roadmap2u-${stage}-cfn-observability`,
+      );
+      expect(policy).toBeDefined();
+      expect(policy.Properties.Path).toBe(`/roadmap2u/${stage}/`);
+      expect(JSON.stringify(policy.Properties.PolicyDocument).length).toBeLessThanOrEqual(6000);
+
+      const statements = policy.Properties.PolicyDocument.Statement;
+      expect(statements.every((statement: any) => statement.Resource !== '*')).toBe(true);
+      const actions = statements.flatMap((statement: any) =>
+        Array.isArray(statement.Action) ? statement.Action : [statement.Action],
+      );
+      expect(actions).toContain('sns:ListSubscriptionsByTopic');
+      expect(actions).not.toContain('sns:Publish');
+      expect(actions).not.toContain('cloudwatch:PutMetricData');
+      expect(JSON.stringify(statements)).toContain(`roadmap-commercial-alerts-${stage}`);
+      expect(JSON.stringify(statements)).toContain(`roadmap-commercial-${stage}-*`);
+
+      const commercialHttpFunctions = statements.find(
+        (statement: any) => statement.Sid === 'ManageOnlyCommercialHttpFunctions',
+      );
+      const commercialHttpLogs = statements.find(
+        (statement: any) => statement.Sid === 'ManageOnlyCommercialHttpLogGroups',
+      );
+      const commercialHttpLogTags = statements.find(
+        (statement: any) => statement.Sid === 'ManageOnlyCommercialHttpLogGroupTags',
+      );
+      expect(commercialHttpFunctions.Action).toContain('lambda:CreateFunction');
+      expect(commercialHttpFunctions.Action).toContain('lambda:AddPermission');
+      expect(commercialHttpFunctions.Action).not.toContain(
+        'lambda:CreateFunctionUrlConfig',
+      );
+      expect(JSON.stringify(commercialHttpFunctions.Resource)).toContain(
+        `:function:roadmap-catalog-${stage}`,
+      );
+      expect(JSON.stringify(commercialHttpFunctions.Resource)).toContain(
+        `:function:roadmap-access-reader-${stage}`,
+      );
+      expect(JSON.stringify(commercialHttpFunctions.Resource)).not.toContain(
+        `roadmap-catalog-${stage === 'dev' ? 'test' : 'dev'}`,
+      );
+      expect(commercialHttpLogs.Resource).toHaveLength(3);
+      expect(commercialHttpLogTags.Resource).toHaveLength(3);
+      expect(JSON.stringify(commercialHttpLogs.Resource)).toContain(
+        `/aws/lambda/roadmap-catalog-${stage}:*`,
+      );
+      expect(JSON.stringify(commercialHttpLogs.Resource)).toContain(
+        `/aws/lambda/roadmap-access-reader-${stage}:*`,
+      );
+      expect(JSON.stringify(commercialHttpLogs.Resource)).toContain(
+        `/aws/lambda/roadmap-commercial-inventory-executor-${stage}:*`,
+      );
+      expect(JSON.stringify(commercialHttpLogTags.Resource)).not.toContain(':*');
+
+      for (const role of roles) {
+        expect(JSON.stringify(role.Properties.ManagedPolicyArns ?? [])).not.toContain(
+          `roadmap2u-${stage}-cfn-observability`,
+        );
+      }
+      expect(template.Outputs).toHaveProperty(`${stage}CfnObservabilityPolicyArn`);
+    }
+  });
+
+  it('lets only the backend OIDC role inspect its topic and exercise its synthetic alarm', () => {
+    const template = bootstrapTemplate().toJSON();
+    const roles = Object.entries(template.Resources).filter(
+      ([, resource]: [string, any]) => resource.Type === 'AWS::IAM::Role',
+    ) as [string, any][];
+    const inlinePolicies = Object.values(template.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Policy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const [backendRoleId] = roles.find(
+        ([, role]) => role.Properties.RoleName === `roadmap2u-${stage}-backend-deploy`,
+      ) as [string, any];
+      const statements = inlinePolicies
+        .filter((policy) => JSON.stringify(policy.Properties.Roles).includes(backendRoleId))
+        .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+      const topicRead = statements.find(
+        (statement: any) => statement.Sid === `InspectCommercialAlarmTopic${stage}`,
+      );
+      const synthetic = statements.find(
+        (statement: any) => statement.Sid === `ExerciseCommercialSyntheticAlarm${stage}`,
+      );
+
+      expect(topicRead.Action).toBe('sns:ListSubscriptionsByTopic');
+      expect(JSON.stringify(topicRead.Resource)).toContain(
+        `:sns:us-east-1:${ACCOUNT}:roadmap-commercial-alerts-${stage}`,
+      );
+      expect(synthetic.Action).toEqual(['cloudwatch:DescribeAlarms', 'cloudwatch:SetAlarmState']);
+      expect(JSON.stringify(synthetic.Resource)).toContain(
+        `alarm:roadmap-commercial-${stage}-synthetic`,
+      );
+
+      const nonBackendPolicies = inlinePolicies.filter(
+        (policy) => !JSON.stringify(policy.Properties.Roles).includes(backendRoleId),
+      );
+      expect(JSON.stringify(nonBackendPolicies)).not.toContain(
+        `ExerciseCommercialSyntheticAlarm${stage}`,
+      );
+    }
+  });
+
+  it('creates stage-scoped commercial operators with MFA and broker-only config mutation', () => {
+    const rendered = bootstrapTemplate().toJSON();
+    const roles = Object.values(rendered.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Role',
+    ) as any[];
+    const policies = Object.values(rendered.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Policy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      for (const purpose of ['commercial-migration', 'commercial-flag-operator']) {
+        const roleName = `roadmap2u-${stage}-${purpose}`;
+        const role = roles.find((candidate) => candidate.Properties.RoleName === roleName);
+        expect(role, roleName).toBeDefined();
+        expect(role.Properties.Path).toBe(`/roadmap2u/${stage}/operations/`);
+        const trust = JSON.stringify(role.Properties.AssumeRolePolicyDocument);
+        expect(trust).toContain(`arn:aws:iam::${ACCOUNT}:user/Hector-admin`);
+        expect(trust).toContain('aws:MultiFactorAuthPresent');
+        expect(trust).toContain('aws:MultiFactorAuthAge');
+
+        const policyName = purpose === 'commercial-migration'
+          ? `CommercialMigrationPolicy-${stage}`
+          : `CommercialFlagOperatorPolicy-${stage}`;
+        const policy = policies.find(
+          (candidate) => candidate.Properties.PolicyName === policyName,
+        );
+        expect(policy, roleName).toBeDefined();
+        const statements = policy.Properties.PolicyDocument.Statement;
+        const functionArn = `:function:roadmap-commercial-config-broker-${stage}`;
+        const invokeUrl = statements.find((statement: any) =>
+          (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).includes(
+            'lambda:InvokeFunctionUrl',
+          ),
+        );
+        const invokeViaUrl = statements.find((statement: any) =>
+          (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).includes(
+            'lambda:InvokeFunction',
+          ),
+        );
+        expect(JSON.stringify(invokeUrl.Resource)).toContain(functionArn);
+        expect(invokeUrl.Condition.StringEquals['lambda:FunctionUrlAuthType']).toBe('AWS_IAM');
+        expect(JSON.stringify(invokeViaUrl.Resource)).toContain(functionArn);
+        expect(invokeViaUrl.Condition.Bool['lambda:InvokedViaFunctionUrl']).toBe('true');
+
+        const policyJson = JSON.stringify(statements);
+        expect(policyJson).not.toContain('secretsmanager:');
+        expect(policyJson).not.toContain('cognito-idp:');
+        expect(JSON.stringify(policy.Properties.PolicyDocument).length).toBeLessThanOrEqual(
+          10_000,
+        );
+        const deny = statements.find(
+          (statement: any) => statement.Sid === 'DenyCommercialConfigWrites',
+        );
+        expect(deny.Effect).toBe('Deny');
+        expect(deny.Action).toEqual([
+          'dynamodb:BatchWriteItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:PutItem',
+          'dynamodb:UpdateItem',
+        ]);
+        expect(deny.Condition).toEqual({
+          'ForAnyValue:StringEquals': {
+            'dynamodb:LeadingKeys': 'COMMERCIAL#CONFIG',
+          },
+        });
+        const adversarialLeadingKeys = ['USER#123', 'COMMERCIAL#CONFIG'];
+        expect(
+          adversarialLeadingKeys.some(
+            (key) => key === deny.Condition['ForAnyValue:StringEquals']['dynamodb:LeadingKeys'],
+          ),
+          'a mixed USER+CONFIG transaction must match the explicit deny',
+        ).toBe(true);
+
+        if (purpose === 'commercial-migration') {
+          const primaryTableArn = `table/roadmap-${stage}`;
+          const safeProjection = [
+            'accountType',
+            'createdAt',
+            'createdMinorIds',
+            'familyFenceVersion',
+            'gsi1pk',
+            'gsi1sk',
+            'guardianId',
+            'kind',
+            'linkId',
+            'minorId',
+            'pk',
+            'sk',
+            'status',
+            'userId',
+          ];
+          const scan = statements.find(
+            (statement: any) => statement.Sid === 'ScanOnlyFamilyFenceProjection',
+          );
+          expect(scan.Action).toBe('dynamodb:Scan');
+          expect(JSON.stringify(scan.Resource)).toContain(primaryTableArn);
+          expect(JSON.stringify(scan.Resource)).not.toContain('/index/');
+          expect(JSON.stringify(scan.Resource)).not.toContain('roadmap-access-audit');
+          expect(scan.Condition).toEqual({
+            'ForAllValues:StringEquals': {
+              'dynamodb:Attributes': safeProjection,
+            },
+            StringEquals: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+            Null: { 'dynamodb:Attributes': 'false' },
+          });
+          expect(JSON.stringify(scan.Condition)).not.toContain('dynamodb:LeadingKeys');
+
+          const userReads = statements.find(
+            (statement: any) => statement.Sid === 'ReadOnlyUserMigrationPartitions',
+          );
+          expect(userReads.Action).toBe('dynamodb:GetItem');
+          expect(userReads.Condition).toEqual({
+            'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' },
+            'ForAllValues:StringEquals': {
+              'dynamodb:Attributes': safeProjection,
+            },
+            Null: { 'dynamodb:Attributes': 'false' },
+          });
+          expect(JSON.stringify(userReads.Resource)).toContain(primaryTableArn);
+
+          const closureReads = statements.find(
+            (statement: any) => statement.Sid === 'ReadOnlyFamilyFenceClosures',
+          );
+          expect(closureReads.Action).toBe('dynamodb:GetItem');
+          expect(closureReads.Condition).toEqual({
+            'ForAllValues:StringLike': {
+              'dynamodb:LeadingKeys': 'ACCOUNT_CLOSURE#*',
+            },
+            'ForAllValues:StringEquals': {
+              'dynamodb:Attributes': safeProjection,
+            },
+            Null: { 'dynamodb:Attributes': 'false' },
+          });
+          expect(JSON.stringify(closureReads.Resource)).toContain(primaryTableArn);
+
+          const primaryWrites = statements.find(
+            (statement: any) => statement.Sid === 'TransactOnlyUserMigrationWrites',
+          );
+          expect(primaryWrites.Action).toBe('dynamodb:UpdateItem');
+          expect(primaryWrites.Condition).toEqual({
+            'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' },
+            StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+          });
+          expect(JSON.stringify(primaryWrites.Resource)).toContain(`table/roadmap-${stage}`);
+          expect(JSON.stringify(primaryWrites.Resource)).not.toContain('roadmap-access-audit');
+
+          const primaryChecks = statements.find(
+            (statement: any) => statement.Sid === 'TransactOnlyFamilyFenceChecks',
+          );
+          expect(primaryChecks.Action).toBe('dynamodb:ConditionCheckItem');
+          expect(primaryChecks.Condition).toEqual({
+            'ForAllValues:StringLike': {
+              'dynamodb:LeadingKeys': ['ACCOUNT_CLOSURE#*', 'USER#*'],
+            },
+            StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+          });
+          expect(JSON.stringify(primaryChecks.Resource)).toContain(primaryTableArn);
+          expect(JSON.stringify(primaryChecks.Resource)).not.toContain('roadmap-access-audit');
+
+          const auditWrites = statements.find(
+            (statement: any) => statement.Sid === 'TransactOnlyMigrationAudit',
+          );
+          expect(auditWrites.Action).toBe('dynamodb:PutItem');
+          expect(auditWrites.Condition).toEqual({
+            'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#*' },
+            StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+          });
+          expect(JSON.stringify(auditWrites.Resource)).toContain(
+            `table/roadmap-access-audit-${stage}`,
+          );
+          expect(
+            statements.filter((statement: any) =>
+              JSON.stringify(statement.Resource).includes(
+                `table/roadmap-access-audit-${stage}`,
+              ),
+            ),
+          ).toEqual([auditWrites]);
+
+          const directWriteAllows = statements.filter(
+            (statement: any) =>
+              statement.Effect === 'Allow' &&
+              (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).some(
+                (action: string) => [
+                  'dynamodb:ConditionCheckItem',
+                  'dynamodb:DeleteItem',
+                  'dynamodb:PutItem',
+                  'dynamodb:UpdateItem',
+                ].includes(action),
+              ) &&
+              statement.Condition?.StringEquals?.['dynamodb:EnclosingOperation'] !==
+                'TransactWriteItems',
+          );
+          expect(directWriteAllows).toEqual([]);
+        } else {
+          expect(policyJson).not.toContain('dynamodb:Scan');
+        }
+      }
+
+      expect(rendered.Outputs).toHaveProperty(`${stage}CommercialMigrationRoleArn`);
+      expect(rendered.Outputs).toHaveProperty(`${stage}CommercialFlagOperatorRoleArn`);
+    }
+  });
+
+  it('creates a non-production E2E fixture role with Cognito-only fixture access', () => {
+    const rendered = bootstrapTemplate().toJSON();
+    const roles = Object.values(rendered.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Role',
+    ) as any[];
+    const policies = Object.values(rendered.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Policy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test']) {
+      const roleName = `roadmap2u-${stage}-commercial-e2e-fixture`;
+      const role = roles.find((candidate) => candidate.Properties.RoleName === roleName);
+      expect(role, roleName).toBeDefined();
+      const policy = policies.find((candidate) =>
+        candidate.Properties.PolicyName === `CommercialE2EFixturePolicy-${stage}`,
+      );
+      expect(policy).toBeDefined();
+      const serialized = JSON.stringify(policy.Properties.PolicyDocument.Statement);
+      expect(serialized).toContain('cognito-idp:AdminCreateUser');
+      expect(serialized).toContain('cognito-idp:AdminSetUserPassword');
+      expect(serialized).toContain('aws:ResourceTag/roadmap2u-stage');
+      expect(serialized).toContain(stage);
+      expect(serialized).not.toContain('dynamodb:');
+      expect(serialized).not.toContain('cognito-idp:AdminDeleteUser');
+      expect(rendered.Outputs).toHaveProperty(`${stage}CommercialE2EFixtureRoleArn`);
+    }
+
+    expect(roles.some((role) => role.Properties.RoleName === 'roadmap2u-prod-commercial-e2e-fixture')).toBe(false);
+    expect(rendered.Outputs).not.toHaveProperty('prodCommercialE2EFixtureRoleArn');
+  });
+
+  it('limits runtime audit-table access to exact PutItem on the stage table', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const boundary = policies.find(
+        (policy) =>
+          policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-runtime-boundary`,
+      );
+      const statements = boundary.Properties.PolicyDocument.Statement;
+      const auditStatements = statements.filter((statement: any) =>
+        JSON.stringify(statement.Resource).includes(`table/roadmap-access-audit-${stage}`),
+      );
+
+      expect(auditStatements).toHaveLength(1);
+      expect(auditStatements[0].Sid).toBe('AppendOnlyAuditEvents');
+      expect(auditStatements[0].Action).toBe('dynamodb:PutItem');
+      expect(JSON.stringify(auditStatements[0].Resource)).not.toContain('/index/*');
+      expect(
+        JSON.stringify(
+          statements.find((statement: any) => statement.Sid === 'UseOnlyOwnStageTable')
+            .Resource,
+        ),
+      ).not.toContain('roadmap-access-audit');
+      expect(
+        statements.find((statement: any) => statement.Sid === 'UseOnlyOwnStageTable').Action,
+      ).not.toContain('dynamodb:TransactWriteItems');
+      expect(
+        statements.find((statement: any) => statement.Sid === 'UseOnlyOwnStageTable').Action,
+      ).not.toContain('dynamodb:Scan');
+
+      const data = policies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-data`,
+      );
+      const managedTables = data.Properties.PolicyDocument.Statement.find(
+        (statement: any) => statement.Sid === 'ManageOnlyStageTable',
+      );
+      expect(JSON.stringify(managedTables.Resource)).toContain(
+        `table/roadmap-access-audit-${stage}`,
+      );
+    }
   });
 
   it('keeps policy-size headroom below the IAM 6144-character limit', () => {
@@ -331,6 +730,63 @@ describe('GitHub OIDC bootstrap', () => {
     const rendered = JSON.stringify(bootstrapTemplate().toJSON());
     expect(rendered).toContain(':log-group:/aws/lambda/roadmap-');
     expect(rendered).not.toContain(':log-group//aws/');
+  });
+
+  it('allows CloudFormation to manage only stage Lambda Function URLs', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+    for (const stage of ['dev', 'test', 'prod']) {
+      const data = policies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-data`,
+      );
+      const functions = data.Properties.PolicyDocument.Statement.find(
+        (statement: any) => statement.Sid === 'ManageOnlyCommercialConfigBrokerFunctionUrl',
+      );
+      const brokerLogs = data.Properties.PolicyDocument.Statement.find(
+        (statement: any) => statement.Sid === 'ManageOnlyCommercialConfigBrokerLogGroup',
+      );
+      const brokerLogTags = data.Properties.PolicyDocument.Statement.find(
+        (statement: any) => statement.Sid === 'ManageOnlyCommercialConfigBrokerLogGroupTags',
+      );
+      expect(functions.Action).toEqual(expect.arrayContaining([
+        'lambda:CreateFunctionUrlConfig',
+        'lambda:DeleteFunctionUrlConfig',
+        'lambda:GetFunctionUrlConfig',
+        'lambda:UpdateFunctionUrlConfig',
+      ]));
+      expect(JSON.stringify(functions.Resource)).toContain(
+        `roadmap-commercial-config-broker-${stage}`,
+      );
+      expect(brokerLogs.Action).toEqual([
+        'logs:CreateLogGroup',
+        'logs:DeleteLogGroup',
+        'logs:PutRetentionPolicy',
+        'logs:TagResource',
+      ]);
+      expect(JSON.stringify(brokerLogs.Resource)).toContain(
+        `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
+      );
+      expect(brokerLogTags.Action).toEqual([
+        'logs:ListTagsForResource',
+        'logs:TagResource',
+        'logs:UntagResource',
+      ]);
+      expect(JSON.stringify(brokerLogTags.Resource)).toContain(
+        `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
+      );
+
+      const boundary = policies.find(
+        (policy) =>
+          policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-runtime-boundary`,
+      );
+      const runtimeLogs = boundary.Properties.PolicyDocument.Statement.find(
+        (statement: any) => statement.Sid === 'WriteOnlyOwnFunctionLogs',
+      );
+      expect(JSON.stringify(runtimeLogs.Resource)).toContain(
+        `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
+      );
+    }
   });
 
   it('keeps account policy mutation out of stage roles after toolkit log bootstrap', () => {
@@ -435,14 +891,14 @@ describe('GitHub OIDC bootstrap', () => {
         'logs:PutRetentionPolicy',
         'logs:TagResource',
       ]);
-      expect(mutation.Resource).toHaveLength(3);
+      expect(mutation.Resource).toHaveLength(4);
       expect(mutation.Resource).not.toContain('*');
       expect(tagging.Action).toEqual([
         'logs:ListTagsForResource',
         'logs:TagResource',
         'logs:UntagResource',
       ]);
-      expect(tagging.Resource).toHaveLength(3);
+      expect(tagging.Resource).toHaveLength(4);
       expect(tagging.Resource).not.toContain('*');
 
       const mutationResources = JSON.stringify(mutation.Resource);
@@ -456,6 +912,12 @@ describe('GitHub OIDC bootstrap', () => {
         expect(taggingResources).toContain(logGroupName);
         expect(taggingResources).not.toContain(`${logGroupName}:*`);
       }
+      expect(mutationResources).toContain(
+        `/aws/lambda/roadmap-account-closure-*-${stage}:*`,
+      );
+      expect(taggingResources).toContain(
+        `/aws/lambda/roadmap-account-closure-*-${stage}`,
+      );
       expect(mutationResources).not.toContain('/aws/apigateway/');
       expect(taggingResources).not.toContain('/aws/apigateway/');
       for (const otherStage of ['dev', 'test', 'prod'].filter((value) => value !== stage)) {
@@ -1110,6 +1572,34 @@ describe('GitHub OIDC bootstrap', () => {
       });
     }
     expect(JSON.stringify(statements)).not.toMatch(/logs:(Delete|PutRetention|Create)/);
+  });
+
+  it('lets each backend deployment gate read only its inventory boundary and the control-plane outputs', () => {
+    const statements = Object.values(bootstrapTemplate().toJSON().Resources)
+      .filter((resource: any) => resource.Type === 'AWS::IAM::Policy')
+      .flatMap((resource: any) => resource.Properties.PolicyDocument.Statement);
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const stackRead = statements.find(
+        (statement: any) =>
+          statement.Sid === `ReadCommercialInventoryControlPlaneStack${stage}`,
+      );
+      const boundaryRead = statements.find(
+        (statement: any) => statement.Sid === `ReadCommercialInventoryBoundary${stage}`,
+      );
+      expect(stackRead).toMatchObject({
+        Action: 'cloudformation:DescribeStacks',
+        Effect: 'Allow',
+      });
+      expect(JSON.stringify(stackRead.Resource)).toContain(':stack/Roadmap-CiBootstrap/*');
+      expect(boundaryRead).toMatchObject({
+        Action: 'iam:GetPolicy',
+        Effect: 'Allow',
+      });
+      expect(JSON.stringify(boundaryRead.Resource)).toContain(
+        `:policy/roadmap2u/${stage}/roadmap2u-${stage}-inventory-runtime-boundary`,
+      );
+    }
   });
 
   it('lets the dedicated DNS role write only the captured DNS backup', () => {

@@ -136,13 +136,6 @@ jobs:
           fetch-depth: 0
           path: roadmap2u-backend
 
-      - name: Checkout frontend contract source
-        if: ${{ needs.prepare.outputs.operation == 'deploy' }}
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: Toydrum/RoadMap2U
-          path: RoadMap2U
-
       - name: Verify checked-out SHA
         run: |
           set -euo pipefail
@@ -161,6 +154,24 @@ jobs:
           cache: npm
           cache-dependency-path: roadmap2u-backend/package-lock.json
 
+      - name: Resolve pinned frontend contract source
+        id: contract-source
+        run: node scripts/verify-contract-source.mjs resolve --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned frontend contract source
+        if: ${{ needs.prepare.outputs.operation == 'deploy' }}
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: Toydrum/RoadMap2U
+          ref: ${{ steps.contract-source.outputs.commit_sha }}
+          path: RoadMap2U
+
+      - name: Verify pinned frontend contract source
+        if: ${{ needs.prepare.outputs.operation == 'deploy' }}
+        run: >-
+          node scripts/verify-contract-source.mjs verify
+          --frontend-root "${GITHUB_WORKSPACE}/RoadMap2U"
+
       - name: Validate release
         run: |
           set -euo pipefail
@@ -172,6 +183,17 @@ jobs:
             npm run contracts:check
             ROADMAP2U_FRONTEND_PATH="${GITHUB_WORKSPACE}/RoadMap2U" npm test
           fi
+
+      - name: Validate and mask alarm notification email
+        env:
+          ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$ALARM_NOTIFICATION_EMAIL" || ${#ALARM_NOTIFICATION_EMAIL} -gt 254 || ! "$ALARM_NOTIFICATION_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
+            echo "ALARM_NOTIFICATION_EMAIL is missing or invalid." >&2
+            exit 1
+          fi
+          echo "::add-mask::$ALARM_NOTIFICATION_EMAIL"
 
       - name: Configure AWS credentials through OIDC
         uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
@@ -219,7 +241,24 @@ jobs:
             fi
           done
 
+      - name: Validate commercial inventory control plane
+        run: |
+          set -euo pipefail
+          EXPECTED_BOUNDARY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/roadmap2u/${STAGE}/roadmap2u-${STAGE}-inventory-runtime-boundary"
+          BOUNDARY_OUTPUT="$(aws cloudformation describe-stacks \
+            --stack-name 'Roadmap-CiBootstrap' \
+            --query "Stacks[0].Outputs[?OutputKey=='${STAGE}InventoryRuntimeBoundaryArn'].OutputValue" \
+            --output text)"
+          test "$BOUNDARY_OUTPUT" = "$EXPECTED_BOUNDARY_ARN"
+          BOUNDARY_POLICY_ARN="$(aws iam get-policy \
+            --policy-arn "$EXPECTED_BOUNDARY_ARN" \
+            --query 'Policy.Arn' \
+            --output text)"
+          test "$BOUNDARY_POLICY_ARN" = "$EXPECTED_BOUNDARY_ARN"
+
       - name: Review CDK diff
+        env:
+          ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}
         run: >-
           npx --no-install cdk diff
           "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"
@@ -227,8 +266,11 @@ jobs:
           -c stage="${STAGE}"
           -c AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}"
           -c HOSTED_ZONE_ID="${HOSTED_ZONE_ID}"
+          --parameters "Roadmap-${STAGE}-Backend:AlarmNotificationEmail=${ALARM_NOTIFICATION_EMAIL}"
 
       - name: Deploy selected stage
+        env:
+          ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}
         run: >-
           npx --no-install cdk deploy
           "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting"
@@ -236,6 +278,7 @@ jobs:
           -c stage="${STAGE}"
           -c AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}"
           -c HOSTED_ZONE_ID="${HOSTED_ZONE_ID}"
+          --parameters "Roadmap-${STAGE}-Backend:AlarmNotificationEmail=${ALARM_NOTIFICATION_EMAIL}"
 
       - name: Validate deployed stacks and public configuration
         run: |
@@ -293,7 +336,14 @@ jobs:
           LOG_GROUPS=(
             "/aws/lambda/roadmap-pre-signup-${STAGE}"
             "/aws/lambda/roadmap-post-confirmation-${STAGE}"
+            "/aws/lambda/roadmap-commercial-config-broker-${STAGE}"
+            "/aws/lambda/roadmap-commercial-inventory-executor-${STAGE}"
+            "/aws/lambda/roadmap-account-closure-worker-${STAGE}"
+            "/aws/lambda/roadmap-account-closure-reconciler-${STAGE}"
             "/aws/lambda/roadmap-router-${STAGE}"
+            "/aws/lambda/roadmap-catalog-${STAGE}"
+            "/aws/lambda/roadmap-access-reader-${STAGE}"
+            "/aws/lambda/roadmap-account-closure-request-${STAGE}"
             "/aws/apigateway/roadmap-api-${STAGE}"
           )
           for LOG_GROUP in "${LOG_GROUPS[@]}"; do
@@ -308,6 +358,40 @@ jobs:
                 $matches[0].retentionInDays == $retention
               ' log-groups.json >/dev/null
           done
+
+      - name: Verify commercial alarm channel
+        env:
+          ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}
+        run: |
+          set -euo pipefail
+          TOPIC_ARN="arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:roadmap-commercial-alerts-${STAGE}"
+          ALARM_NAME="roadmap-commercial-${STAGE}-synthetic"
+          SUBSCRIPTIONS="$(aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN" --output json)"
+          jq -e --arg email "$ALARM_NOTIFICATION_EMAIL" '
+            (.Subscriptions | length) == 1 and
+            .Subscriptions[0].Protocol == "email" and
+            .Subscriptions[0].Endpoint == $email and
+            .Subscriptions[0].SubscriptionArn != "PendingConfirmation"
+          ' <<<"$SUBSCRIPTIONS" >/dev/null
+
+          aws cloudwatch set-alarm-state \
+            --alarm-name "$ALARM_NAME" \
+            --state-value ALARM \
+            --state-reason "RoadMap2U deployment synthetic notification check"
+          for ATTEMPT in {1..12}; do
+            STATE="$(aws cloudwatch describe-alarms \
+              --alarm-names "$ALARM_NAME" \
+              --query 'MetricAlarms[0].StateValue' \
+              --output text)"
+            if [[ "$STATE" == "ALARM" ]]; then break; fi
+            sleep 5
+          done
+          test "$STATE" = "ALARM"
+          sleep 15
+          aws cloudwatch set-alarm-state \
+            --alarm-name "$ALARM_NAME" \
+            --state-value OK \
+            --state-reason "RoadMap2U deployment synthetic notification check completed"
 
       - name: Smoke-test protected API and exact CORS allowlist
         run: |
@@ -368,6 +452,7 @@ jobs:
         run: |
           set -euo pipefail
           jq --compact-output --sort-keys \
+            --slurpfile contractSource shared/contracts-source.json \
             --arg prefix "/roadmap2u/${STAGE}/" \
             --arg stage "$STAGE" \
             --arg sha "$SHA" '
@@ -383,6 +468,7 @@ jobs:
                 schemaVersion: 1,
                 stage: $stage,
                 backendReleaseSha: $sha,
+                contractSource: $contractSource[0],
                 handoff: {
                   region: parameter("region"),
                   userPoolId: parameter("user-pool-id"),
@@ -397,11 +483,24 @@ jobs:
             ' deployed-config.json > backend-release-manifest.json
 
           jq -e \
+            --slurpfile contractSource shared/contracts-source.json \
             --arg stage "$STAGE" \
             --arg sha "$SHA" '
               .schemaVersion == 1 and
               .stage == $stage and
               .backendReleaseSha == $sha and
+              .contractSource == $contractSource[0] and
+              (.contractSource | keys) == [
+                "commitSha",
+                "contractHash",
+                "repository",
+                "schemaVersion"
+              ] and
+              .contractSource.schemaVersion == 1 and
+              .contractSource.repository == "Toydrum/RoadMap2U" and
+              (.contractSource.commitSha | test("^[0-9a-f]{40}$")) and
+              (.contractSource.contractHash | test("^[0-9a-f]{64}$")) and
+              .contractSource.contractHash == .handoff.contractHash and
               (.handoff | keys) == [
                 "apiBaseUrl",
                 "cloudFrontDistributionId",

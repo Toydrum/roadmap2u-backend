@@ -1,6 +1,11 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "RoadMap2U stage-isolated CDK bootstrap (template version 32)",
+  "Description": "RoadMap2U stage-isolated CDK bootstrap (template version 34)",
+  "Metadata": {
+    "RoadMap2U": {
+      "TemplateVersion": 34
+    }
+  },
   "Parameters": {
     "Stage": {
       "Type": "String",
@@ -181,6 +186,9 @@
           },
           {
             "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-edge"
+          },
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-observability"
           }
         ],
         "Tags": [
@@ -384,7 +392,7 @@
       "Properties": {
         "Name": { "Fn::Sub": "/cdk-bootstrap/${Qualifier}/version" },
         "Type": "String",
-        "Value": "32",
+        "Value": "34",
         "Description": "Version of the RoadMap2U stage-isolated CDK bootstrap resources",
         "Tags": {
           "roadmap2u-project": "RoadMap2U",
@@ -413,6 +421,6 @@
       "Value": { "Ref": "ApiAccessLogGroup" },
       "Export": { "Name": { "Fn::Sub": "RoadMap2U-${Stage}-ApiAccessLogGroupName" } }
     },
-    "BootstrapVersion": { "Value": "32" }
+    "BootstrapVersion": { "Value": "34" }
   }
 }

@@ -21,12 +21,6 @@ jobs:
         with:
           path: roadmap2u-backend
 
-      - name: Checkout frontend contract source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: Toydrum/RoadMap2U
-          path: RoadMap2U
-
       - name: Use Node.js 22
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -39,6 +33,22 @@ jobs:
 
       - name: Verify the npm version
         run: test "$(npm --version)" = "10.9.8"
+
+      - name: Resolve pinned frontend contract source
+        id: contract-source
+        run: node scripts/verify-contract-source.mjs resolve --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned frontend contract source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: Toydrum/RoadMap2U
+          ref: ${{ steps.contract-source.outputs.commit_sha }}
+          path: RoadMap2U
+
+      - name: Verify pinned frontend contract source
+        run: >-
+          node scripts/verify-contract-source.mjs verify
+          --frontend-root "${GITHUB_WORKSPACE}/RoadMap2U"
 
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund

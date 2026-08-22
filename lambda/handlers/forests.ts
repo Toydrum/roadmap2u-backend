@@ -1,7 +1,25 @@
 ﻿import { ApiError, ForestSnapshot } from '@app/api/contracts';
 import { Tree, TreeNode } from '@app/db/schema';
-import { Ctx, profileOf, relationshipTo, toPublic } from '../authz';
-import { K, RecordItem, queryPrefix } from '../db';
+import {
+  Ctx,
+  profileOf,
+  relationshipTo,
+  requireWritableOwner,
+  toPublic,
+} from '../authz';
+import { resolveSocialCapability } from '../commercial/social-policy';
+import { FriendItem, GetCommand, K, RecordItem, queryPrefix } from '../db';
+
+async function requireVisibleFriendOwner(ctx: Ctx, ownerId: string) {
+  try {
+    return await requireWritableOwner(ctx, ownerId);
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'CONFLICT') {
+      throw new ApiError('NOT_FOUND');
+    }
+    throw error;
+  }
+}
 
 /**
  * Forest snapshots per the permissions matrix: guardians get FULL nodes
@@ -12,8 +30,31 @@ import { K, RecordItem, queryPrefix } from '../db';
 export async function getForest(ctx: Ctx, userId: string): Promise<ForestSnapshot> {
   const relationship = await relationshipTo(ctx, userId);
   if (!relationship) throw new ApiError('NOT_FOUND');
-  const owner = await profileOf(ctx.deps, userId);
+  let owner = await profileOf(ctx.deps, userId);
   if (!owner) throw new ApiError('NOT_FOUND');
+
+  if (relationship === 'friend') {
+    await resolveSocialCapability(ctx, 'visit', [ctx.callerId]);
+    const [viewer, currentOwner, friendship] = await Promise.all([
+      requireWritableOwner(ctx, ctx.callerId),
+      requireVisibleFriendOwner(ctx, userId),
+      ctx.deps.ddb.send(
+        new GetCommand({
+          TableName: ctx.deps.table,
+          Key: K.friend(ctx.callerId, userId),
+          ConsistentRead: true,
+        }),
+      ),
+    ]);
+    if (
+      !viewer.socialEnabled ||
+      !currentOwner.socialEnabled ||
+      !(friendship.Item as FriendItem | undefined)
+    ) {
+      throw new ApiError('NOT_FOUND');
+    }
+    owner = currentOwner;
+  }
 
   const detail = relationship === 'self' || relationship === 'guardian' ? 'full' : 'stripped';
 

@@ -13,6 +13,7 @@ El deploy ordinario jamás realiza el corte de `roadmap2u.com`/`www`. Ese cambio
 - SHA inmutable identificado; no despliegues desde un working tree sucio.
 - GitHub Environment del stage configurado según [../github-aws-setup.md](../github-aws-setup.md).
 - Toolkit CDK del stage creado con el qualifier esperado y una policy `CloudFormationExecutionRole` revisada; el qualifier separa nombres/assets, no reemplaza el control de permisos.
+- `Roadmap-CiBootstrap` actualizado antes que la carga y con el output `<stage>InventoryRuntimeBoundaryArn` igual al ARN exacto de una managed policy existente. El workflow aplica el gate `Validate commercial inventory control plane` antes del diff y falla cerrado si el output o `iam:GetPolicy` no coinciden.
 - Account ID, `us-east-1`, hosted zone ID y role ARN validados antes del job.
 - El hash contractual calculado coincide entre ambos repositorios.
 - Para `test`/`prod`, el mismo SHA consta como exitoso en el ambiente anterior.
@@ -58,15 +59,16 @@ Orden ejecutado por el workflow autorizado:
 1. Verificar `AWS_DEPLOY_ENABLED=true`, `AWS_ROLLBACK_ENABLED=false`, environment, SHA, account y región. Para el primer `dev/deploy` manual, el SHA debe ser exactamente el HEAD remoto de `main`.
 2. Repetir instalación, contratos, typecheck, tests y synth.
 3. Antes del diff, permitir que cada stack esté ausente (primer deploy) o exactamente en `CREATE_COMPLETE`, `UPDATE_COMPLETE` o `UPDATE_ROLLBACK_COMPLETE`. Este último permite corregir o revertir una actualización fallida ya estabilizada; cualquier estado `*_IN_PROGRESS`, `ROLLBACK_COMPLETE` de una creación fallida, import o fallo aborta.
-4. Ejecutar `cdk diff` para el stage y conservarlo como evidencia del job.
-5. Desplegar solo el alcance que ya fue aprobado. El job de deploy es el único asociado al environment, por lo que `prod` conserva una sola aprobación.
-6. Ejecutar el deploy no interactivo del stack o stacks de ese stage.
-7. Después del deploy, aceptar únicamente `CREATE_COMPLETE` o `UPDATE_COMPLETE`; no usar el patrón permisivo `*_COMPLETE`.
-8. Leer outputs y los ocho parámetros SSM; validar formato, stage y hash.
-9. Verificar que los tres log groups Lambda y el access log del API existen con retención exacta de 7/14/30 días para dev/test/prod.
-10. Ejecutar smokes del API y hosting.
-11. Construir `/roadmap2u/{stage}/backend-release-manifests/{sha}` con `schemaVersion=1`, stage, SHA y los ocho valores de `handoff`. Crearlo sin overwrite o comprobar igualdad canónica si ya existe.
-12. Solo después escribir `/backend-releases/{sha}` y finalmente el pointer `/backend-release-sha`.
+4. Ejecutar `Validate commercial inventory control plane`: leer el output exacto del stage en `Roadmap-CiBootstrap`, comprobar igualdad con `roadmap2u-<stage>-inventory-runtime-boundary` y resolver esa policy con `iam:GetPolicy`.
+5. Ejecutar `cdk diff` para el stage y conservarlo como evidencia del job. El diff aprobado para DEP-011 sólo añade el ejecutor, URL, role/boundary y observabilidad; no puede mostrar `Delete` ni `Replace` de tablas, tabla de auditoría, colas, User Pool/client ni roles runtime preexistentes.
+6. Desplegar solo el alcance que ya fue aprobado. El job de deploy es el único asociado al environment, por lo que `prod` conserva una sola aprobación.
+7. Ejecutar el deploy no interactivo del stack o stacks de ese stage.
+8. Después del deploy, aceptar únicamente `CREATE_COMPLETE` o `UPDATE_COMPLETE`; no usar el patrón permisivo `*_COMPLETE`.
+9. Leer outputs y los ocho parámetros SSM; validar formato, stage y hash.
+10. Verificar que todos los log groups Lambda y el access log del API existen con retención exacta de 7/14/30 días para dev/test/prod.
+11. Ejecutar smokes del API y hosting.
+12. Construir `/roadmap2u/{stage}/backend-release-manifests/{sha}` con `schemaVersion=1`, stage, SHA y los ocho valores de `handoff`. Crearlo sin overwrite o comprobar igualdad canónica si ya existe.
+13. Solo después escribir `/backend-releases/{sha}` y finalmente el pointer `/backend-release-sha`.
 
 El backend se despliega antes del frontend. El build web toma un snapshot consistente leyendo el pointer backend, su manifiesto inmutable y el pointer nuevamente; cualquier cambio entre ambas lecturas aborta la publicación.
 

@@ -37,7 +37,7 @@ El último vínculo de una cuenta de menor `created` no puede quitarse (`LAST_GU
 
 Solo un guardián cuyo vínculo `created` siga activo puede emitir una invitación `coGuardian`; el canje vuelve a comprobar ese vínculo antes de crear la delegación. Un guardián `invited` no puede elevar a otro adulto a `created`.
 
-Todas las operaciones bajo `/friends` aplican el gate `socialEnabled`, incluidas lectura, código, rotación, crear/aceptar/rechazar/cancelar solicitudes y eliminar amistad. Al crear una solicitud se detecta también una solicitud pendiente en sentido inverso: ambas direcciones representan el mismo conflicto y responden `CONFLICT`. La condición de escritura debe seguir evitando el doble submit concurrente.
+Las acciones que amplían la superficie social aplican `socialEnabled`: obtener/rotar código exige al caller habilitado y crear/aceptar exige a ambos participantes habilitados. Listar relaciones existentes, rechazar/cancelar solicitudes y eliminar amistades siguen disponibles como reducción o privacidad aunque el gate social esté apagado. Con `capabilityMode=enforce`, obtener/rotar código y crear/aceptar relaciones requieren capability `social`; las mutaciones fijan `ACCESS.revision`/vigencia y revalidan perfiles dentro de la transacción. Al crear una solicitud se detecta también una solicitud pendiente en sentido inverso: ambas direcciones representan el mismo conflicto y responden `CONFLICT`. La condición de escritura debe seguir evitando el doble submit concurrente.
 
 ## Matriz de visibilidad
 
@@ -106,7 +106,7 @@ La condición de un record push refleja exactamente LWW. La unicidad de username
 - Administrar la identidad de un menor requiere vínculo `created`; co-gardening admite ambos tipos.
 - Aceptar una solicitud requiere ser destinatario; cancelarla requiere ser remitente.
 - Los límites de amistad se comprueban al solicitar y al aceptar.
-- Leer bosque de amistad requiere `socialEnabled` en ambos perfiles.
+- Leer bosque de amistad requiere `socialEnabled` en ambos perfiles; con `capabilityMode=enforce`, la capability `social` se exige al visitante, no al dueño visitado.
 - Push hacia otra cuenta requiere que el caller sea guardián activo del menor.
 - Los parámetros de path prevalecen sobre query/body cuando el router los combina.
 

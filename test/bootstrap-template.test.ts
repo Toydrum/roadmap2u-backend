@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -13,6 +14,22 @@ const operatorTemplatePath = join(process.cwd(), 'bootstrap', 'bootstrap-operato
 const bootstrapScriptPath = join(process.cwd(), 'scripts', 'aws-bootstrap.ps1');
 const breakGlassScriptPath = join(process.cwd(), 'scripts', 'aws-break-glass.ps1');
 const smokeCleanupScriptPath = join(process.cwd(), 'scripts', 'aws-smoke-cleanup.ps1');
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function stageBootstrapSourceHash(): string {
+  const source = JSON.parse(readFileSync(templatePath, 'utf8'));
+  return createHash('sha256').update(canonicalJson(source), 'utf8').digest('hex');
+}
 
 function runBootstrapWithFakeAws(options: {
   environmentCaBundle: boolean;
@@ -283,7 +300,7 @@ exit 2
 }
 
 describe('custom stage CDK bootstrap template', () => {
-  it('is versioned and parameterized for the three fixed stage qualifiers', () => {
+  it('keeps the v34 description, metadata, parameter and output coherent', () => {
     expect(existsSync(templatePath)).toBe(true);
     const template = JSON.parse(readFileSync(templatePath, 'utf8'));
     const rendered = JSON.stringify(template);
@@ -294,6 +311,40 @@ describe('custom stage CDK bootstrap template', () => {
     expect(rendered).toContain('rmap2utst');
     expect(rendered).toContain('rmap2uprd');
     expect(rendered).toContain('/cdk-bootstrap/${Qualifier}/version');
+    expect(template.Description).toContain('template version 34');
+    expect(template.Metadata.RoadMap2U.TemplateVersion).toBe(34);
+    expect(template.Resources.CdkBootstrapVersion.Properties.Value).toBe('34');
+    expect(template.Outputs.BootstrapVersion.Value).toBe('34');
+  });
+
+  it('binds every rendered toolkit and the operator to the canonical v34 source hash', () => {
+    const sourceHash = stageBootstrapSourceHash();
+    expect(sourceHash).toMatch(/^[a-f0-9]{64}$/);
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const rendered = JSON.parse(
+        readFileSync(
+          join(process.cwd(), 'bootstrap', `roadmap2u-${stage}-bootstrap.template.json`),
+          'utf8',
+        ),
+      );
+      expect(rendered.Metadata.RoadMap2U).toMatchObject({
+        TemplateVersion: 34,
+        SourceTemplateSha256: sourceHash,
+        Stage: stage,
+      });
+    }
+
+    const operator = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
+    expect(operator.Metadata.RoadMap2U).toEqual({
+      ControlPlaneContractVersion: 34,
+      StageBootstrapTemplateSha256: sourceHash,
+      RequiredControlPlaneOutputs: [
+        'devInventoryRuntimeBoundaryArn',
+        'testInventoryRuntimeBoundaryArn',
+        'prodInventoryRuntimeBoundaryArn',
+      ],
+    });
   });
 
   it('trusts only the exact backend role and forbids cross-stage stack deletion', () => {
@@ -328,7 +379,7 @@ describe('custom stage CDK bootstrap template', () => {
     expect(operateStatement.Action).toContain('cloudformation:UpdateTerminationProtection');
   });
 
-  it('attaches only the selected stage core and edge policies to CloudFormation', () => {
+  it('attaches only the selected stage workload policies to CloudFormation', () => {
     expect(existsSync(templatePath)).toBe(true);
     const template = JSON.parse(readFileSync(templatePath, 'utf8'));
     const rendered = JSON.stringify(template.Resources.CloudFormationExecutionRole);
@@ -337,6 +388,12 @@ describe('custom stage CDK bootstrap template', () => {
     expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-api');
     expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-edge');
     expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-data');
+    expect(rendered).toContain(
+      'policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-observability',
+    );
+    expect(
+      template.Resources.CloudFormationExecutionRole.Properties.ManagedPolicyArns,
+    ).toHaveLength(5);
     expect(rendered).not.toContain('AdministratorAccess');
   });
 
@@ -429,20 +486,24 @@ describe('custom stage CDK bootstrap template', () => {
     expected.Metadata = {
       ...(expected.Metadata ?? {}),
       RoadMap2U: {
+        ...(expected.Metadata?.RoadMap2U ?? {}),
         StackName: stackName,
         Qualifier: qualifier,
         Stage: stage,
         TerminationProtection: true,
+        SourceTemplateSha256: stageBootstrapSourceHash(),
       },
     };
 
     expect(template.Parameters.Stage.Default).toBe(stage);
     expect(template.Parameters.Qualifier.Default).toBe(qualifier);
     expect(template.Metadata.RoadMap2U).toEqual({
+      TemplateVersion: 34,
       StackName: stackName,
       Qualifier: qualifier,
       Stage: stage,
       TerminationProtection: true,
+      SourceTemplateSha256: stageBootstrapSourceHash(),
     });
     expect(JSON.stringify(template)).not.toContain('cloudformation:DeleteStack');
     expect(template).toEqual(expected);
@@ -478,7 +539,7 @@ describe('custom stage CDK bootstrap template', () => {
     expect(template.Outputs.BootstrapOperatorRoleArn).toBeDefined();
   });
 
-  it('lets the operator attach only the twelve stage control-plane policies', () => {
+  it('lets the operator attach only the fifteen stage control-plane policies', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
     const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
       .PolicyDocument.Statement;
@@ -501,14 +562,17 @@ describe('custom stage CDK bootstrap template', () => {
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-data',
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-edge',
+      'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-observability',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-core',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-data',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-edge',
+      'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-observability',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-core',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-data',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-edge',
+      'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-observability',
     ]);
     const roleManagement = statements.find(
       (statement: any) => statement.Sid === 'CreateAndManageRoadMap2URoles',
@@ -576,7 +640,7 @@ describe('custom stage CDK bootstrap template', () => {
     });
   });
 
-  it('manages CloudFormation role-name lookups only for the twelve exact control-plane roles', () => {
+  it('manages CloudFormation role-name lookups only for the twenty exact control-plane roles', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
     const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
       .PolicyDocument.Statement;
@@ -604,12 +668,20 @@ describe('custom stage CDK bootstrap template', () => {
       'arn:aws:iam::765932874577:role/roadmap2u-dev-backend-deploy',
       'arn:aws:iam::765932874577:role/roadmap2u-dev-frontend-deploy',
       'arn:aws:iam::765932874577:role/roadmap2u-dev-smoke-cleanup',
+      'arn:aws:iam::765932874577:role/roadmap2u-dev-commercial-migration',
+      'arn:aws:iam::765932874577:role/roadmap2u-dev-commercial-flag-operator',
+      'arn:aws:iam::765932874577:role/roadmap2u-dev-commercial-e2e-fixture',
       'arn:aws:iam::765932874577:role/roadmap2u-test-backend-deploy',
       'arn:aws:iam::765932874577:role/roadmap2u-test-frontend-deploy',
       'arn:aws:iam::765932874577:role/roadmap2u-test-smoke-cleanup',
+      'arn:aws:iam::765932874577:role/roadmap2u-test-commercial-migration',
+      'arn:aws:iam::765932874577:role/roadmap2u-test-commercial-flag-operator',
+      'arn:aws:iam::765932874577:role/roadmap2u-test-commercial-e2e-fixture',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-backend-deploy',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-frontend-deploy',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-smoke-cleanup',
+      'arn:aws:iam::765932874577:role/roadmap2u-prod-commercial-migration',
+      'arn:aws:iam::765932874577:role/roadmap2u-prod-commercial-flag-operator',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-dns-plan',
       'arn:aws:iam::765932874577:role/roadmap2u-prod-dns-cutover',
       'arn:aws:iam::765932874577:role/roadmap2u-nonprod-break-glass',
@@ -786,6 +858,17 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).toContain("--stack-name 'Roadmap-CiBootstrap'");
     expect(script.lastIndexOf('Remove-FailedControlPlaneStack')).toBeLessThan(
       script.indexOf("Assert-LastCommand 'Deploying Roadmap-CiBootstrap directly with CloudFormation'"),
+    );
+    expect(script).toContain('function Assert-CommercialInventoryControlPlane');
+    expect(script).toContain('$outputs = $outputsJson | ConvertFrom-Json');
+    expect(script).not.toContain('$outputs = @($outputsJson | ConvertFrom-Json)');
+    expect(script).toContain("foreach ($stage in @('dev', 'test', 'prod'))");
+    expect(script).toContain('${stage}InventoryRuntimeBoundaryArn');
+    expect(script).toContain('roadmap2u-$stage-inventory-runtime-boundary');
+    expect(script).toContain('cloudformation describe-stacks');
+    expect(script).toContain('iam get-policy');
+    expect(script.indexOf('Assert-CommercialInventoryControlPlane')).toBeLessThan(
+      script.indexOf("Assert-LastCommand \"Deploying $($toolkit.Stack)\""),
     );
   });
 

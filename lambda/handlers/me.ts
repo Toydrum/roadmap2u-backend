@@ -1,6 +1,15 @@
 ﻿import { ApiError, FamilyLinkView, MeResponse, UserProfile } from '@app/api/contracts';
-import { Ctx, guardiansOf, minorsOf, profileOf, toPublic } from '../authz';
-import { K, ProfileItem, UpdateCommand } from '../db';
+import {
+  Ctx,
+  WRITABLE_PROFILE_CONDITION,
+  closureAbsenceConditionCheck,
+  guardiansOf,
+  minorsOf,
+  profileOfConsistent,
+  requireWritableOwner,
+  toPublic,
+} from '../authz';
+import { K, ProfileItem, TransactWriteCommand } from '../db';
 
 export function profileView(item: ProfileItem): UserProfile {
   return {
@@ -21,14 +30,14 @@ export async function getMe(ctx: Ctx): Promise<MeResponse> {
 
   const guardians: FamilyLinkView[] = [];
   for (const link of guardianLinks) {
-    const other = await profileOf(ctx.deps, link.guardianId);
-    if (!other) continue; // dangling link — deletion cascade raced; hide it
+    const other = await profileOfConsistent(ctx.deps, link.guardianId);
+    if (!other || (other.status !== undefined && other.status !== 'active')) continue;
     guardians.push({ linkId: link.linkId, kind: link.kind, user: toPublic(other, false), createdAt: link.createdAt });
   }
   const minors: FamilyLinkView[] = [];
   for (const link of minorLinks) {
-    const other = await profileOf(ctx.deps, link.minorId);
-    if (!other) continue;
+    const other = await profileOfConsistent(ctx.deps, link.minorId);
+    if (!other || (other.status !== undefined && other.status !== 'active')) continue;
     minors.push({ linkId: link.linkId, kind: link.kind, user: toPublic(other, true), createdAt: link.createdAt });
   }
   return { profile: profileView(ctx.caller), family: { guardians, minors } };
@@ -36,15 +45,33 @@ export async function getMe(ctx: Ctx): Promise<MeResponse> {
 
 export async function patchMe(ctx: Ctx, body: { displayName?: string }): Promise<UserProfile> {
   const displayName = body.displayName?.trim();
-  if (displayName === undefined) return profileView(ctx.caller);
+  if (displayName === undefined) {
+    const current = await requireWritableOwner(ctx, ctx.callerId);
+    return profileView(current);
+  }
   if (!displayName || displayName.length > 40) throw new ApiError('VALIDATION', 'displayName 1-40 chars');
-  await ctx.deps.ddb.send(
-    new UpdateCommand({
-      TableName: ctx.deps.table,
-      Key: K.profile(ctx.callerId),
-      UpdateExpression: 'SET displayName = :d',
-      ExpressionAttributeValues: { ':d': displayName },
-    }),
-  );
+  try {
+    await ctx.deps.ddb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: ctx.deps.table,
+              Key: K.profile(ctx.callerId),
+              UpdateExpression: 'SET displayName = :d',
+              ConditionExpression: WRITABLE_PROFILE_CONDITION,
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: { ':d': displayName, ':active': 'active' },
+            },
+          },
+          closureAbsenceConditionCheck(ctx.deps, ctx.callerId),
+        ],
+      }),
+    );
+  } catch (error) {
+    if ((error as { name?: string })?.name !== 'TransactionCanceledException') throw error;
+    await requireWritableOwner(ctx, ctx.callerId);
+    throw error;
+  }
   return profileView({ ...ctx.caller, displayName });
 }

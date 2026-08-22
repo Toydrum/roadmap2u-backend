@@ -14,7 +14,42 @@ function document(name: string): string {
   return existsSync(path) ? readFileSync(path, 'utf8') : '';
 }
 
+function repositoryFile(name: string): string {
+  const path = join(process.cwd(), name);
+  expect(existsSync(path), `Missing repository file ${path}`).toBe(true);
+  return existsSync(path) ? readFileSync(path, 'utf8') : '';
+}
+
+function namedStep(contents: string, name: string): string {
+  const marker = `      - name: ${name}`;
+  const start = contents.indexOf(marker);
+  expect(start, `Missing workflow step ${name}`).toBeGreaterThan(-1);
+  const end = contents.indexOf('\n      - name:', start + marker.length);
+  return contents.slice(start, end === -1 ? contents.length : end);
+}
+
 describe('backend GitHub Actions', () => {
+  it('exposes the three owner-only commercial config CLIs without a generic payments input', () => {
+    const packageJson = JSON.parse(repositoryFile('package.json')) as {
+      scripts: Record<string, string>;
+    };
+    expect(packageJson.scripts).toMatchObject({
+      'commercial:bootstrap': 'node scripts/bootstrap-commercial-flags.mjs',
+      'commercial:set': 'node scripts/set-commercial-flags.mjs',
+      'commercial:freeze': 'node scripts/freeze-commercial-cutover.mjs',
+    });
+    const sources = [
+      repositoryFile(join('scripts', 'bootstrap-commercial-flags.mjs')),
+      repositoryFile(join('scripts', 'set-commercial-flags.mjs')),
+      repositoryFile(join('scripts', 'freeze-commercial-cutover.mjs')),
+      repositoryFile(join('scripts', 'lib', 'commercial-config-cli.mjs')),
+    ].join('\n');
+    expect(sources).toContain('AWS4-HMAC-SHA256');
+    expect(sources).toContain('commercial-flag-operator');
+    expect(sources).toContain('commercial-migration');
+    expect(sources).not.toContain("'premium-payments-enabled'");
+  });
+
   it('runs reproducible contract, type, test and three-stage synth checks', () => {
     const contents = workflow('ci.yml');
     expect(contents).toContain('pull_request:');
@@ -31,6 +66,27 @@ describe('backend GitHub Actions', () => {
     for (const stage of ['dev', 'test', 'prod']) {
       expect(contents).toContain(`stage=${stage}`);
     }
+  });
+
+  it('checks out and verifies the exact locked frontend contract source in CI', () => {
+    const contents = workflow('ci.yml');
+    const resolve = namedStep(contents, 'Resolve pinned frontend contract source');
+    const checkout = namedStep(contents, 'Checkout pinned frontend contract source');
+    const verify = namedStep(contents, 'Verify pinned frontend contract source');
+
+    expect(resolve).toContain('node scripts/verify-contract-source.mjs resolve');
+    expect(resolve).toContain('--github-output "$GITHUB_OUTPUT"');
+    expect(checkout).toContain('repository: Toydrum/RoadMap2U');
+    expect(checkout).toContain('ref: ${{ steps.contract-source.outputs.commit_sha }}');
+    expect(contents.match(/repository: Toydrum\/RoadMap2U/g) ?? []).toHaveLength(1);
+    expect(verify).toContain('node scripts/verify-contract-source.mjs verify');
+    expect(verify).toContain('--frontend-root "${GITHUB_WORKSPACE}/RoadMap2U"');
+    expect(contents.indexOf('Verify pinned frontend contract source')).toBeLessThan(
+      contents.indexOf('npm run contracts:check'),
+    );
+    expect(contents).not.toMatch(
+      /name: Checkout (?:pinned )?frontend contract source[\s\S]*?repository: Toydrum\/RoadMap2U\n\s+path: RoadMap2U/,
+    );
   });
 
   it('deploys only an exact SHA with OIDC and release-marker promotion proof', () => {
@@ -56,6 +112,97 @@ describe('backend GitHub Actions', () => {
     expect(contents.indexOf('cdk diff')).toBeLessThan(contents.indexOf('cdk deploy'));
     expect(contents.indexOf('Smoke-test protected API')).toBeLessThan(
       contents.lastIndexOf('/backend-releases/${SHA}'),
+    );
+  });
+
+  it('requires and masks the alarm email, passes it to both CDK operations, and exercises the channel', () => {
+    const contents = workflow('deploy.yml');
+    const ci = workflow('ci.yml');
+    const validation = namedStep(contents, 'Validate and mask alarm notification email');
+    const diff = namedStep(contents, 'Review CDK diff');
+    const deploy = namedStep(contents, 'Deploy selected stage');
+    const alarmCheck = namedStep(contents, 'Verify commercial alarm channel');
+
+    for (const step of [validation, diff, deploy, alarmCheck]) {
+      expect(step).toContain(
+        'ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}',
+      );
+    }
+    expect(
+      contents.match(/ALARM_NOTIFICATION_EMAIL: \$\{\{ secrets\.ALARM_NOTIFICATION_EMAIL \}\}/g) ?? [],
+    ).toHaveLength(4);
+    expect(validation).toContain('::add-mask::$ALARM_NOTIFICATION_EMAIL');
+    expect(validation).toContain('ALARM_NOTIFICATION_EMAIL is missing or invalid');
+    expect(validation).not.toContain('echo "$ALARM_NOTIFICATION_EMAIL"');
+    expect(validation.indexOf('if [[ -z "$ALARM_NOTIFICATION_EMAIL"')).toBeLessThan(
+      validation.indexOf('::add-mask::$ALARM_NOTIFICATION_EMAIL'),
+    );
+    expect(
+      contents.match(
+        /--parameters "Roadmap-\$\{STAGE\}-Backend:AlarmNotificationEmail=\$\{ALARM_NOTIFICATION_EMAIL\}"/g,
+      ) ?? [],
+    )
+      .toHaveLength(2);
+    expect(contents).not.toContain('-c ALARM_NOTIFICATION_EMAIL=');
+    expect(repositoryFile(join('bin', 'roadmap.ts'))).not.toContain(
+      'ALARM_NOTIFICATION_EMAIL',
+    );
+    expect(contents.indexOf('Validate and mask alarm notification email')).toBeLessThan(
+      contents.indexOf('Review CDK diff'),
+    );
+    expect(alarmCheck).toContain('aws sns list-subscriptions-by-topic');
+    expect(alarmCheck).toContain('roadmap-commercial-alerts-${STAGE}');
+    expect(alarmCheck).toContain('SubscriptionArn != "PendingConfirmation"');
+    expect(alarmCheck).toContain('--arg email "$ALARM_NOTIFICATION_EMAIL"');
+    expect(alarmCheck).toContain('(.Subscriptions | length) == 1');
+    expect(alarmCheck).toContain('.Endpoint == $email');
+    expect(alarmCheck).toContain('aws cloudwatch set-alarm-state');
+    expect(alarmCheck).toContain('roadmap-commercial-${STAGE}-synthetic');
+    expect(alarmCheck).toContain('aws cloudwatch describe-alarms');
+    expect(contents.indexOf('Deploy selected stage')).toBeLessThan(
+      contents.indexOf('Verify commercial alarm channel'),
+    );
+    expect(contents.indexOf('Verify commercial alarm channel')).toBeLessThan(
+      contents.indexOf('Publish immutable backend release manifest'),
+    );
+    expect(ci).not.toContain('ALARM_NOTIFICATION_EMAIL');
+  });
+
+  it('documents alarm ownership, confirmation, synthetic test, and the pending drift adapter', () => {
+    const runbook = document(join('runbooks', 'commercial-alerts.md'));
+
+    expect(runbook).toContain('ALARM_NOTIFICATION_EMAIL');
+    expect(runbook).toContain('PendingConfirmation');
+    expect(runbook).toContain('roadmap-commercial-${stage}-synthetic');
+    expect(runbook).toContain('ConfigurationDrift');
+    expect(runbook).toContain('emitCommercialMetric');
+    expect(runbook).toContain('Duration');
+    expect(runbook).toContain('80 %');
+    expect(runbook).toContain('TransactionConflict');
+    expect(runbook).toContain('http-api-metrics.html');
+    expect(runbook).toContain('no publica una métrica nativa separada para 429');
+    expect(runbook).toContain('no completa GATE-100');
+    expect(runbook).not.toContain('@gmail.com');
+  });
+
+  it('checks out the locked frontend only for deploy and verifies it before contract parity', () => {
+    const contents = workflow('deploy.yml');
+    const resolve = namedStep(contents, 'Resolve pinned frontend contract source');
+    const checkout = namedStep(contents, 'Checkout pinned frontend contract source');
+    const verify = namedStep(contents, 'Verify pinned frontend contract source');
+
+    expect(resolve).toContain('node scripts/verify-contract-source.mjs resolve');
+    expect(checkout).toContain("if: ${{ needs.prepare.outputs.operation == 'deploy' }}");
+    expect(checkout).toContain('repository: Toydrum/RoadMap2U');
+    expect(checkout).toContain('ref: ${{ steps.contract-source.outputs.commit_sha }}');
+    expect(contents.match(/repository: Toydrum\/RoadMap2U/g) ?? []).toHaveLength(1);
+    expect(verify).toContain("if: ${{ needs.prepare.outputs.operation == 'deploy' }}");
+    expect(verify).toContain('node scripts/verify-contract-source.mjs verify');
+    expect(contents.indexOf('Verify pinned frontend contract source')).toBeLessThan(
+      contents.indexOf('npm run contracts:check'),
+    );
+    expect(contents).not.toMatch(
+      /name: Checkout (?:pinned )?frontend contract source[\s\S]*?repository: Toydrum\/RoadMap2U\n\s+path: RoadMap2U/,
     );
   });
 
@@ -123,6 +270,21 @@ describe('backend GitHub Actions', () => {
     expect(contents).not.toContain('[[ "$STATUS" == *_COMPLETE ]]');
   });
 
+  it('fails closed unless the stage inventory boundary exists before CDK diff', () => {
+    const contents = workflow('deploy.yml');
+    const gate = namedStep(contents, 'Validate commercial inventory control plane');
+    const diff = contents.indexOf('Review CDK diff');
+
+    expect(gate).toContain("--stack-name 'Roadmap-CiBootstrap'");
+    expect(gate).toContain('${STAGE}InventoryRuntimeBoundaryArn');
+    expect(gate).toContain(
+      'policy/roadmap2u/${STAGE}/roadmap2u-${STAGE}-inventory-runtime-boundary',
+    );
+    expect(gate).toContain('aws iam get-policy');
+    expect(gate).toContain('test "$BOUNDARY_OUTPUT" = "$EXPECTED_BOUNDARY_ARN"');
+    expect(contents.indexOf('Validate commercial inventory control plane')).toBeLessThan(diff);
+  });
+
   it('keeps deployment behind one stage environment approval', () => {
     const contents = workflow('deploy.yml');
     expect(contents.match(/^\s+environment:/gm) ?? []).toHaveLength(1);
@@ -149,6 +311,10 @@ describe('backend GitHub Actions', () => {
     expect(manifestContents).toContain('schemaVersion: 1');
     expect(manifestContents).toContain('stage: $stage');
     expect(manifestContents).toContain('backendReleaseSha: $sha');
+    expect(manifestContents).toContain('contractSource: $contractSource[0]');
+    expect(manifestContents).toContain('--slurpfile contractSource shared/contracts-source.json');
+    expect(manifestContents).toContain('.contractSource.repository == "Toydrum/RoadMap2U"');
+    expect(manifestContents).toContain('.contractSource.contractHash == .handoff.contractHash');
     expect(manifestContents).toContain('handoff:');
     for (const key of [
       'region',
@@ -169,17 +335,27 @@ describe('backend GitHub Actions', () => {
 
   it('verifies every application log group with the exact stage retention after deploy', () => {
     const contents = workflow('deploy.yml');
+    const retentionStep = namedStep(contents, 'Validate application log retention');
     expect(contents).toContain('dev) EXPECTED_LOG_RETENTION=7');
     expect(contents).toContain('test) EXPECTED_LOG_RETENTION=14');
     expect(contents).toContain('prod) EXPECTED_LOG_RETENTION=30');
-    for (const group of [
+    const expectedLogGroups = [
       '/aws/lambda/roadmap-pre-signup-${STAGE}',
       '/aws/lambda/roadmap-post-confirmation-${STAGE}',
+      '/aws/lambda/roadmap-commercial-config-broker-${STAGE}',
+      '/aws/lambda/roadmap-commercial-inventory-executor-${STAGE}',
+      '/aws/lambda/roadmap-account-closure-worker-${STAGE}',
+      '/aws/lambda/roadmap-account-closure-reconciler-${STAGE}',
       '/aws/lambda/roadmap-router-${STAGE}',
+      '/aws/lambda/roadmap-catalog-${STAGE}',
+      '/aws/lambda/roadmap-access-reader-${STAGE}',
+      '/aws/lambda/roadmap-account-closure-request-${STAGE}',
       '/aws/apigateway/roadmap-api-${STAGE}',
-    ]) {
-      expect(contents).toContain(group);
-    }
+    ];
+    const listedLogGroups = [...retentionStep.matchAll(/^\s+"(\/aws\/[^"\r\n]+)"$/gm)]
+      .map((match) => match[1]);
+    expect(listedLogGroups).toEqual(expectedLogGroups);
+    expect(new Set(listedLogGroups).size).toBe(listedLogGroups.length);
     expect(contents).toContain('.retentionInDays == $retention');
     expect(contents.indexOf('Deploy selected stage')).toBeLessThan(
       contents.indexOf('Validate application log retention'),
@@ -309,6 +485,11 @@ describe('backend GitHub Actions', () => {
     expect(setup).toContain('repo:Toydrum@61118847/RoadMap2U@741787733:environment:<stage>');
     expect(setup).toContain('proveedor OIDC existente');
     expect(setup).toContain('BootstraplessSynthesizer');
+    expect(setup).toContain('bootstrap canónico v34');
+    expect(setup).toContain('StageBootstrapTemplateSha256');
+    expect(setup).toContain('InventoryRuntimeBoundaryArn');
+    expect(deployRunbook).toContain('Validate commercial inventory control plane');
+    expect(setup).toContain('cfn-observability');
     expect(setup).toContain('oidc-preflight.yml');
     expect(setup).toContain("'X-GitHub-Api-Version: 2026-03-10'");
     expect(setup).toContain('{"use_default":true,"use_immutable_subject":true}');
@@ -330,5 +511,7 @@ describe('backend GitHub Actions', () => {
     expect(operationsRunbook).toContain('broker Lambda');
     expect(setup).not.toContain('no forman parte de esta entrega');
     expect(architecture).not.toContain('deliberadamente **no operativa');
+    expect(architecture).toContain('roadmap-commercial-alerts-{stage}');
+    expect(architecture).not.toContain('purga de cuentas adultas y observabilidad/alertas operativas');
   });
 });

@@ -5,7 +5,9 @@
     "HectorAdminPrincipalArn": {
       "Type": "String",
       "Default": "arn:aws:iam::765932874577:user/Hector-admin",
-      "AllowedValues": ["arn:aws:iam::765932874577:user/Hector-admin"]
+      "AllowedValues": [
+        "arn:aws:iam::765932874577:user/Hector-admin"
+      ]
     }
   },
   "Resources": {
@@ -16,12 +18,18 @@
         "BucketEncryption": {
           "ServerSideEncryptionConfiguration": [
             {
-              "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" }
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
             }
           ]
         },
         "OwnershipControls": {
-          "Rules": [{ "ObjectOwnership": "BucketOwnerEnforced" }]
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
         },
         "PublicAccessBlockConfiguration": {
           "BlockPublicAcls": true,
@@ -30,15 +38,23 @@
           "RestrictPublicBuckets": true
         },
         "Tags": [
-          { "Key": "roadmap2u-project", "Value": "RoadMap2U" },
-          { "Key": "roadmap2u-purpose", "Value": "temporary-bootstrap" }
+          {
+            "Key": "roadmap2u-project",
+            "Value": "RoadMap2U"
+          },
+          {
+            "Key": "roadmap2u-purpose",
+            "Value": "temporary-bootstrap"
+          }
         ]
       }
     },
     "ControlPlaneTemplateBucketPolicy": {
       "Type": "AWS::S3::BucketPolicy",
       "Properties": {
-        "Bucket": { "Ref": "ControlPlaneTemplateBucket" },
+        "Bucket": {
+          "Ref": "ControlPlaneTemplateBucket"
+        },
         "PolicyDocument": {
           "Version": "2012-10-17",
           "Statement": [
@@ -48,10 +64,21 @@
               "Principal": "*",
               "Action": "s3:*",
               "Resource": [
-                { "Fn::GetAtt": ["ControlPlaneTemplateBucket", "Arn"] },
-                { "Fn::Sub": "${ControlPlaneTemplateBucket.Arn}/*" }
+                {
+                  "Fn::GetAtt": [
+                    "ControlPlaneTemplateBucket",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${ControlPlaneTemplateBucket.Arn}/*"
+                }
               ],
-              "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
             }
           ]
         }
@@ -69,11 +96,19 @@
           "Statement": [
             {
               "Effect": "Allow",
-              "Principal": { "AWS": { "Ref": "HectorAdminPrincipalArn" } },
+              "Principal": {
+                "AWS": {
+                  "Ref": "HectorAdminPrincipalArn"
+                }
+              },
               "Action": "sts:AssumeRole",
               "Condition": {
-                "Bool": { "aws:MultiFactorAuthPresent": "true" },
-                "NumericLessThanEquals": { "aws:MultiFactorAuthAge": "3600" }
+                "Bool": {
+                  "aws:MultiFactorAuthPresent": "true"
+                },
+                "NumericLessThanEquals": {
+                  "aws:MultiFactorAuthAge": "3600"
+                }
               }
             }
           ]
@@ -170,12 +205,20 @@
                     "arn:aws:iam::765932874577:role/roadmap2u-dev-backend-deploy",
                     "arn:aws:iam::765932874577:role/roadmap2u-dev-frontend-deploy",
                     "arn:aws:iam::765932874577:role/roadmap2u-dev-smoke-cleanup",
+                    "arn:aws:iam::765932874577:role/roadmap2u-dev-commercial-migration",
+                    "arn:aws:iam::765932874577:role/roadmap2u-dev-commercial-flag-operator",
+                    "arn:aws:iam::765932874577:role/roadmap2u-dev-commercial-e2e-fixture",
                     "arn:aws:iam::765932874577:role/roadmap2u-test-backend-deploy",
                     "arn:aws:iam::765932874577:role/roadmap2u-test-frontend-deploy",
                     "arn:aws:iam::765932874577:role/roadmap2u-test-smoke-cleanup",
+                    "arn:aws:iam::765932874577:role/roadmap2u-test-commercial-migration",
+                    "arn:aws:iam::765932874577:role/roadmap2u-test-commercial-flag-operator",
+                    "arn:aws:iam::765932874577:role/roadmap2u-test-commercial-e2e-fixture",
                     "arn:aws:iam::765932874577:role/roadmap2u-prod-backend-deploy",
                     "arn:aws:iam::765932874577:role/roadmap2u-prod-frontend-deploy",
                     "arn:aws:iam::765932874577:role/roadmap2u-prod-smoke-cleanup",
+                    "arn:aws:iam::765932874577:role/roadmap2u-prod-commercial-migration",
+                    "arn:aws:iam::765932874577:role/roadmap2u-prod-commercial-flag-operator",
                     "arn:aws:iam::765932874577:role/roadmap2u-prod-dns-plan",
                     "arn:aws:iam::765932874577:role/roadmap2u-prod-dns-cutover",
                     "arn:aws:iam::765932874577:role/roadmap2u-nonprod-break-glass"
@@ -184,7 +227,10 @@
                 {
                   "Sid": "AttachOnlyRoadMap2UControlPlanePolicies",
                   "Effect": "Allow",
-                  "Action": ["iam:AttachRolePolicy", "iam:DetachRolePolicy"],
+                  "Action": [
+                    "iam:AttachRolePolicy",
+                    "iam:DetachRolePolicy"
+                  ],
                   "Resource": [
                     "arn:aws:iam::765932874577:role/roadmap2u/dev/*",
                     "arn:aws:iam::765932874577:role/roadmap2u/test/*",
@@ -201,14 +247,17 @@
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-api",
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-data",
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-edge",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-observability",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-core",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-api",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-data",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-edge",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-observability",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-core",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-api",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-data",
-                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-edge"
+                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-edge",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-observability"
                       ]
                     }
                   }
@@ -337,16 +386,28 @@
                 {
                   "Sid": "UseOnlyControlPlaneTemplateBucket",
                   "Effect": "Allow",
-                  "Action": ["s3:GetBucketLocation", "s3:ListBucket"],
+                  "Action": [
+                    "s3:GetBucketLocation",
+                    "s3:ListBucket"
+                  ],
                   "Resource": "arn:aws:s3:::roadmap2u-bootstrap-templates-765932874577-us-east-1",
                   "Condition": {
-                    "StringLike": { "s3:prefix": ["control-plane", "control-plane/*"] }
+                    "StringLike": {
+                      "s3:prefix": [
+                        "control-plane",
+                        "control-plane/*"
+                      ]
+                    }
                   }
                 },
                 {
                   "Sid": "UseOnlyControlPlaneTemplateObjects",
                   "Effect": "Allow",
-                  "Action": ["s3:DeleteObject", "s3:GetObject", "s3:PutObject"],
+                  "Action": [
+                    "s3:DeleteObject",
+                    "s3:GetObject",
+                    "s3:PutObject"
+                  ],
                   "Resource": "arn:aws:s3:::roadmap2u-bootstrap-templates-765932874577-us-east-1/control-plane/*"
                 }
               ]
@@ -354,18 +415,42 @@
           }
         ],
         "Tags": [
-          { "Key": "roadmap2u-project", "Value": "RoadMap2U" },
-          { "Key": "roadmap2u-purpose", "Value": "temporary-bootstrap" }
+          {
+            "Key": "roadmap2u-project",
+            "Value": "RoadMap2U"
+          },
+          {
+            "Key": "roadmap2u-purpose",
+            "Value": "temporary-bootstrap"
+          }
         ]
       }
     }
   },
   "Outputs": {
     "ControlPlaneTemplateBucketName": {
-      "Value": { "Ref": "ControlPlaneTemplateBucket" }
+      "Value": {
+        "Ref": "ControlPlaneTemplateBucket"
+      }
     },
     "BootstrapOperatorRoleArn": {
-      "Value": { "Fn::GetAtt": ["BootstrapOperatorRole", "Arn"] }
+      "Value": {
+        "Fn::GetAtt": [
+          "BootstrapOperatorRole",
+          "Arn"
+        ]
+      }
+    }
+  },
+  "Metadata": {
+    "RoadMap2U": {
+      "ControlPlaneContractVersion": 34,
+      "StageBootstrapTemplateSha256": "1b42c36334b316ae1b756004943558bfb2dc0e58afa24b20481ec7e65ac8fae1",
+      "RequiredControlPlaneOutputs": [
+        "devInventoryRuntimeBoundaryArn",
+        "testInventoryRuntimeBoundaryArn",
+        "prodInventoryRuntimeBoundaryArn"
+      ]
     }
   }
 }

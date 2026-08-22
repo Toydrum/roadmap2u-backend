@@ -17,6 +17,7 @@ import {
 import { ApiError, SyncRecord, SyncStore } from '@app/api/contracts';
 import { Harvest, Preserve, SCHEMA_VERSION, Tree, TreeNode, newSyncBase } from '@app/db/schema';
 import { Ctx } from '../lambda/authz';
+import { deriveAccessItem } from '../lambda/commercial/access-resolver';
 import { Deps, K, LinkItem, ProfileItem, RecordItem } from '../lambda/db';
 import { getForest } from '../lambda/handlers/forests';
 import { pushSync } from '../lambda/handlers/sync';
@@ -37,6 +38,7 @@ import {
   rotateFriendCode,
 } from '../lambda/handlers/friends';
 import { handleEvent as handlePostConfirmation } from '../lambda/post-confirmation';
+import { errorResponse } from '../lambda/http';
 
 const NOW = 1_800_000_000_000;
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -83,7 +85,16 @@ function link(guardianId: string, minorId: string, kind: LinkItem['kind']): Link
 }
 
 function tree(id: string): Tree {
-  return { ...newSyncBase(NOW - 100), id, name: id, accent: 'moss', order: 10, currentNodeId: null, archivedAt: null };
+  return {
+    ...newSyncBase(NOW - 100),
+    id,
+    name: id,
+    accent: 'moss',
+    order: 10,
+    currentNodeId: null,
+    heartId: null,
+    archivedAt: null,
+  };
 }
 
 function node(id: string, treeId: string): TreeNode {
@@ -146,6 +157,22 @@ function preserve(id: string): Preserve {
   };
 }
 
+function syncFlags() {
+  return {
+    pk: 'COMMERCIAL#CONFIG',
+    sk: 'FLAGS',
+    revision: 1,
+    quotaMode: 'off',
+    capabilityMode: 'off',
+    accessCodeIssuanceEnabled: false,
+    accessCodeRedemptionEnabled: false,
+    premiumPaymentsEnabled: false,
+    updatedAt: NOW - 1,
+    updatedBy: 'test',
+    reason: 'handler fixture',
+  };
+}
+
 beforeEach(() => {
   ddbMock.reset();
   cognitoMock.reset();
@@ -156,7 +183,14 @@ beforeEach(() => {
 function stubForest(owner: ProfileItem, relationLinks: LinkItem[], friends: boolean): void {
   ddbMock.on(GetCommand).callsFake((input) => {
     const { pk, sk } = input.Key as { pk: string; sk: string };
-    if (sk === 'PROFILE' && pk === K.user(owner.userId)) return { Item: owner };
+    if (pk === 'COMMERCIAL#CONFIG' && sk === 'FLAGS') return { Item: syncFlags() };
+    if (sk === 'ACCESS' && pk.startsWith('USER#')) {
+      const ownerSub = pk.slice('USER#'.length);
+      return { Item: deriveAccessItem(ownerSub, NOW, undefined, []) };
+    }
+    if (sk === 'PROFILE') {
+      return { Item: pk === K.user(owner.userId) ? owner : profile(pk.slice('USER#'.length)) };
+    }
     const linkHit = relationLinks.find((l) => l.pk === pk && l.sk === sk);
     if (linkHit) return { Item: linkHit };
     if (sk.startsWith('FRIEND#') && friends) {
@@ -225,16 +259,34 @@ describe('pushSync — rev LWW', () => {
     const stale = { ...tree('t-stale'), rev: 1 };
     const winner = recordItem('rocio', 'trees', { ...tree('t-stale'), rev: 5 });
 
-    ddbMock.on(PutCommand).callsFake((input) => {
-      const item = input.Item as RecordItem;
+    ddbMock.on(TransactWriteCommand).callsFake((input) => {
+      const item = input.TransactItems?.[0]?.Put?.Item as RecordItem;
       if (item.record && (item.record as Tree).id === 't-stale') {
-        const error = new Error('conditional');
-        error.name = 'ConditionalCheckFailedException';
-        throw error;
+        throw Object.assign(new Error('conditional'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+            { Code: 'None' },
+          ],
+        });
       }
       return {};
     });
-    ddbMock.on(GetCommand).resolves({ Item: winner });
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      if (key.pk === 'COMMERCIAL#CONFIG' && key.sk === 'FLAGS') {
+        return { Item: syncFlags() };
+      }
+      if (key.pk === K.profile('rocio').pk && key.sk === K.profile('rocio').sk) {
+        return { Item: profile('rocio', { status: 'active' }) };
+      }
+      if (key.pk === K.user('rocio') && key.sk === 'USAGE') {
+        return { Item: { ...key, state: 'active', activeTrees: 0 } };
+      }
+      return key.pk === winner.pk && key.sk === winner.sk ? { Item: winner } : {};
+    });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
 
     const result = await pushSync(ctxOf(profile('rocio')), {
       schemaVersion: 3,
@@ -258,15 +310,54 @@ describe('pushSync — rev LWW', () => {
     ).rejects.toMatchObject({ code: 'LIMIT_EXCEEDED' });
   });
 
+  it('rejects an invalid commercial record before the first DynamoDB write', async () => {
+    ddbMock.on(PutCommand).resolves({});
+    const injectedTree = { ...tree('t-injected'), injectedOwner: 'another-user' };
+
+    await expect(
+      pushSync(ctxOf(profile('rocio')), {
+        schemaVersion: SCHEMA_VERSION,
+        records: [
+          {
+            store: 'trees',
+            record: injectedTree,
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION' });
+
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
   it('rejects clients newer than the server schema', async () => {
     await expect(
       pushSync(ctxOf(profile('rocio')), { schemaVersion: SCHEMA_VERSION + 1, records: [] }),
     ).rejects.toMatchObject({ code: 'SYNC_TOO_OLD' });
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   it('accepts harvest and preserve records as first-class sync stores', async () => {
-    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
+    const related = [
+      recordItem('rocio', 'trees', tree('t1')),
+      recordItem('rocio', 'nodes', node('n1', 't1')),
+    ];
+    const access = deriveAccessItem('rocio', NOW, undefined, []);
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      if (key.pk === 'COMMERCIAL#CONFIG' && key.sk === 'FLAGS') {
+        return { Item: syncFlags() };
+      }
+      if (key.pk === K.user('rocio') && key.sk === 'PROFILE') {
+        return { Item: profile('rocio', { status: 'active' }) };
+      }
+      if (key.pk === K.user('rocio') && key.sk === 'ACCESS') return { Item: access };
+      if (key.pk === K.user('rocio') && key.sk === 'USAGE') {
+        return { Item: { ...key, state: 'active', activeTrees: 0 } };
+      }
+      return { Item: related.find((item) => item.pk === key.pk && item.sk === key.sk) };
+    });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
     const records: SyncRecord[] = [
       { store: 'harvests', record: harvest('h:n1') },
       { store: 'preserves', record: preserve('p1') },
@@ -278,10 +369,17 @@ describe('pushSync — rev LWW', () => {
     });
 
     expect(result.applied).toEqual(['h:n1', 'p1']);
-    const written = ddbMock.commandCalls(PutCommand).map((call) => call.args[0].input.Item as RecordItem);
+    const written = ddbMock
+      .commandCalls(TransactWriteCommand)
+      .map(
+        (call) =>
+          call.args[0].input.TransactItems?.find((item) =>
+            String(item.Put?.Item?.['sk']).startsWith('REC#'),
+          )?.Put?.Item as RecordItem,
+      );
     expect(written.map((item) => recordItem('rocio', item.store, item.record).store)).toEqual([
-      'harvests',
       'preserves',
+      'harvests',
     ]);
   });
 });
@@ -290,6 +388,12 @@ describe('pushSync — rev LWW', () => {
 
 describe('family', () => {
   it('createChild maps UsernameExistsException to USERNAME_TAKEN', async () => {
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      return key.pk === K.profile('rocio').pk && key.sk === 'PROFILE'
+        ? { Item: profile('rocio', { status: 'active' }) }
+        : {};
+    });
     ddbMock.on(QueryCommand).resolves({ Items: [] }); // no minors yet
     const taken = new Error('exists');
     taken.name = 'UsernameExistsException';
@@ -372,12 +476,16 @@ describe('family', () => {
   // Family invites share the friend-code guessing brake (0.0.115 S1 —
   // this door used to have none): same bucket, same 5-per-hour law.
   it('a bad family code counts as a bad attempt and CODE_INVALID answers', async () => {
+    const rateKey = K.rate('rocio', Math.floor(NOW / 3_600_000));
     ddbMock.on(GetCommand).resolves({}); // rate row absent + code not found
     ddbMock.on(UpdateCommand).resolves({});
     await expect(
       acceptFamilyInvite(ctxOf(profile('rocio')), { code: 'WRONGONE' }),
     ).rejects.toMatchObject({ code: 'CODE_INVALID' });
-    expect(ddbMock.commandCalls(UpdateCommand).length).toBe(1); // the bump
+    const bump = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems?.find(
+      (item) => item.Update?.Key?.['sk'] === rateKey.sk,
+    );
+    expect(bump?.Update).toBeDefined(); // guarded bump
   });
 
   it('the family attempt after 5 bad redemptions is RATE_LIMITED', async () => {
@@ -414,7 +522,10 @@ describe('friend requests', () => {
         code: 'MBRD2468',
       }),
     ).rejects.toMatchObject({ code: 'CODE_EXPIRED' });
-    expect(ddbMock.commandCalls(UpdateCommand).length).toBe(1); // the bump
+    const bump = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems?.find(
+      (item) => item.Update?.Key?.['sk'] === RATE_KEY.sk,
+    );
+    expect(bump?.Update).toBeDefined(); // guarded bump
   });
 
   it('the attempt after 5 bad redemptions in an hour is RATE_LIMITED', async () => {
@@ -433,14 +544,10 @@ describe('friend requests', () => {
   });
 
   it.each([
-    ['list friends', (ctx: Ctx) => getFriends(ctx)],
     ['get a friend code', (ctx: Ctx) => getFriendCode(ctx)],
     ['rotate a friend code', (ctx: Ctx) => rotateFriendCode(ctx)],
     ['create a request', (ctx: Ctx) => createFriendRequest(ctx, { code: 'MBRD2468' })],
     ['accept a request', (ctx: Ctx) => acceptFriendRequest(ctx, 'r1')],
-    ['decline a request', (ctx: Ctx) => declineFriendRequest(ctx, 'r1')],
-    ['cancel a request', (ctx: Ctx) => cancelFriendRequest(ctx, 'r1')],
-    ['remove a friend', (ctx: Ctx) => removeFriend(ctx, 'nico~val')],
   ])('blocks social-off callers before they can %s', async (_label, invoke) => {
     const socialOff = ctxOf(profile('nico', { accountType: 'minor', socialEnabled: false }));
 
@@ -508,10 +615,14 @@ describe('username reservation', () => {
     const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
     const profilePut = transaction.TransactItems?.[0]?.Put;
     const usernamePut = transaction.TransactItems?.[1]?.Put;
-    expect(profilePut?.ConditionExpression).toBe('attribute_not_exists(pk)');
+    expect(profilePut?.ConditionExpression).toBe(
+      'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+    );
     expect(profilePut?.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
     expect(usernamePut?.Item).toMatchObject(K.uniqUsername('rocio'));
-    expect(usernamePut?.ConditionExpression).toBe('attribute_not_exists(pk)');
+    expect(usernamePut?.ConditionExpression).toBe(
+      'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+    );
     expect(usernamePut?.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
   });
 
@@ -539,26 +650,24 @@ describe('username reservation', () => {
       userPoolId: 'pool-1',
       request: { userAttributes: { sub: 'sub-rocio', name: 'Rocio', email: 'r@example.com' } },
     } as unknown as Parameters<typeof handlePostConfirmation>[0];
-    let provisioned = false;
-    ddbMock.on(TransactWriteCommand).callsFake(() => {
-      if (provisioned) {
-        throw Object.assign(new Error('username already reserved'), {
-          name: 'TransactionCanceledException',
-          CancellationReasons: [
-            {
-              Code: 'ConditionalCheckFailed',
-              Item: { userId: { S: 'sub-rocio' }, username: { S: 'rocio' } },
-            },
-            {
-              Code: 'ConditionalCheckFailed',
-              Item: { userId: { S: 'sub-rocio' } },
-            },
-          ],
-        });
-      }
-      provisioned = true;
-      return {};
-    });
+    let provisionedItems: Record<string, unknown>[] | undefined;
+    ddbMock
+      .on(TransactWriteCommand)
+      .callsFake((input: ConstructorParameters<typeof TransactWriteCommand>[0]) => {
+        if (provisionedItems) {
+          throw Object.assign(new Error('username already reserved'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [
+              ...provisionedItems.map((Item) => ({ Code: 'ConditionalCheckFailed', Item })),
+              { Code: 'None' },
+            ],
+          });
+        }
+        provisionedItems = (input.TransactItems ?? []).flatMap((item) =>
+          item.Put?.Item ? [item.Put.Item] : [],
+        );
+        return {};
+      });
     let attributeUpdates = 0;
     cognitoMock.on(AdminUpdateUserAttributesCommand).callsFake(() => {
       attributeUpdates += 1;
@@ -594,6 +703,7 @@ describe('username reservation', () => {
           Code: 'ConditionalCheckFailed',
           Item: { userId: { S: 'sub-other' } },
         },
+        { Code: 'None' },
       ],
     });
     ddbMock.on(TransactWriteCommand).rejects(conflict);
@@ -610,5 +720,21 @@ describe('ApiError', () => {
     const error = new ApiError('LAST_GUARDIAN', 'x');
     expect(error instanceof ApiError).toBe(true);
     expect(error.code).toBe('LAST_GUARDIAN');
+  });
+
+  it.each([
+    ['QUOTA_EXCEEDED', 409],
+    ['CAPABILITY_REQUIRED', 403],
+    ['MUTATION_GROUP_INVALID', 400],
+    ['ACCESS_REVISION_CONFLICT', 409],
+    ['ACCESS_CODE_INVALID', 400],
+    ['ACCESS_CODE_RATE_LIMITED', 429],
+    ['ACCESS_CODE_ALREADY_REDEEMED', 409],
+    ['SYNC_SCHEMA_INVALID', 400],
+    ['SYNC_CLIENT_UPGRADE_REQUIRED', 426],
+    ['USAGE_MIGRATION_IN_PROGRESS', 409],
+    ['COMMERCIAL_CONFIGURATION_UNAVAILABLE', 503],
+  ] as const)('maps commercial error %s to HTTP %i', (code, status) => {
+    expect(errorResponse(new ApiError(code)).statusCode).toBe(status);
   });
 });

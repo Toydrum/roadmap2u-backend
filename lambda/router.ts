@@ -1,6 +1,7 @@
 import type {
   APIGatewayProxyEventV2,
   APIGatewayProxyEventV2WithJWTAuthorizer,
+  Context,
 } from 'aws-lambda';
 import { ApiError } from '@app/api/contracts';
 import { Ctx, resolveCaller } from './authz';
@@ -11,6 +12,7 @@ import * as family from './handlers/family';
 import * as friends from './handlers/friends';
 import * as forests from './handlers/forests';
 import * as sync from './handlers/sync';
+import { instrumentHandler } from './observability';
 
 /**
  * The single router behind `/v1/{proxy+}`. CORS preflight returns before auth;
@@ -118,4 +120,7 @@ export async function handleEvent(
   }
 }
 
-export const handler = (event: RouterEvent) => handleEvent(event);
+export const handler = instrumentHandler(
+  'router',
+  (event: RouterEvent, _context?: Context) => handleEvent(event),
+);

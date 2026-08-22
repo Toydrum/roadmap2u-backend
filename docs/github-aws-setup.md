@@ -18,7 +18,7 @@ Esta guía se usa durante las ventanas aprobadas del rollout. Mantén todos los 
 4. Designar a un operador con permisos acotados para el bootstrap inicial.
 5. Revisar las plantillas sintetizadas y políticas IAM antes de aplicarlas.
 
-El proveedor OIDC existente de la cuenta, con issuer `https://token.actions.githubusercontent.com` y audience `sts.amazonaws.com`, se reutiliza: este rollout no lo crea, reemplaza ni elimina. `Roadmap-CiBootstrap` usa `BootstraplessSynthesizer`, se sintetiza a una plantilla revisable y se aplica directamente mediante CloudFormation por el operador temporal. Así no depende del `CDKToolkit` compartido ni de sus permisos administrativos. Después se crean tres toolkits personalizados para las cargas de `dev`, `test` y `prod` a partir de plantillas derivadas del bootstrap canónico v32, fijadas en el repositorio y revisadas; actualizar CDK exige regenerar y revisar explícitamente esas plantillas.
+El proveedor OIDC existente de la cuenta, con issuer `https://token.actions.githubusercontent.com` y audience `sts.amazonaws.com`, se reutiliza: este rollout no lo crea, reemplaza ni elimina. `Roadmap-CiBootstrap` usa `BootstraplessSynthesizer`, se sintetiza a una plantilla revisable y se aplica directamente mediante CloudFormation por el operador temporal. Así no depende del `CDKToolkit` compartido ni de sus permisos administrativos. Después se crean tres toolkits personalizados para las cargas de `dev`, `test` y `prod` a partir de plantillas derivadas del bootstrap canónico v34, fijadas en el repositorio y revisadas; actualizar CDK exige regenerar y revisar explícitamente esas plantillas. `scripts/render-stage-bootstrap-templates.mjs` calcula un SHA-256 sobre el JSON canónico del source y lo fija como `SourceTemplateSha256` en cada derivado y como `StageBootstrapTemplateSha256` en la metadata del operador; cualquier diferencia exige regenerar y volver a revisar los cuatro artefactos.
 
 Los toolkits de stage usan calificadores y nombres distintos:
 
@@ -29,6 +29,8 @@ Los toolkits de stage usan calificadores y nombres distintos:
 | `prod` | `rmap2uprd` | `RoadMap2U-CDK-prod` |
 
 Esto separa nombres de roles, buckets y assets y evita que un rol OIDC asuma los roles bootstrap de otro stage. No es por sí solo una frontera de permisos: en una misma cuenta, el alcance efectivo lo determina la política del `CloudFormationExecutionRole`. `AWS_DEPLOY_ENABLED` y `AWS_ROLLBACK_ENABLED` deben permanecer en `false` hasta que exista una managed policy revisada y de mínimo privilegio para cada stage. Nunca uses `AdministratorAccess` como policy de ejecución de estos toolkits.
+
+Cada `CloudFormationExecutionRole` adjunta las cinco policies de workload `cfn-core`, `cfn-api`, `cfn-data`, `cfn-edge` y `cfn-observability`; las otras managed policies del stage son `runtime-boundary` e `inventory-runtime-boundary` y nunca se adjuntan como permisos de ejecución. La segunda limita exclusivamente al ejecutor de inventario y debe existir en `Roadmap-CiBootstrap` antes del primer diff/deploy de la carga. `cfn-observability` queda separada, acotada a `roadmap-commercial-alerts-<stage>` y `roadmap-commercial-<stage>-*`, y no concede `sns:Publish`, `cloudwatch:PutMetricData` ni un `Resource: "*"`.
 
 Cada toolkit también posee el log group `/aws/apigateway/roadmap-api-<stage>`, su retención de 7/14/30 días y una `ResourcePolicyDocument` limitada al principal `delivery.logs.amazonaws.com`, a la cuenta y al ARN exacto del log group. El toolkit exporta el nombre y el backend construye desde él un único ARN con sufijo `:*`. Así, el operador temporal MFA realiza `logs:PutResourcePolicy` durante el bootstrap, mientras los `CloudFormationExecutionRole` ordinarios sólo conservan las autorizaciones regionales de entrega y lectura que API Gateway necesita. Además, `apigateway:Request/AccessLoggingDestination` fija cada `CreateStage`/`UpdateStage` al log group del mismo ambiente; un stack `dev` no puede reescribir la política ni redirigir los access logs hacia `test` o `prod`.
 
@@ -56,6 +58,8 @@ Los demás valores pueden variar entre repositorios porque cada uno usa un rol d
 | `AWS_ROLE_ARN` | `arn:aws:iam::<account>:role/<role>` | rol del repo y stage exactos |
 
 El frontend consume `AWS_ACCOUNT_ID` y `AWS_ROLE_ARN`; el ARN apunta al rol frontend del stage. El backend consume además `HOSTED_ZONE_ID` para synth/deploy. Los ARNs y IDs no son secretos; aun así, no deben hardcodearse porque pertenecen a una cuenta/ambiente concreto.
+
+En cada environment backend crea el secret `ALARM_NOTIFICATION_EMAIL`. El workflow lo valida y enmascara antes del diff, lo pasa a ambos comandos CDK como parámetro CloudFormation `AlarmNotificationEmail` con `NoEcho` y se detiene hasta que exista exactamente una suscripción email confirmada. El valor no forma parte del contexto CDK ni de los templates; no lo copies a variables, logs o evidencia.
 
 El environment backend `prod` recibe `DNS_PLAN_ROLE_ARN` desde el output `prodDnsPlanRoleArn`; ese rol solo puede leer la zona, distribución, certificado, marcadores y respaldo necesarios para generar el plan. El environment separado `prod-dns-cutover` recibe `DNS_CUTOVER_ROLE_ARN` desde `prodDnsCutoverRoleArn`; solo este rol puede mutar el apex/`www` y escribir el respaldo SSM tras la segunda aprobación. Ambos environments reciben `AWS_ACCOUNT_ID` y `HOSTED_ZONE_ID`. Mantén el gate de repositorio `DNS_CUTOVER_ENABLED` en `false` hasta la ventana formal de corte.
 
@@ -129,10 +133,10 @@ Evita `pull_request_target` en cualquier workflow con permisos AWS. Los PR norma
 1. Mantener `AWS_DEPLOY_ENABLED=false` y `AWS_ROLLBACK_ENABLED=false` en ambos repositorios.
 2. Autenticarse en AWS con la identidad administrativa aprobada y verificar account/region mediante una llamada de solo lectura.
 3. Confirmar que el proveedor OIDC existente tiene exactamente el issuer/audience aprobados; abortar si falta o difiere, sin recrearlo automáticamente.
-4. Sintetizar `Roadmap-CiBootstrap` con `BootstraplessSynthesizer`, revisar la plantilla y aplicarla directamente por CloudFormation con el rol bootstrap temporal. Habilitar termination protection y capturar sus outputs.
+4. Ejecutar `node scripts/render-stage-bootstrap-templates.mjs`, revisar que los tres `SourceTemplateSha256` y el `StageBootstrapTemplateSha256` del operador coincidan, crear primero el operador temporal con `./scripts/aws-bootstrap.ps1 -Phase create-operator -AdminProfile <ADMIN_PROFILE>` y sólo después aplicar `Roadmap-CiBootstrap` con `./scripts/aws-bootstrap.ps1 -Phase deploy-control-plane -AdminProfile <ADMIN_PROFILE> -MfaCode <MFA>`. El script sintetiza con `BootstraplessSynthesizer`, habilita termination protection y falla cerrado salvo que existan exactamente `devInventoryRuntimeBoundaryArn`, `testInventoryRuntimeBoundaryArn` y `prodInventoryRuntimeBoundaryArn` y que cada ARN resuelva con `iam get-policy`.
 5. Revisar las tres policies de ejecución CloudFormation y las tres plantillas bootstrap personalizadas versionadas, una por stage. Deben cubrir solo recursos RoadMap2U, imponer el execution role/boundary correctos y no incluir `AdministratorAccess`.
 6. Antes de la primera actualización, consultar los nombres exactos `/aws/apigateway/roadmap-api-dev|test|prod`. Si alguno ya existe y `cloudformation describe-stack-resources` no lo atribuye a su stack `RoadMap2U-CDK-<stage>`, abortar: CloudFormation no adopta un log group huérfano de forma automática.
-7. Aplicar mediante CloudFormation los tres toolkits con nombres/calificadores únicos y termination protection. Los comandos CDK equivalentes que originan las plantillas se conservan solo como referencia reproducible; nunca se ejecutan con el toolkit compartido:
+7. Aplicar mediante CloudFormation los tres toolkits con `./scripts/aws-bootstrap.ps1 -Phase deploy-stage-toolkits -AdminProfile <ADMIN_PROFILE> -MfaCode <MFA>`, nombres/calificadores únicos y termination protection. Ese phase vuelve a comprobar las tres boundaries antes de tocar un toolkit. Los comandos CDK equivalentes que originan las plantillas se conservan solo como referencia reproducible; nunca se ejecutan con el toolkit compartido:
 
    ```powershell
    npx cdk bootstrap aws://<ACCOUNT_ID>/us-east-1 --toolkit-stack-name RoadMap2U-CDK-dev --qualifier rmap2udev --cloudformation-execution-policies <ARN_POLICY_DEV> --termination-protection
@@ -140,7 +144,7 @@ Evita `pull_request_target` en cualquier workflow con permisos AWS. Los PR norma
    npx cdk bootstrap aws://<ACCOUNT_ID>/us-east-1 --toolkit-stack-name RoadMap2U-CDK-prod --qualifier rmap2uprd --cloudformation-execution-policies <ARN_POLICY_PROD> --termination-protection
    ```
 
-8. Confirmar los tres parámetros `/cdk-bootstrap/rmap2udev|rmap2utst|rmap2uprd/version`, los tres exports `RoadMap2U-<stage>-ApiAccessLogGroupName` y que cada toolkit referencia exclusivamente su policy/boundary aprobados.
+8. Confirmar que los tres parámetros `/cdk-bootstrap/rmap2udev|rmap2utst|rmap2uprd/version` valen `34`, los tres exports `RoadMap2U-<stage>-ApiAccessLogGroupName` existen y cada toolkit referencia exclusivamente sus policies aprobadas.
 9. Copiar los seis ARNs frontend/backend a sus GitHub Environments; copiar `prodDnsPlanRoleArn` como `DNS_PLAN_ROLE_ARN` de `prod` y `prodDnsCutoverRoleArn` como `DNS_CUTOVER_ROLE_ARN` de `prod-dns-cutover`. Copiar también en ambos el mismo account ID y hosted zone ID aprobados.
 10. Activar `use_immutable_subject:true` en ambos repositorios con la API `2026-03-10` y verificar los dos `sub_claim_prefix` exactos.
 11. Ejecutar los ocho preflights de identidad —cinco backend y tres frontend— que solo hacen `sts:GetCallerIdentity`, y comprobar repo/environment/account.
