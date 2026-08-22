@@ -242,6 +242,8 @@ describe('GitHub OIDC bootstrap', () => {
       const boundaryManagement = statements.find(
         (statement: any) => statement.Sid === 'SetOnlyStageRuntimeBoundary',
       );
+      const exactInventoryRoleNameArn =
+        `:role/roadmap-commercial-inventory-executor-${stage}`;
       expect(genericRoleManagement.Action).not.toContain('iam:PutRolePermissionsBoundary');
       expect(boundaryManagement.Action).toBe('iam:PutRolePermissionsBoundary');
       expect(boundaryManagement.Condition.StringEquals['iam:PermissionsBoundary']).toEqual(
@@ -250,6 +252,16 @@ describe('GitHub OIDC bootstrap', () => {
       expect(JSON.stringify(boundaryManagement.Condition)).toContain(
         `/roadmap2u/${stage}/roadmap2u-${stage}-runtime-boundary`,
       );
+      for (const sid of [
+        'CreateBoundedStageRuntimeRoles',
+        'ManageOnlyStageRuntimeRoles',
+        'SetOnlyStageRuntimeBoundary',
+        'AttachOnlyLambdaBasicExecution',
+        'PassOnlyStageRuntimeRolesToLambda',
+      ]) {
+        const statement = statements.find((candidate: any) => candidate.Sid === sid);
+        expect(JSON.stringify(statement.Resource)).not.toContain(exactInventoryRoleNameArn);
+      }
       for (const sid of [
         'CreateBoundedStageRuntimeRoles',
         'ManageOnlyStageRuntimeRoles',
@@ -299,6 +311,38 @@ describe('GitHub OIDC bootstrap', () => {
 
       const statements = policy.Properties.PolicyDocument.Statement;
       expect(statements.every((statement: any) => statement.Resource !== '*')).toBe(true);
+      const inventoryBoundary = statements.find(
+        (statement: any) => statement.Sid === 'SetCommercialInventoryRuntimeBoundary',
+      );
+      expect(JSON.stringify(inventoryBoundary.Resource)).toContain(
+        `:role/roadmap2u/${stage}/runtime/roadmap-commercial-inventory-executor-${stage}`,
+      );
+      expect(JSON.stringify(inventoryBoundary.Resource)).toContain(
+        `:role/roadmap-commercial-inventory-executor-${stage}`,
+      );
+      const namedInventoryLifecycle = statements.find(
+        (statement: any) => statement.Sid === 'ManageOnlyNamedCommercialInventoryRole',
+      );
+      expect(namedInventoryLifecycle.Action).toContain('iam:GetRole');
+      expect(namedInventoryLifecycle.Action).toContain('iam:DeleteRole');
+      expect(namedInventoryLifecycle.Action).toContain('iam:ListRoleTags');
+      expect(namedInventoryLifecycle.Action).not.toContain('iam:CreateRole');
+      expect(JSON.stringify(namedInventoryLifecycle.Resource)).toContain(
+        `:role/roadmap-commercial-inventory-executor-${stage}`,
+      );
+      const namedInventoryAttachment = statements.find(
+        (statement: any) =>
+          statement.Sid === 'AttachOnlyLambdaBasicExecutionToNamedCommercialInventoryRole',
+      );
+      expect(namedInventoryAttachment.Action).toEqual(
+        expect.arrayContaining(['iam:AttachRolePolicy', 'iam:DetachRolePolicy']),
+      );
+      expect(JSON.stringify(namedInventoryAttachment.Resource)).toContain(
+        `:role/roadmap-commercial-inventory-executor-${stage}`,
+      );
+      expect(JSON.stringify(namedInventoryAttachment.Condition)).toContain(
+        'AWSLambdaBasicExecutionRole',
+      );
       const actions = statements.flatMap((statement: any) =>
         Array.isArray(statement.Action) ? statement.Action : [statement.Action],
       );

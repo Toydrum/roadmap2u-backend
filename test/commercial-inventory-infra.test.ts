@@ -162,6 +162,7 @@ describe('commercial inventory executor infrastructure', () => {
       });
       expect(functionUrl.Properties).toMatchObject({ AuthType: 'AWS_IAM' });
       expect(functionUrl.Properties.Cors).toBeUndefined();
+      expect(role.Properties.RoleName).toBe(functionName);
       expect(role.Properties.Path).toBe(`/roadmap2u/${stage}/runtime/`);
       expect(JSON.stringify(role.Properties.PermissionsBoundary)).toContain(
         `/roadmap2u/${stage}/roadmap2u-${stage}-inventory-runtime-boundary`,
