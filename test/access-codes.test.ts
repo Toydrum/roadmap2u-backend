@@ -181,8 +181,8 @@ describe('sponsored access-code primitives', () => {
       sk: 'COMMAND#e3850eda-32e1-4b2b-a1bf-233226881128',
     });
     expect(accessCodeAttemptKey('sub-adult', NOW)).toEqual({
-      pk: 'USER#sub-adult',
-      sk: 'ACCESS_CODE_ATTEMPT#2026-08-22T18',
+      pk: 'ACCESS_CODE_ATTEMPT#sub-adult',
+      sk: 'HOUR#2026-08-22T18',
     });
 
     const parsed = parseAccessCode(

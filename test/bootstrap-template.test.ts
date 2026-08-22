@@ -5,11 +5,7 @@ import { delimiter, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
-const templatePath = join(
-  process.cwd(),
-  'bootstrap',
-  'roadmap2u-stage-bootstrap.template.json',
-);
+const templatePath = join(process.cwd(), 'bootstrap', 'roadmap2u-stage-bootstrap.template.json');
 const operatorTemplatePath = join(process.cwd(), 'bootstrap', 'bootstrap-operator.template.json');
 const bootstrapScriptPath = join(process.cwd(), 'scripts', 'aws-bootstrap.ps1');
 const breakGlassScriptPath = join(process.cwd(), 'scripts', 'aws-break-glass.ps1');
@@ -88,22 +84,26 @@ exit 2
       delete environment.AWS_CA_BUNDLE;
     }
 
-    const result = spawnSync(windows ? 'powershell.exe' : 'pwsh', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      bootstrapScriptPath,
-      '-Phase',
-      'create-operator',
-      '-AdminProfile',
-      'mock-profile',
-    ], {
-      encoding: 'utf8',
-      env: environment,
-      timeout: 15_000,
-    });
+    const result = spawnSync(
+      windows ? 'powershell.exe' : 'pwsh',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        bootstrapScriptPath,
+        '-Phase',
+        'create-operator',
+        '-AdminProfile',
+        'mock-profile',
+      ],
+      {
+        encoding: 'utf8',
+        env: environment,
+        timeout: 15_000,
+      },
+    );
     return {
       status: result.status,
       stdout: result.stdout,
@@ -267,26 +267,30 @@ exit 2
     environment.AWS_DEFAULT_PROFILE = 'ambient-default-profile';
     delete environment.AWS_CA_BUNDLE;
 
-    const result = spawnSync(windows ? 'powershell.exe' : 'pwsh', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      breakGlassScriptPath,
-      '-Stage',
-      'dev',
-      '-Confirmation',
-      'DESTROY dev',
-      '-MfaCode',
-      '123456',
-      '-AdminProfile',
-      'mock-profile',
-    ], {
-      encoding: 'utf8',
-      env: environment,
-      timeout: 15_000,
-    });
+    const result = spawnSync(
+      windows ? 'powershell.exe' : 'pwsh',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        breakGlassScriptPath,
+        '-Stage',
+        'dev',
+        '-Confirmation',
+        'DESTROY dev',
+        '-MfaCode',
+        '123456',
+        '-AdminProfile',
+        'mock-profile',
+      ],
+      {
+        encoding: 'utf8',
+        env: environment,
+        timeout: 15_000,
+      },
+    );
     return {
       status: result.status,
       stdout: result.stdout,
@@ -352,28 +356,27 @@ describe('custom stage CDK bootstrap template', () => {
     const template = JSON.parse(readFileSync(templatePath, 'utf8'));
     const rendered = JSON.stringify(template);
 
-    expect(rendered).toContain(
-      'role/roadmap2u/${Stage}/roadmap2u-${Stage}-backend-deploy',
-    );
+    expect(rendered).toContain('role/roadmap2u/${Stage}/roadmap2u-${Stage}-backend-deploy');
     expect(rendered).toContain('stack/Roadmap-${Stage}-Backend/*');
     expect(rendered).toContain('stack/Roadmap-${Stage}-Hosting/*');
     expect(rendered).toContain('cloudformation:RoleArn');
     expect(rendered).not.toContain('cloudformation:DeleteStack');
     expect(rendered).not.toContain('stack/Roadmap-*');
     expect(rendered).not.toContain('sts:AssumeRoleWithWebIdentity');
-    const changeSetStatement = template.Resources.DeploymentActionRole.Properties.Policies[0]
-      .PolicyDocument.Statement.find((statement: any) =>
-        Array.isArray(statement.Action)
-          ? statement.Action.includes('cloudformation:CreateChangeSet')
-          : statement.Action === 'cloudformation:CreateChangeSet',
+    const changeSetStatement =
+      template.Resources.DeploymentActionRole.Properties.Policies[0].PolicyDocument.Statement.find(
+        (statement: any) =>
+          Array.isArray(statement.Action)
+            ? statement.Action.includes('cloudformation:CreateChangeSet')
+            : statement.Action === 'cloudformation:CreateChangeSet',
       );
     expect(changeSetStatement.Condition.StringEquals['cloudformation:RoleArn']).toBeDefined();
     expect(changeSetStatement.Condition.Null).toEqual({
       'cloudformation:ImportResourceTypes': 'true',
     });
     expect(rendered).not.toContain('cloudformation:ChangeSetType');
-    const operateStatement = template.Resources.DeploymentActionRole.Properties.Policies[0]
-      .PolicyDocument.Statement.find(
+    const operateStatement =
+      template.Resources.DeploymentActionRole.Properties.Policies[0].PolicyDocument.Statement.find(
         (statement: any) => statement.Sid === 'OperateOnlySelectedStageChangeSets',
       );
     expect(operateStatement.Action).toContain('cloudformation:UpdateTerminationProtection');
@@ -389,11 +392,12 @@ describe('custom stage CDK bootstrap template', () => {
     expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-edge');
     expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-data');
     expect(rendered).toContain(
-      'policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-observability',
+      'policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-commercial-access',
     );
+    expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-observability');
     expect(
       template.Resources.CloudFormationExecutionRole.Properties.ManagedPolicyArns,
-    ).toHaveLength(5);
+    ).toHaveLength(6);
     expect(rendered).not.toContain('AdministratorAccess');
   });
 
@@ -455,8 +459,7 @@ describe('custom stage CDK bootstrap template', () => {
             StringEquals: { 'aws:SourceAccount': { Ref: 'AWS::AccountId' } },
             ArnLike: {
               'aws:SourceArn': {
-                'Fn::Sub':
-                  'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*',
+                'Fn::Sub': 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*',
               },
             },
           },
@@ -476,38 +479,41 @@ describe('custom stage CDK bootstrap template', () => {
     ['dev', 'rmap2udev', 'RoadMap2U-CDK-dev'],
     ['test', 'rmap2utst', 'RoadMap2U-CDK-test'],
     ['prod', 'rmap2uprd', 'RoadMap2U-CDK-prod'],
-  ] as const)('renders an executable fixed %s bootstrap template', (stage, qualifier, stackName) => {
-    const path = join(process.cwd(), 'bootstrap', `roadmap2u-${stage}-bootstrap.template.json`);
-    expect(existsSync(path)).toBe(true);
-    const template = JSON.parse(readFileSync(path, 'utf8'));
-    const expected = structuredClone(JSON.parse(readFileSync(templatePath, 'utf8')));
-    expected.Parameters.Stage.Default = stage;
-    expected.Parameters.Qualifier.Default = qualifier;
-    expected.Metadata = {
-      ...(expected.Metadata ?? {}),
-      RoadMap2U: {
-        ...(expected.Metadata?.RoadMap2U ?? {}),
+  ] as const)(
+    'renders an executable fixed %s bootstrap template',
+    (stage, qualifier, stackName) => {
+      const path = join(process.cwd(), 'bootstrap', `roadmap2u-${stage}-bootstrap.template.json`);
+      expect(existsSync(path)).toBe(true);
+      const template = JSON.parse(readFileSync(path, 'utf8'));
+      const expected = structuredClone(JSON.parse(readFileSync(templatePath, 'utf8')));
+      expected.Parameters.Stage.Default = stage;
+      expected.Parameters.Qualifier.Default = qualifier;
+      expected.Metadata = {
+        ...(expected.Metadata ?? {}),
+        RoadMap2U: {
+          ...(expected.Metadata?.RoadMap2U ?? {}),
+          StackName: stackName,
+          Qualifier: qualifier,
+          Stage: stage,
+          TerminationProtection: true,
+          SourceTemplateSha256: stageBootstrapSourceHash(),
+        },
+      };
+
+      expect(template.Parameters.Stage.Default).toBe(stage);
+      expect(template.Parameters.Qualifier.Default).toBe(qualifier);
+      expect(template.Metadata.RoadMap2U).toEqual({
+        TemplateVersion: 34,
         StackName: stackName,
         Qualifier: qualifier,
         Stage: stage,
         TerminationProtection: true,
         SourceTemplateSha256: stageBootstrapSourceHash(),
-      },
-    };
-
-    expect(template.Parameters.Stage.Default).toBe(stage);
-    expect(template.Parameters.Qualifier.Default).toBe(qualifier);
-    expect(template.Metadata.RoadMap2U).toEqual({
-      TemplateVersion: 34,
-      StackName: stackName,
-      Qualifier: qualifier,
-      Stage: stage,
-      TerminationProtection: true,
-      SourceTemplateSha256: stageBootstrapSourceHash(),
-    });
-    expect(JSON.stringify(template)).not.toContain('cloudformation:DeleteStack');
-    expect(template).toEqual(expected);
-  });
+      });
+      expect(JSON.stringify(template)).not.toContain('cloudformation:DeleteStack');
+      expect(template).toEqual(expected);
+    },
+  );
 
   it('defines a one-hour MFA-only temporary bootstrap operator without OIDC mutation', () => {
     expect(existsSync(operatorTemplatePath)).toBe(true);
@@ -541,8 +547,8 @@ describe('custom stage CDK bootstrap template', () => {
 
   it('lets the operator attach only the fifteen stage control-plane policies', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
-    const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
-      .PolicyDocument.Statement;
+    const statements =
+      template.Resources.BootstrapOperatorRole.Properties.Policies[0].PolicyDocument.Statement;
     const attachment = statements.find(
       (statement: any) => statement.Sid === 'AttachOnlyRoadMap2UControlPlanePolicies',
     );
@@ -561,35 +567,35 @@ describe('custom stage CDK bootstrap template', () => {
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-core',
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-data',
+      'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-commercial-access',
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-edge',
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-observability',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-core',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-data',
+      'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-commercial-access',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-edge',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-observability',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-core',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-data',
+      'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-commercial-access',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-edge',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-observability',
     ]);
     const roleManagement = statements.find(
       (statement: any) => statement.Sid === 'CreateAndManageRoadMap2URoles',
     );
-    expect(roleManagement.Resource).not.toContain(
-      'arn:aws:iam::765932874577:role/roadmap2u/*',
-    );
+    expect(roleManagement.Resource).not.toContain('arn:aws:iam::765932874577:role/roadmap2u/*');
     expect(JSON.stringify(roleManagement.Resource)).not.toContain('/roadmap2u/bootstrap/');
   });
 
   it('limits toolkit access-log policy mutation to the temporary MFA operator', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
-    const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
-      .PolicyDocument.Statement;
+    const statements =
+      template.Resources.BootstrapOperatorRole.Properties.Policies[0].PolicyDocument.Statement;
     const logGroupMutations = statements.find(
-      (statement: any) =>
-        statement.Sid === 'ManageOnlyRoadMap2UToolkitApiLogGroupResources',
+      (statement: any) => statement.Sid === 'ManageOnlyRoadMap2UToolkitApiLogGroupResources',
     );
     const logGroupTags = statements.find(
       (statement: any) => statement.Sid === 'ManageOnlyRoadMap2UToolkitApiLogGroupTags',
@@ -642,8 +648,8 @@ describe('custom stage CDK bootstrap template', () => {
 
   it('manages CloudFormation role-name lookups only for the twenty exact control-plane roles', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
-    const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
-      .PolicyDocument.Statement;
+    const statements =
+      template.Resources.BootstrapOperatorRole.Properties.Policies[0].PolicyDocument.Statement;
     const namedRoleManagement = statements.find(
       (statement: any) => statement.Sid === 'ManageOnlyExactRoadMap2URoleNames',
     );
@@ -699,8 +705,8 @@ describe('custom stage CDK bootstrap template', () => {
 
   it('allows recovery deletion only for the control-plane stack', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
-    const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
-      .PolicyDocument.Statement;
+    const statements =
+      template.Resources.BootstrapOperatorRole.Properties.Policies[0].PolicyDocument.Statement;
     const recovery = statements.find(
       (statement: any) => statement.Sid === 'RecoverOnlyRoadMap2UControlPlane',
     );
@@ -709,8 +715,7 @@ describe('custom stage CDK bootstrap template', () => {
       Sid: 'RecoverOnlyRoadMap2UControlPlane',
       Effect: 'Allow',
       Action: 'cloudformation:DeleteStack',
-      Resource:
-        'arn:aws:cloudformation:us-east-1:765932874577:stack/Roadmap-CiBootstrap/*',
+      Resource: 'arn:aws:cloudformation:us-east-1:765932874577:stack/Roadmap-CiBootstrap/*',
     });
     const ordinaryStackOperations = statements.find(
       (statement: any) => statement.Sid === 'OperateOnlyRoadMap2UBootstrapStacks',
@@ -724,8 +729,10 @@ describe('custom stage CDK bootstrap template', () => {
     const rendered = JSON.stringify(template);
 
     expect(bucket.BucketName).toBe('roadmap2u-bootstrap-templates-765932874577-us-east-1');
-    expect(bucket.BucketEncryption.ServerSideEncryptionConfiguration[0]
-      .ServerSideEncryptionByDefault.SSEAlgorithm).toBe('AES256');
+    expect(
+      bucket.BucketEncryption.ServerSideEncryptionConfiguration[0].ServerSideEncryptionByDefault
+        .SSEAlgorithm,
+    ).toBe('AES256');
     expect(bucket.PublicAccessBlockConfiguration).toEqual({
       BlockPublicAcls: true,
       BlockPublicPolicy: true,
@@ -737,17 +744,13 @@ describe('custom stage CDK bootstrap template', () => {
       'arn:aws:s3:::roadmap2u-bootstrap-templates-765932874577-us-east-1/control-plane/*',
     );
     expect(template.Outputs.ControlPlaneTemplateBucketName).toBeDefined();
-    const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
-      .PolicyDocument.Statement;
+    const statements =
+      template.Resources.BootstrapOperatorRole.Properties.Policies[0].PolicyDocument.Statement;
     const buckets = statements.find(
       (statement: any) => statement.Sid === 'ManageOnlyRoadMap2UBootstrapBuckets',
     );
     expect(buckets.Action).toEqual(
-      expect.arrayContaining([
-        's3:GetBucketAcl',
-        's3:GetEncryptionConfiguration',
-        's3:ListBucket',
-      ]),
+      expect.arrayContaining(['s3:GetBucketAcl', 's3:GetEncryptionConfiguration', 's3:ListBucket']),
     );
     const versions = statements.find(
       (statement: any) => statement.Sid === 'ManageOnlyRoadMap2UBootstrapVersions',
@@ -763,8 +766,8 @@ describe('custom stage CDK bootstrap template', () => {
 
   it('lets only the temporary operator install and maintain toolkit OACs', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
-    const statements = template.Resources.BootstrapOperatorRole.Properties.Policies[0]
-      .PolicyDocument.Statement;
+    const statements =
+      template.Resources.BootstrapOperatorRole.Properties.Policies[0].PolicyDocument.Statement;
     const create = statements.find(
       (statement: any) => statement.Sid === 'CreateToolkitOriginAccessControls',
     );
@@ -782,9 +785,7 @@ describe('custom stage CDK bootstrap template', () => {
       'cloudfront:UpdateOriginAccessControl',
     ]);
     expect(JSON.stringify(manage.Action)).not.toContain('GetOriginAccessControlConfig');
-    expect(manage.Resource).toBe(
-      'arn:aws:cloudfront::765932874577:origin-access-control/*',
-    );
+    expect(manage.Resource).toBe('arn:aws:cloudfront::765932874577:origin-access-control/*');
     expect(JSON.stringify(statements)).not.toContain('ResponseHeadersPolicy');
   });
 
@@ -843,21 +844,23 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).toContain(
       "$HectorAdminPrincipalArn -cne 'arn:aws:iam::765932874577:user/Hector-admin'",
     );
-    expect(script).toContain(
-      "$HectorMfaArn -cne 'arn:aws:iam::765932874577:mfa/HectorPhone'",
-    );
+    expect(script).toContain("$HectorMfaArn -cne 'arn:aws:iam::765932874577:mfa/HectorPhone'");
     expect(script).toContain('sts get-caller-identity');
     expect(script).toContain('$caller.Account -cne $AccountId');
     expect(script).toContain('$caller.Arn -cne $HectorAdminPrincipalArn');
     expect(script.indexOf('sts get-caller-identity')).toBeLessThan(
       script.indexOf("if ($Phase -eq 'create-operator')"),
     );
-    expect(script).toContain("$recoverableControlPlaneStates = @('ROLLBACK_COMPLETE', 'ROLLBACK_FAILED')");
+    expect(script).toContain(
+      "$recoverableControlPlaneStates = @('ROLLBACK_COMPLETE', 'ROLLBACK_FAILED')",
+    );
     expect(script.match(/Remove-FailedControlPlaneStack/g)).toHaveLength(2);
     expect(script).toContain('--stack-status-filter $recoverableControlPlaneStates');
     expect(script).toContain("--stack-name 'Roadmap-CiBootstrap'");
     expect(script.lastIndexOf('Remove-FailedControlPlaneStack')).toBeLessThan(
-      script.indexOf("Assert-LastCommand 'Deploying Roadmap-CiBootstrap directly with CloudFormation'"),
+      script.indexOf(
+        "Assert-LastCommand 'Deploying Roadmap-CiBootstrap directly with CloudFormation'",
+      ),
     );
     expect(script).toContain('function Assert-CommercialInventoryControlPlane');
     expect(script).toContain('$outputs = $outputsJson | ConvertFrom-Json');
@@ -868,35 +871,27 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).toContain('cloudformation describe-stacks');
     expect(script).toContain('iam get-policy');
     expect(script.indexOf('Assert-CommercialInventoryControlPlane')).toBeLessThan(
-      script.indexOf("Assert-LastCommand \"Deploying $($toolkit.Stack)\""),
+      script.indexOf('Assert-LastCommand "Deploying $($toolkit.Stack)"'),
     );
   });
 
-  it(
-    'accepts an AWS profile that does not configure a custom CA bundle',
-    () => {
-      const result = runBootstrapWithFakeAws({
-        environmentCaBundle: false,
-        failConfigureLookup: false,
-      });
+  it('accepts an AWS profile that does not configure a custom CA bundle', () => {
+    const result = runBootstrapWithFakeAws({
+      environmentCaBundle: false,
+      failConfigureLookup: false,
+    });
 
-      expect(result).toMatchObject({ status: 0, error: undefined });
-    },
-    20_000,
-  );
+    expect(result).toMatchObject({ status: 0, error: undefined });
+  }, 20_000);
 
-  it(
-    'keeps AWS_CA_BUNDLE precedence instead of reading a lower-priority profile value',
-    () => {
-      const result = runBootstrapWithFakeAws({
-        environmentCaBundle: true,
-        failConfigureLookup: true,
-      });
+  it('keeps AWS_CA_BUNDLE precedence instead of reading a lower-priority profile value', () => {
+    const result = runBootstrapWithFakeAws({
+      environmentCaBundle: true,
+      failConfigureLookup: true,
+    });
 
-      expect(result).toMatchObject({ status: 0, error: undefined });
-    },
-    20_000,
-  );
+    expect(result).toMatchObject({ status: 0, error: undefined });
+  }, 20_000);
 
   it('provides a resumable MFA-only non-production destroy script that empties every object version first', () => {
     expect(existsSync(breakGlassScriptPath)).toBe(true);
@@ -921,33 +916,25 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).not.toContain('Roadmap-prod-');
   });
 
-  it(
-    'pins profile-scoped TLS config and preserves the existing-resource teardown path',
-    () => {
-      const result = runBreakGlassWithFakeAws();
+  it('pins profile-scoped TLS config and preserves the existing-resource teardown path', () => {
+    const result = runBreakGlassWithFakeAws();
 
-      expect(result, JSON.stringify(result)).toMatchObject({ status: 0, error: undefined });
-      expect(result.destructiveCalls.match(/delete-stack/g)).toHaveLength(2);
-    },
-    20_000,
-  );
+    expect(result, JSON.stringify(result)).toMatchObject({ status: 0, error: undefined });
+    expect(result.destructiveCalls.match(/delete-stack/g)).toHaveLength(2);
+  }, 20_000);
 
-  it(
-    'treats only the expected not-found probe errors as already removed',
-    () => {
-      const result = runBreakGlassWithFakeAws('missing');
+  it('treats only the expected not-found probe errors as already removed', () => {
+    const result = runBreakGlassWithFakeAws('missing');
 
-      expect(result, JSON.stringify(result)).toMatchObject({
-        status: 0,
-        error: undefined,
-        destructiveCalls: '',
-      });
-      expect(result.stdout).toContain('Bucket roadmap2u-dev-765932874577 does not exist');
-      expect(result.stdout).toContain('Stack Roadmap-dev-Hosting does not exist');
-      expect(result.stdout).toContain('Stack Roadmap-dev-Backend does not exist');
-    },
-    20_000,
-  );
+    expect(result, JSON.stringify(result)).toMatchObject({
+      status: 0,
+      error: undefined,
+      destructiveCalls: '',
+    });
+    expect(result.stdout).toContain('Bucket roadmap2u-dev-765932874577 does not exist');
+    expect(result.stdout).toContain('Stack Roadmap-dev-Hosting does not exist');
+    expect(result.stdout).toContain('Stack Roadmap-dev-Backend does not exist');
+  }, 20_000);
 
   it.each([
     ['bucket-denied', 'Checking bucket roadmap2u-dev-765932874577 failed'],
@@ -988,8 +975,8 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).toContain('/roadmap2u/$Stage/user-pool-id');
     expect(script).toContain('admin-get-user');
     expect(script).toContain('admin-delete-user');
-    expect(script).toContain("USER#$UserId");
-    expect(script).toContain("UNIQ#USERNAME#$($Username.ToLowerInvariant())");
+    expect(script).toContain('USER#$UserId');
+    expect(script).toContain('UNIQ#USERNAME#$($Username.ToLowerInvariant())');
     expect(script).toContain(
       "--condition-expression 'attribute_not_exists(#pk) OR #uid = :expectedUserId'",
     );
@@ -1004,7 +991,7 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).not.toContain('PutRequest');
     expect(script).not.toContain('-Encoding utf8');
     expect(script).toContain('-Encoding ascii');
-    expect(script).toContain("DELETE SMOKE $Stage $Username");
+    expect(script).toContain('DELETE SMOKE $Stage $Username');
     expect(script.indexOf('admin-get-user')).toBeLessThan(script.indexOf('admin-delete-user'));
     expect(script.lastIndexOf('Remove-UserPartitionItems')).toBeLessThan(
       script.indexOf('admin-delete-user'),

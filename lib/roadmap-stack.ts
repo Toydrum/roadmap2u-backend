@@ -31,6 +31,7 @@ import { AccessLogFormat } from 'aws-cdk-lib/aws-apigateway';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import { ApiGatewayv2DomainProperties, CloudFrontTarget } from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { createHash } from 'node:crypto';
@@ -324,12 +325,7 @@ export class RoadmapStack extends Stack {
       memorySize: 256,
       timeout: Duration.seconds(10),
       role: postConfirmationRole,
-      logGroup: createFunctionLogGroup(
-        this,
-        'PostConfirmationLogs',
-        postConfirmationName,
-        stage,
-      ),
+      logGroup: createFunctionLogGroup(this, 'PostConfirmationLogs', postConfirmationName, stage),
       bundling: {
         format: OutputFormat.ESM,
         tsconfig: join(here, '../tsconfig.json'),
@@ -397,6 +393,17 @@ export class RoadmapStack extends Stack {
       deletionProtection: production,
       removalPolicy,
     });
+    const accessCodeHmacSecret = new secretsmanager.Secret(this, 'AccessCodeHmacSecret', {
+      secretName: `roadmap2u/${stage}/access-code-hmac/v1`,
+      description: `RoadMap2U ${stage} sponsored access code HMAC keys`,
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({ activeVersion: 'v1' }),
+        generateStringKey: 'v1',
+        excludePunctuation: true,
+        passwordLength: 64,
+      },
+      removalPolicy,
+    });
     denyCommercialConfigWrites(preSignUpRole, table);
     table.addGlobalSecondaryIndex({
       indexName: 'gsi1',
@@ -426,11 +433,7 @@ export class RoadmapStack extends Stack {
       removalPolicy,
     });
 
-    const commercialConfigBrokerRole = createRuntimeRole(
-      this,
-      'CommercialConfigBrokerRole',
-      stage,
-    );
+    const commercialConfigBrokerRole = createRuntimeRole(this, 'CommercialConfigBrokerRole', stage);
     const commercialConfigBrokerName = `roadmap-commercial-config-broker-${stage}`;
     const commercialConfigBroker = new NodejsFunction(this, 'CommercialConfigBroker', {
       functionName: commercialConfigBrokerName,
@@ -512,8 +515,95 @@ export class RoadmapStack extends Stack {
       authType: lambda.FunctionUrlAuthType.AWS_IAM,
     });
 
-    const commercialInventoryExecutorName =
-      `roadmap-commercial-inventory-executor-${stage}`;
+    const sponsoredAccessBrokerName = `roadmap-sponsored-access-broker-${stage}`;
+    const sponsoredAccessBrokerRole = createRuntimeRole(this, 'SponsoredAccessBrokerRole', stage);
+    const sponsoredAccessBroker = new NodejsFunction(this, 'SponsoredAccessBroker', {
+      functionName: sponsoredAccessBrokerName,
+      entry: join(here, '../lambda/sponsored-access-broker.ts'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
+      timeout: Duration.seconds(15),
+      role: sponsoredAccessBrokerRole,
+      logGroup: createFunctionLogGroup(
+        this,
+        'SponsoredAccessBrokerLogs',
+        sponsoredAccessBrokerName,
+        stage,
+      ),
+      environment: {
+        TABLE_NAME: table.tableName,
+        AUDIT_TABLE_NAME: accessAuditTable.tableName,
+        ACCESS_CODE_SECRET_ID: accessCodeHmacSecret.secretArn,
+        COMMERCIAL_STAGE: stage,
+        SPONSORED_ACCESS_ALLOWLIST: JSON.stringify([
+          {
+            accountId: this.account,
+            roleName: `roadmap2u-${stage}-sponsored-access-operator`,
+            stage,
+            commands: ['issue-code', 'revoke-code', 'extend-grant', 'revoke-grant', 'metadata'],
+          },
+        ]),
+      },
+      bundling: {
+        bundleAwsSDK: true,
+        format: OutputFormat.ESM,
+        tsconfig: join(here, '../tsconfig.json'),
+        target: 'node22',
+      },
+    });
+    sponsoredAccessBrokerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadSponsoredAccessState',
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': [
+              'COMMERCIAL#CONFIG',
+              'ACCESS_CODE#*',
+              'ADMIN#SPONSORED',
+              'USER#*',
+            ],
+          },
+        },
+      }),
+    );
+    sponsoredAccessBrokerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlySponsoredAccessState',
+        actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': [
+              'ACCESS_CODE#*',
+              'ACCOUNT_CLOSURE#*',
+              'ADMIN#SPONSORED',
+              'USER#*',
+            ],
+          },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    sponsoredAccessBrokerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlySponsoredAccessAudit',
+        actions: ['dynamodb:PutItem'],
+        resources: [accessAuditTable.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#*' },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    accessCodeHmacSecret.grantRead(sponsoredAccessBrokerRole);
+    denyCommercialConfigWrites(sponsoredAccessBrokerRole, table);
+    const sponsoredAccessBrokerUrl = sponsoredAccessBroker.addFunctionUrl({
+      authType: lambda.FunctionUrlAuthType.AWS_IAM,
+    });
+
+    const commercialInventoryExecutorName = `roadmap-commercial-inventory-executor-${stage}`;
     const commercialInventoryExecutorRole = createRuntimeRole(
       this,
       'CommercialInventoryExecutorRole',
@@ -521,40 +611,36 @@ export class RoadmapStack extends Stack {
       `roadmap2u-${stage}-inventory-runtime-boundary`,
       `roadmap-commercial-inventory-executor-${stage}`,
     );
-    const commercialInventoryExecutor = new NodejsFunction(
-      this,
-      'CommercialInventoryExecutor',
-      {
-        functionName: commercialInventoryExecutorName,
-        entry: join(here, '../lambda/commercial-inventory-executor.mjs'),
-        runtime: lambda.Runtime.NODEJS_22_X,
-        memorySize: 1024,
-        timeout: Duration.minutes(15),
-        role: commercialInventoryExecutorRole,
-        logGroup: createFunctionLogGroup(
-          this,
-          'CommercialInventoryExecutorLogs',
-          commercialInventoryExecutorName,
-          stage,
-        ),
-        environment: {
-          TABLE_NAME: table.tableName,
-          COMMERCIAL_STAGE: stage,
-          COMMERCIAL_INVENTORY_ALLOWLIST: JSON.stringify([
-            {
-              accountId: this.account,
-              roleName: `roadmap2u-${stage}-commercial-migration`,
-              stage,
-            },
-          ]),
-        },
-        bundling: {
-          format: OutputFormat.ESM,
-          tsconfig: join(here, '../tsconfig.json'),
-          target: 'node22',
-        },
+    const commercialInventoryExecutor = new NodejsFunction(this, 'CommercialInventoryExecutor', {
+      functionName: commercialInventoryExecutorName,
+      entry: join(here, '../lambda/commercial-inventory-executor.mjs'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 1024,
+      timeout: Duration.minutes(15),
+      role: commercialInventoryExecutorRole,
+      logGroup: createFunctionLogGroup(
+        this,
+        'CommercialInventoryExecutorLogs',
+        commercialInventoryExecutorName,
+        stage,
+      ),
+      environment: {
+        TABLE_NAME: table.tableName,
+        COMMERCIAL_STAGE: stage,
+        COMMERCIAL_INVENTORY_ALLOWLIST: JSON.stringify([
+          {
+            accountId: this.account,
+            roleName: `roadmap2u-${stage}-commercial-migration`,
+            stage,
+          },
+        ]),
       },
-    );
+      bundling: {
+        format: OutputFormat.ESM,
+        tsconfig: join(here, '../tsconfig.json'),
+        target: 'node22',
+      },
+    });
     commercialInventoryExecutorRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'ScanOnlyCommercialInventoryProjection',
@@ -562,19 +648,16 @@ export class RoadmapStack extends Stack {
         resources: [table.tableArn],
         conditions: {
           'ForAllValues:StringEquals': {
-            'dynamodb:Attributes': [
-              ...COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES,
-            ],
+            'dynamodb:Attributes': [...COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES],
           },
           StringEquals: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
           Null: { 'dynamodb:Attributes': 'false' },
         },
       }),
     );
-    const commercialInventoryExecutorUrl =
-      commercialInventoryExecutor.addFunctionUrl({
-        authType: lambda.FunctionUrlAuthType.AWS_IAM,
-      });
+    const commercialInventoryExecutorUrl = commercialInventoryExecutor.addFunctionUrl({
+      authType: lambda.FunctionUrlAuthType.AWS_IAM,
+    });
 
     const accountClosureWorkerName = `roadmap-account-closure-worker-${stage}`;
     const accountClosureWorkerRole = createRuntimeRole(this, 'AccountClosureWorkerRole', stage);
@@ -659,34 +742,30 @@ export class RoadmapStack extends Stack {
       'AccountClosureReconcilerRole',
       stage,
     );
-    const accountClosureReconciler = new NodejsFunction(
-      this,
-      'AccountClosureReconciler',
-      {
-        functionName: accountClosureReconcilerName,
-        entry: join(here, '../lambda/account-closure-reconciler.ts'),
-        runtime: lambda.Runtime.NODEJS_22_X,
-        memorySize: 256,
-        timeout: Duration.seconds(30),
-        role: accountClosureReconcilerRole,
-        logGroup: createFunctionLogGroup(
-          this,
-          'AccountClosureReconcilerLogs',
-          accountClosureReconcilerName,
-          stage,
-        ),
-        environment: {
-          TABLE_NAME: table.tableName,
-          ACCOUNT_CLOSURE_QUEUE_URL: accountClosureQueue.queueUrl,
-        },
-        bundling: {
-          bundleAwsSDK: true,
-          format: OutputFormat.ESM,
-          tsconfig: join(here, '../tsconfig.json'),
-          target: 'node22',
-        },
+    const accountClosureReconciler = new NodejsFunction(this, 'AccountClosureReconciler', {
+      functionName: accountClosureReconcilerName,
+      entry: join(here, '../lambda/account-closure-reconciler.ts'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
+      timeout: Duration.seconds(30),
+      role: accountClosureReconcilerRole,
+      logGroup: createFunctionLogGroup(
+        this,
+        'AccountClosureReconcilerLogs',
+        accountClosureReconcilerName,
+        stage,
+      ),
+      environment: {
+        TABLE_NAME: table.tableName,
+        ACCOUNT_CLOSURE_QUEUE_URL: accountClosureQueue.queueUrl,
       },
-    );
+      bundling: {
+        bundleAwsSDK: true,
+        format: OutputFormat.ESM,
+        tsconfig: join(here, '../tsconfig.json'),
+        target: 'node22',
+      },
+    });
     accountClosureReconciler.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:Query'],
@@ -838,12 +917,7 @@ export class RoadmapStack extends Stack {
       memorySize: 256,
       timeout: Duration.seconds(10),
       role: accessReaderRole,
-      logGroup: createFunctionLogGroup(
-        this,
-        'AccessReaderLogs',
-        accessReaderName,
-        stage,
-      ),
+      logGroup: createFunctionLogGroup(this, 'AccessReaderLogs', accessReaderName, stage),
       environment: { TABLE_NAME: table.tableName },
       bundling: {
         format: OutputFormat.ESM,
@@ -897,12 +971,92 @@ export class RoadmapStack extends Stack {
       }),
     );
 
-    const accountClosureRequestName = `roadmap-account-closure-request-${stage}`;
-    const accountClosureRequestRole = createRuntimeRole(
-      this,
-      'AccountClosureRequestRole',
-      stage,
+    const accessCodeRedeemerName = `roadmap-access-code-redeemer-${stage}`;
+    const accessCodeRedeemerRole = createRuntimeRole(this, 'AccessCodeRedeemerRole', stage);
+    const accessCodeRedeemer = new NodejsFunction(this, 'AccessCodeRedeemer', {
+      functionName: accessCodeRedeemerName,
+      entry: join(here, '../lambda/access-code-redeemer.ts'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
+      timeout: Duration.seconds(15),
+      role: accessCodeRedeemerRole,
+      logGroup: createFunctionLogGroup(
+        this,
+        'AccessCodeRedeemerLogs',
+        accessCodeRedeemerName,
+        stage,
+      ),
+      environment: {
+        TABLE_NAME: table.tableName,
+        AUDIT_TABLE_NAME: accessAuditTable.tableName,
+        ACCESS_CODE_SECRET_ID: accessCodeHmacSecret.secretArn,
+        COMMERCIAL_STAGE: stage,
+      },
+      bundling: {
+        bundleAwsSDK: true,
+        format: OutputFormat.ESM,
+        tsconfig: join(here, '../tsconfig.json'),
+        target: 'node22',
+      },
+    });
+    accessCodeRedeemerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadSponsoredAccessRedemptionState',
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': [
+              'COMMERCIAL#CONFIG',
+              'ACCESS_CODE#*',
+              'ACCOUNT_CLOSURE#*',
+              'USER#*',
+            ],
+          },
+        },
+      }),
     );
+    accessCodeRedeemerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ConsumeSponsoredAccessAttempt',
+        actions: ['dynamodb:UpdateItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': 'ACCESS_CODE_ATTEMPT#*',
+          },
+        },
+      }),
+    );
+    accessCodeRedeemerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlySponsoredAccessRedemption',
+        actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['ACCESS_CODE#*', 'ACCOUNT_CLOSURE#*', 'USER#*'],
+          },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    accessCodeRedeemerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlySponsoredAccessRedemptionAudit',
+        actions: ['dynamodb:PutItem'],
+        resources: [accessAuditTable.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#*' },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    accessCodeHmacSecret.grantRead(accessCodeRedeemerRole);
+    denyCommercialConfigWrites(accessCodeRedeemerRole, table);
+
+    const accountClosureRequestName = `roadmap-account-closure-request-${stage}`;
+    const accountClosureRequestRole = createRuntimeRole(this, 'AccountClosureRequestRole', stage);
     const accountClosureRequest = new NodejsFunction(this, 'AccountClosureRequest', {
       functionName: accountClosureRequestName,
       entry: join(here, '../lambda/account-closure-request.ts'),
@@ -1005,6 +1159,10 @@ export class RoadmapStack extends Stack {
       'AccessReaderIntegration',
       accessReader,
     );
+    const accessCodeRedeemerIntegration = new HttpLambdaIntegration(
+      'AccessCodeRedeemerIntegration',
+      accessCodeRedeemer,
+    );
     const accountClosureRequestIntegration = new HttpLambdaIntegration(
       'AccountClosureRequestIntegration',
       accountClosureRequest,
@@ -1019,6 +1177,12 @@ export class RoadmapStack extends Stack {
       path: '/v1/access',
       methods: [apigatewayv2.HttpMethod.GET],
       integration: accessReaderIntegration,
+      authorizer,
+    });
+    api.addRoutes({
+      path: '/v1/access-codes/redeem',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration: accessCodeRedeemerIntegration,
       authorizer,
     });
     api.addRoutes({
@@ -1043,7 +1207,7 @@ export class RoadmapStack extends Stack {
       'ApiAccessLogs',
       Fn.importValue(`RoadMap2U-${stage}-ApiAccessLogGroupName`),
     );
-    new apigatewayv2.HttpStage(this, 'DefaultStage', {
+    const defaultStage = new apigatewayv2.HttpStage(this, 'DefaultStage', {
       httpApi: api,
       stageName: '$default',
       autoDeploy: true,
@@ -1061,6 +1225,13 @@ export class RoadmapStack extends Stack {
         ),
       },
     });
+    const cfnDefaultStage = defaultStage.node.defaultChild as apigatewayv2.CfnStage;
+    cfnDefaultStage.routeSettings = {
+      'POST /v1/access-codes/redeem': {
+        throttlingBurstLimit: 5,
+        throttlingRateLimit: 2,
+      },
+    };
 
     const apiAlias = route53.RecordTarget.fromAlias(
       new ApiGatewayv2DomainProperties(
@@ -1098,78 +1269,90 @@ export class RoadmapStack extends Stack {
     new CfnOutput(this, 'CommercialInventoryExecutorFunctionUrl', {
       value: commercialInventoryExecutorUrl.url,
     });
+    new CfnOutput(this, 'SponsoredAccessBrokerFunctionUrl', {
+      value: sponsoredAccessBrokerUrl.url,
+    });
 
-    const commercialObservability = createCommercialObservability(
-      this,
-      'CommercialObservability',
-      {
-        stage,
-        functions: [
-          {
-            key: 'pre-signup',
-            function: preSignUp,
-            durationWarningMilliseconds: 8_000,
-          },
-          {
-            key: 'post-confirmation',
-            function: postConfirmation,
-            durationWarningMilliseconds: 8_000,
-          },
-          {
-            key: 'config-broker',
-            function: commercialConfigBroker,
-            durationWarningMilliseconds: 8_000,
-          },
-          {
-            key: 'inventory-executor',
-            function: commercialInventoryExecutor,
-            durationWarningMilliseconds: 720_000,
-          },
-          {
-            key: 'closure-worker',
-            function: accountClosureWorker,
-            durationWarningMilliseconds: 48_000,
-          },
-          {
-            key: 'closure-reconciler',
-            function: accountClosureReconciler,
-            durationWarningMilliseconds: 24_000,
-          },
-          {
-            key: 'router',
-            function: router,
-            durationWarningMilliseconds: 12_000,
-          },
-          {
-            key: 'catalog',
-            function: catalog,
-            durationWarningMilliseconds: 4_000,
-          },
-          {
-            key: 'access-reader',
-            function: accessReader,
-            durationWarningMilliseconds: 8_000,
-          },
-          {
-            key: 'closure-request',
-            function: accountClosureRequest,
-            durationWarningMilliseconds: 12_000,
-          },
-        ],
-        api,
-        tables: [
-          { key: 'primary', table },
-          { key: 'access-audit', table: accessAuditTable },
-        ],
-        accountClosureQueue,
-        accountClosureDlq,
-      },
-    );
+    const commercialObservability = createCommercialObservability(this, 'CommercialObservability', {
+      stage,
+      functions: [
+        {
+          key: 'pre-signup',
+          function: preSignUp,
+          durationWarningMilliseconds: 8_000,
+        },
+        {
+          key: 'post-confirmation',
+          function: postConfirmation,
+          durationWarningMilliseconds: 8_000,
+        },
+        {
+          key: 'config-broker',
+          function: commercialConfigBroker,
+          durationWarningMilliseconds: 8_000,
+        },
+        {
+          key: 'inventory-executor',
+          function: commercialInventoryExecutor,
+          durationWarningMilliseconds: 720_000,
+        },
+        {
+          key: 'sponsored-access-broker',
+          function: sponsoredAccessBroker,
+          durationWarningMilliseconds: 12_000,
+        },
+        {
+          key: 'closure-worker',
+          function: accountClosureWorker,
+          durationWarningMilliseconds: 48_000,
+        },
+        {
+          key: 'closure-reconciler',
+          function: accountClosureReconciler,
+          durationWarningMilliseconds: 24_000,
+        },
+        {
+          key: 'router',
+          function: router,
+          durationWarningMilliseconds: 12_000,
+        },
+        {
+          key: 'catalog',
+          function: catalog,
+          durationWarningMilliseconds: 4_000,
+        },
+        {
+          key: 'access-reader',
+          function: accessReader,
+          durationWarningMilliseconds: 8_000,
+        },
+        {
+          key: 'access-code-redeemer',
+          function: accessCodeRedeemer,
+          durationWarningMilliseconds: 12_000,
+        },
+        {
+          key: 'closure-request',
+          function: accountClosureRequest,
+          durationWarningMilliseconds: 12_000,
+        },
+      ],
+      api,
+      tables: [
+        { key: 'primary', table },
+        { key: 'access-audit', table: accessAuditTable },
+      ],
+      accountClosureQueue,
+      accountClosureDlq,
+    });
     new CfnOutput(this, 'CommercialConfigBrokerFunctionArn', {
       value: commercialConfigBroker.functionArn,
     });
     new CfnOutput(this, 'CommercialInventoryExecutorFunctionArn', {
       value: commercialInventoryExecutor.functionArn,
+    });
+    new CfnOutput(this, 'SponsoredAccessBrokerFunctionArn', {
+      value: sponsoredAccessBroker.functionArn,
     });
     new CfnOutput(this, 'CommercialAlarmTopicArn', {
       value: commercialObservability.topic.topicArn,
@@ -1328,9 +1511,14 @@ export class RoadmapCiBootstrapStack extends Stack {
         props.operationsPrincipalArn,
         stage,
       );
-      const commercialE2EFixtureRole = stage === 'prod'
-        ? undefined
-        : this.createCommercialE2EFixtureRole(props.operationsPrincipalArn, stage);
+      const sponsoredAccessOperatorRole = this.createSponsoredAccessOperatorRole(
+        props.operationsPrincipalArn,
+        stage,
+      );
+      const commercialE2EFixtureRole =
+        stage === 'prod'
+          ? undefined
+          : this.createCommercialE2EFixtureRole(props.operationsPrincipalArn, stage);
       new CfnOutput(this, `${stage}BackendRoleArn`, { value: backendRole.roleArn });
       new CfnOutput(this, `${stage}FrontendRoleArn`, { value: frontendRole.roleArn });
       new CfnOutput(this, `${stage}SmokeCleanupRoleArn`, { value: smokeCleanupRole.roleArn });
@@ -1340,6 +1528,9 @@ export class RoadmapCiBootstrapStack extends Stack {
       new CfnOutput(this, `${stage}CommercialFlagOperatorRoleArn`, {
         value: commercialFlagOperatorRole.roleArn,
       });
+      new CfnOutput(this, `${stage}SponsoredAccessOperatorRoleArn`, {
+        value: sponsoredAccessOperatorRole.roleArn,
+      });
       if (commercialE2EFixtureRole) {
         new CfnOutput(this, `${stage}CommercialE2EFixtureRoleArn`, {
           value: commercialE2EFixtureRole.roleArn,
@@ -1348,6 +1539,9 @@ export class RoadmapCiBootstrapStack extends Stack {
       new CfnOutput(this, `${stage}CfnCorePolicyArn`, { value: policies.core.managedPolicyArn });
       new CfnOutput(this, `${stage}CfnApiPolicyArn`, { value: policies.api.managedPolicyArn });
       new CfnOutput(this, `${stage}CfnDataPolicyArn`, { value: policies.data.managedPolicyArn });
+      new CfnOutput(this, `${stage}CfnCommercialAccessPolicyArn`, {
+        value: policies.commercialAccess.managedPolicyArn,
+      });
       new CfnOutput(this, `${stage}CfnEdgePolicyArn`, { value: policies.edge.managedPolicyArn });
       new CfnOutput(this, `${stage}CfnObservabilityPolicyArn`, {
         value: policies.observability.managedPolicyArn,
@@ -1493,9 +1687,7 @@ export class RoadmapCiBootstrapStack extends Stack {
           new iam.PolicyStatement({
             sid: 'DeleteOnlyTaggedRoadMap2USmokeUsers',
             actions: ['cognito-idp:AdminDeleteUser', 'cognito-idp:AdminGetUser'],
-            resources: [
-              `arn:${Aws.PARTITION}:cognito-idp:us-east-1:${this.account}:userpool/*`,
-            ],
+            resources: [`arn:${Aws.PARTITION}:cognito-idp:us-east-1:${this.account}:userpool/*`],
             conditions: stageTagConditions,
           }),
           new iam.PolicyStatement({
@@ -1530,6 +1722,10 @@ export class RoadmapCiBootstrapStack extends Stack {
 
   private commercialInventoryExecutorArn(stage: DeploymentStage): string {
     return `arn:${Aws.PARTITION}:lambda:us-east-1:${this.account}:function:roadmap-commercial-inventory-executor-${stage}`;
+  }
+
+  private sponsoredAccessBrokerArn(stage: DeploymentStage): string {
+    return `arn:${Aws.PARTITION}:lambda:us-east-1:${this.account}:function:roadmap-sponsored-access-broker-${stage}`;
   }
 
   private denyCommercialConfigStatement(stage: DeploymentStage): iam.PolicyStatement {
@@ -1568,9 +1764,7 @@ export class RoadmapCiBootstrapStack extends Stack {
     ];
   }
 
-  private commercialInventoryInvokeStatements(
-    stage: DeploymentStage,
-  ): iam.PolicyStatement[] {
+  private commercialInventoryInvokeStatements(stage: DeploymentStage): iam.PolicyStatement[] {
     const executorArn = this.commercialInventoryExecutorArn(stage);
     return [
       new iam.PolicyStatement({
@@ -1592,10 +1786,29 @@ export class RoadmapCiBootstrapStack extends Stack {
     ];
   }
 
-  private createCommercialMigrationRole(
-    principalArn: string,
-    stage: DeploymentStage,
-  ): iam.Role {
+  private sponsoredAccessBrokerInvokeStatements(stage: DeploymentStage): iam.PolicyStatement[] {
+    const brokerArn = this.sponsoredAccessBrokerArn(stage);
+    return [
+      new iam.PolicyStatement({
+        sid: 'InvokeSponsoredAccessBrokerFunctionUrl',
+        actions: ['lambda:InvokeFunctionUrl'],
+        resources: [brokerArn],
+        conditions: {
+          StringEquals: { 'lambda:FunctionUrlAuthType': 'AWS_IAM' },
+        },
+      }),
+      new iam.PolicyStatement({
+        sid: 'InvokeSponsoredAccessBrokerOnlyViaFunctionUrl',
+        actions: ['lambda:InvokeFunction'],
+        resources: [brokerArn],
+        conditions: {
+          Bool: { 'lambda:InvokedViaFunctionUrl': 'true' },
+        },
+      }),
+    ];
+  }
+
+  private createCommercialMigrationRole(principalArn: string, stage: DeploymentStage): iam.Role {
     const role = new iam.Role(this, `CommercialMigrationRole${stage}`, {
       roleName: `roadmap2u-${stage}-commercial-migration`,
       description: `MFA-only RoadMap2U ${stage} commercial migration operator`,
@@ -1694,10 +1907,7 @@ export class RoadmapCiBootstrapStack extends Stack {
     return role;
   }
 
-  private createCommercialFlagOperatorRole(
-    principalArn: string,
-    stage: DeploymentStage,
-  ): iam.Role {
+  private createCommercialFlagOperatorRole(principalArn: string, stage: DeploymentStage): iam.Role {
     const role = new iam.Role(this, `CommercialFlagOperatorRole${stage}`, {
       roleName: `roadmap2u-${stage}-commercial-flag-operator`,
       description: `MFA-only RoadMap2U ${stage} commercial flag operator`,
@@ -1715,6 +1925,29 @@ export class RoadmapCiBootstrapStack extends Stack {
           ...this.commercialBrokerInvokeStatements(stage),
           this.denyCommercialConfigStatement(stage),
         ],
+      }),
+    );
+    return role;
+  }
+
+  private createSponsoredAccessOperatorRole(
+    principalArn: string,
+    stage: DeploymentStage,
+  ): iam.Role {
+    const role = new iam.Role(this, `SponsoredAccessOperatorRole${stage}`, {
+      roleName: `roadmap2u-${stage}-sponsored-access-operator`,
+      description: `MFA-only RoadMap2U ${stage} sponsored access operator`,
+      assumedBy: this.mfaUserPrincipal(principalArn),
+      path: `/roadmap2u/${stage}/operations/`,
+      maxSessionDuration: Duration.hours(1),
+    });
+    Tags.of(role).add('roadmap2u-project', 'RoadMap2U');
+    Tags.of(role).add('roadmap2u-stage', stage);
+    Tags.of(role).add('roadmap2u-purpose', 'sponsored-access-operator');
+    role.attachInlinePolicy(
+      new iam.Policy(this, `SponsoredAccessOperatorPolicy${stage}`, {
+        policyName: `SponsoredAccessOperatorPolicy-${stage}`,
+        statements: this.sponsoredAccessBrokerInvokeStatements(stage),
       }),
     );
     return role;
@@ -1746,9 +1979,7 @@ export class RoadmapCiBootstrapStack extends Stack {
               'cognito-idp:AdminSetUserPassword',
               'cognito-idp:AdminUpdateUserAttributes',
             ],
-            resources: [
-              `arn:${Aws.PARTITION}:cognito-idp:us-east-1:${this.account}:userpool/*`,
-            ],
+            resources: [`arn:${Aws.PARTITION}:cognito-idp:us-east-1:${this.account}:userpool/*`],
             conditions: {
               StringEquals: {
                 'aws:ResourceTag/roadmap2u-project': 'RoadMap2U',

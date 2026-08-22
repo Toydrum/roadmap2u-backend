@@ -132,8 +132,8 @@ export function accessCodeAttemptKey(ownerSub: string, now: number): { pk: strin
     throw new Error('invalid access-code attempt key');
   }
   return {
-    pk: `USER#${ownerSub}`,
-    sk: `ACCESS_CODE_ATTEMPT#${new Date(now).toISOString().slice(0, 13)}`,
+    pk: `ACCESS_CODE_ATTEMPT#${ownerSub}`,
+    sk: `HOUR#${new Date(now).toISOString().slice(0, 13)}`,
   };
 }
 

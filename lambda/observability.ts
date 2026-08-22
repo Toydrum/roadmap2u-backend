@@ -28,6 +28,8 @@ const OBSERVED_SERVICES = [
   'commercial-inventory-executor',
   'catalog',
   'access-reader',
+  'access-code-redeemer',
+  'sponsored-access-broker',
   'account-closure-request',
 ] as const;
 export type ObservedService = (typeof OBSERVED_SERVICES)[number];
@@ -43,12 +45,26 @@ const COMMERCIAL_METRICS = new Set([
   'ConfigurationDrift',
   'CommercialConfigurationUnavailable',
   'CommercialConfigurationStale',
+  'AccessCodeIssued',
+  'AccessCodeRedeemed',
+  'AccessCodeRevoked',
+  'AccessCodeExtended',
+  'AccessCodeInvalid',
+  'AccessCodeRateLimited',
+  'AccessCodeConflict',
 ]);
 const COMMERCIAL_STAGES = new Set(['dev', 'test', 'prod']);
 export type CommercialEmfMetricName =
   | 'ConfigurationDrift'
   | 'CommercialConfigurationUnavailable'
-  | 'CommercialConfigurationStale';
+  | 'CommercialConfigurationStale'
+  | 'AccessCodeIssued'
+  | 'AccessCodeRedeemed'
+  | 'AccessCodeRevoked'
+  | 'AccessCodeExtended'
+  | 'AccessCodeInvalid'
+  | 'AccessCodeRateLimited'
+  | 'AccessCodeConflict';
 export type CommercialMetricStage = 'dev' | 'test' | 'prod';
 
 function isSensitiveKey(key: string): boolean {
@@ -101,7 +117,9 @@ function redact(details: Record<string, unknown>): Record<string, unknown> {
   return redactValue(details, new WeakSet()) as Record<string, unknown>;
 }
 
-function correlationHeader(headers: Record<string, string | undefined> | undefined): string | undefined {
+function correlationHeader(
+  headers: Record<string, string | undefined> | undefined,
+): string | undefined {
   const entry = Object.entries(headers ?? {}).find(
     ([name]) => name.toLowerCase() === 'x-correlation-id',
   );
@@ -113,10 +131,7 @@ export function resolveObservabilityContext(
   event: unknown,
   context?: LambdaContextLike,
 ): ObservabilityContext {
-  const source =
-    event && typeof event === 'object'
-      ? (event as EventLike)
-      : {};
+  const source = event && typeof event === 'object' ? (event as EventLike) : {};
   const requestId = source.requestContext?.requestId || context?.awsRequestId || 'unknown';
   return {
     requestId,

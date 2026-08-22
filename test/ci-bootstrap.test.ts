@@ -30,7 +30,7 @@ describe('GitHub OIDC bootstrap', () => {
   it('reuses the existing GitHub provider and trusts immutable repo identities', () => {
     const template = bootstrapTemplate();
     template.resourceCountIs('AWS::IAM::OIDCProvider', 0);
-    template.resourceCountIs('AWS::IAM::Role', 20);
+    template.resourceCountIs('AWS::IAM::Role', 23);
 
     const rendered = JSON.stringify(template.toJSON());
     for (const stage of ['dev', 'test', 'prod']) {
@@ -39,9 +39,7 @@ describe('GitHub OIDC bootstrap', () => {
       expect(rendered).toContain(
         `repo:Toydrum@61118847/roadmap2u-backend@1307128632:environment:${stage}`,
       );
-      expect(rendered).toContain(
-        `repo:Toydrum@61118847/RoadMap2U@741787733:environment:${stage}`,
-      );
+      expect(rendered).toContain(`repo:Toydrum@61118847/RoadMap2U@741787733:environment:${stage}`);
       expect(template.toJSON().Outputs).toHaveProperty(`${stage}BackendRoleArn`);
       expect(template.toJSON().Outputs).toHaveProperty(`${stage}FrontendRoleArn`);
     }
@@ -145,10 +143,7 @@ describe('GitHub OIDC bootstrap', () => {
       const dynamo = statements.find((statement: any) =>
         JSON.stringify(statement.Action).includes('dynamodb:DeleteItem'),
       );
-      expect(cognito.Action).toEqual([
-        'cognito-idp:AdminDeleteUser',
-        'cognito-idp:AdminGetUser',
-      ]);
+      expect(cognito.Action).toEqual(['cognito-idp:AdminDeleteUser', 'cognito-idp:AdminGetUser']);
       expect(dynamo.Action).toEqual(['dynamodb:DeleteItem', 'dynamodb:Query']);
       const allowedStatements = statements.filter((statement: any) => statement.Effect !== 'Deny');
       expect(JSON.stringify(allowedStatements)).not.toContain('dynamodb:BatchWriteItem');
@@ -172,9 +167,7 @@ describe('GitHub OIDC bootstrap', () => {
 
   it('uses a bootstrapless synthesizer for the control-plane stack', () => {
     expect(infrastructure.createCiBootstrapSynthesizer).toBeTypeOf('function');
-    expect(infrastructure.createCiBootstrapSynthesizer()).toBeInstanceOf(
-      BootstraplessSynthesizer,
-    );
+    expect(infrastructure.createCiBootstrapSynthesizer()).toBeInstanceOf(BootstraplessSynthesizer);
   });
 
   it('selects the stage-specific CDK bootstrap roles and version parameter', () => {
@@ -206,9 +199,9 @@ describe('GitHub OIDC bootstrap', () => {
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
     ) as any[];
 
-    expect(managedPolicies).toHaveLength(21);
+    expect(managedPolicies).toHaveLength(24);
     expect(new Set(managedPolicies.map((policy) => policy.Properties.ManagedPolicyName)).size).toBe(
-      21,
+      24,
     );
     for (const stage of ['dev', 'test', 'prod']) {
       const stagePolicies = managedPolicies.filter(
@@ -216,6 +209,7 @@ describe('GitHub OIDC bootstrap', () => {
       );
       expect(stagePolicies.map((policy) => policy.Properties.ManagedPolicyName).sort()).toEqual([
         `roadmap2u-${stage}-cfn-api`,
+        `roadmap2u-${stage}-cfn-commercial-access`,
         `roadmap2u-${stage}-cfn-core`,
         `roadmap2u-${stage}-cfn-data`,
         `roadmap2u-${stage}-cfn-edge`,
@@ -242,8 +236,7 @@ describe('GitHub OIDC bootstrap', () => {
       const boundaryManagement = statements.find(
         (statement: any) => statement.Sid === 'SetOnlyStageRuntimeBoundary',
       );
-      const exactInventoryRoleNameArn =
-        `:role/roadmap-commercial-inventory-executor-${stage}`;
+      const exactInventoryRoleNameArn = `:role/roadmap-commercial-inventory-executor-${stage}`;
       expect(genericRoleManagement.Action).not.toContain('iam:PutRolePermissionsBoundary');
       expect(boundaryManagement.Action).toBe('iam:PutRolePermissionsBoundary');
       expect(boundaryManagement.Condition.StringEquals['iam:PermissionsBoundary']).toEqual(
@@ -270,9 +263,7 @@ describe('GitHub OIDC bootstrap', () => {
         'PassOnlyStageRuntimeRolesToLambda',
       ]) {
         const statement = statements.find((candidate: any) => candidate.Sid === sid);
-        expect(JSON.stringify(statement.Resource)).toContain(
-          `:role/roadmap2u/${stage}/runtime/*`,
-        );
+        expect(JSON.stringify(statement.Resource)).toContain(`:role/roadmap2u/${stage}/runtime/*`);
         expect(JSON.stringify(statement.Resource)).not.toContain(
           `roadmap2u-${stage}-backend-deploy`,
         );
@@ -302,8 +293,7 @@ describe('GitHub OIDC bootstrap', () => {
     for (const stage of ['dev', 'test', 'prod']) {
       const policy = managedPolicies.find(
         (candidate) =>
-          candidate.Properties.ManagedPolicyName ===
-          `roadmap2u-${stage}-cfn-observability`,
+          candidate.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-observability`,
       );
       expect(policy).toBeDefined();
       expect(policy.Properties.Path).toBe(`/roadmap2u/${stage}/`);
@@ -363,9 +353,7 @@ describe('GitHub OIDC bootstrap', () => {
       );
       expect(commercialHttpFunctions.Action).toContain('lambda:CreateFunction');
       expect(commercialHttpFunctions.Action).toContain('lambda:AddPermission');
-      expect(commercialHttpFunctions.Action).not.toContain(
-        'lambda:CreateFunctionUrlConfig',
-      );
+      expect(commercialHttpFunctions.Action).not.toContain('lambda:CreateFunctionUrlConfig');
       expect(JSON.stringify(commercialHttpFunctions.Resource)).toContain(
         `:function:roadmap-catalog-${stage}`,
       );
@@ -458,12 +446,11 @@ describe('GitHub OIDC bootstrap', () => {
         expect(trust).toContain('aws:MultiFactorAuthPresent');
         expect(trust).toContain('aws:MultiFactorAuthAge');
 
-        const policyName = purpose === 'commercial-migration'
-          ? `CommercialMigrationPolicy-${stage}`
-          : `CommercialFlagOperatorPolicy-${stage}`;
-        const policy = policies.find(
-          (candidate) => candidate.Properties.PolicyName === policyName,
-        );
+        const policyName =
+          purpose === 'commercial-migration'
+            ? `CommercialMigrationPolicy-${stage}`
+            : `CommercialFlagOperatorPolicy-${stage}`;
+        const policy = policies.find((candidate) => candidate.Properties.PolicyName === policyName);
         expect(policy, roleName).toBeDefined();
         const statements = policy.Properties.PolicyDocument.Statement;
         const functionArn = `:function:roadmap-commercial-config-broker-${stage}`;
@@ -485,9 +472,7 @@ describe('GitHub OIDC bootstrap', () => {
         const policyJson = JSON.stringify(statements);
         expect(policyJson).not.toContain('secretsmanager:');
         expect(policyJson).not.toContain('cognito-idp:');
-        expect(JSON.stringify(policy.Properties.PolicyDocument).length).toBeLessThanOrEqual(
-          10_000,
-        );
+        expect(JSON.stringify(policy.Properties.PolicyDocument).length).toBeLessThanOrEqual(10_000);
         const deny = statements.find(
           (statement: any) => statement.Sid === 'DenyCommercialConfigWrites',
         );
@@ -610,9 +595,7 @@ describe('GitHub OIDC bootstrap', () => {
           );
           expect(
             statements.filter((statement: any) =>
-              JSON.stringify(statement.Resource).includes(
-                `table/roadmap-access-audit-${stage}`,
-              ),
+              JSON.stringify(statement.Resource).includes(`table/roadmap-access-audit-${stage}`),
             ),
           ).toEqual([auditWrites]);
 
@@ -620,12 +603,13 @@ describe('GitHub OIDC bootstrap', () => {
             (statement: any) =>
               statement.Effect === 'Allow' &&
               (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).some(
-                (action: string) => [
-                  'dynamodb:ConditionCheckItem',
-                  'dynamodb:DeleteItem',
-                  'dynamodb:PutItem',
-                  'dynamodb:UpdateItem',
-                ].includes(action),
+                (action: string) =>
+                  [
+                    'dynamodb:ConditionCheckItem',
+                    'dynamodb:DeleteItem',
+                    'dynamodb:PutItem',
+                    'dynamodb:UpdateItem',
+                  ].includes(action),
               ) &&
               statement.Condition?.StringEquals?.['dynamodb:EnclosingOperation'] !==
                 'TransactWriteItems',
@@ -654,8 +638,8 @@ describe('GitHub OIDC bootstrap', () => {
       const roleName = `roadmap2u-${stage}-commercial-e2e-fixture`;
       const role = roles.find((candidate) => candidate.Properties.RoleName === roleName);
       expect(role, roleName).toBeDefined();
-      const policy = policies.find((candidate) =>
-        candidate.Properties.PolicyName === `CommercialE2EFixturePolicy-${stage}`,
+      const policy = policies.find(
+        (candidate) => candidate.Properties.PolicyName === `CommercialE2EFixturePolicy-${stage}`,
       );
       expect(policy).toBeDefined();
       const serialized = JSON.stringify(policy.Properties.PolicyDocument.Statement);
@@ -668,7 +652,9 @@ describe('GitHub OIDC bootstrap', () => {
       expect(rendered.Outputs).toHaveProperty(`${stage}CommercialE2EFixtureRoleArn`);
     }
 
-    expect(roles.some((role) => role.Properties.RoleName === 'roadmap2u-prod-commercial-e2e-fixture')).toBe(false);
+    expect(
+      roles.some((role) => role.Properties.RoleName === 'roadmap2u-prod-commercial-e2e-fixture'),
+    ).toBe(false);
     expect(rendered.Outputs).not.toHaveProperty('prodCommercialE2EFixtureRoleArn');
   });
 
@@ -679,8 +665,7 @@ describe('GitHub OIDC bootstrap', () => {
 
     for (const stage of ['dev', 'test', 'prod']) {
       const boundary = policies.find(
-        (policy) =>
-          policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-runtime-boundary`,
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-runtime-boundary`,
       );
       const statements = boundary.Properties.PolicyDocument.Statement;
       const auditStatements = statements.filter((statement: any) =>
@@ -693,8 +678,7 @@ describe('GitHub OIDC bootstrap', () => {
       expect(JSON.stringify(auditStatements[0].Resource)).not.toContain('/index/*');
       expect(
         JSON.stringify(
-          statements.find((statement: any) => statement.Sid === 'UseOnlyOwnStageTable')
-            .Resource,
+          statements.find((statement: any) => statement.Sid === 'UseOnlyOwnStageTable').Resource,
         ),
       ).not.toContain('roadmap-access-audit');
       expect(
@@ -764,9 +748,9 @@ describe('GitHub OIDC bootstrap', () => {
       expect(
         dataStatements.find((statement: any) => statement.Sid === 'ManageOnlyTaggedStageUserPools'),
       ).toBeDefined();
-      expect(
-        apiStatements.some((statement: any) => statement.Sid.includes('StageUserPools')),
-      ).toBe(false);
+      expect(apiStatements.some((statement: any) => statement.Sid.includes('StageUserPools'))).toBe(
+        false,
+      );
     }
   });
 
@@ -793,12 +777,14 @@ describe('GitHub OIDC bootstrap', () => {
       const brokerLogTags = data.Properties.PolicyDocument.Statement.find(
         (statement: any) => statement.Sid === 'ManageOnlyCommercialConfigBrokerLogGroupTags',
       );
-      expect(functions.Action).toEqual(expect.arrayContaining([
-        'lambda:CreateFunctionUrlConfig',
-        'lambda:DeleteFunctionUrlConfig',
-        'lambda:GetFunctionUrlConfig',
-        'lambda:UpdateFunctionUrlConfig',
-      ]));
+      expect(functions.Action).toEqual(
+        expect.arrayContaining([
+          'lambda:CreateFunctionUrlConfig',
+          'lambda:DeleteFunctionUrlConfig',
+          'lambda:GetFunctionUrlConfig',
+          'lambda:UpdateFunctionUrlConfig',
+        ]),
+      );
       expect(JSON.stringify(functions.Resource)).toContain(
         `roadmap-commercial-config-broker-${stage}`,
       );
@@ -821,8 +807,7 @@ describe('GitHub OIDC bootstrap', () => {
       );
 
       const boundary = policies.find(
-        (policy) =>
-          policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-runtime-boundary`,
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-runtime-boundary`,
       );
       const runtimeLogs = boundary.Properties.PolicyDocument.Statement.find(
         (statement: any) => statement.Sid === 'WriteOnlyOwnFunctionLogs',
@@ -956,12 +941,8 @@ describe('GitHub OIDC bootstrap', () => {
         expect(taggingResources).toContain(logGroupName);
         expect(taggingResources).not.toContain(`${logGroupName}:*`);
       }
-      expect(mutationResources).toContain(
-        `/aws/lambda/roadmap-account-closure-*-${stage}:*`,
-      );
-      expect(taggingResources).toContain(
-        `/aws/lambda/roadmap-account-closure-*-${stage}`,
-      );
+      expect(mutationResources).toContain(`/aws/lambda/roadmap-account-closure-*-${stage}:*`);
+      expect(taggingResources).toContain(`/aws/lambda/roadmap-account-closure-*-${stage}`);
       expect(mutationResources).not.toContain('/aws/apigateway/');
       expect(taggingResources).not.toContain('/aws/apigateway/');
       for (const otherStage of ['dev', 'test', 'prod'].filter((value) => value !== stage)) {
@@ -1100,11 +1081,7 @@ describe('GitHub OIDC bootstrap', () => {
       ]) {
         expect(coreResources).toContain(`/roadmap2u/${stage}/${name}`);
       }
-      for (const name of [
-        'frontend-bucket',
-        'cloudfront-distribution-id',
-        'frontend-url',
-      ]) {
+      for (const name of ['frontend-bucket', 'cloudfront-distribution-id', 'frontend-url']) {
         expect(edgeResources).toContain(`/roadmap2u/${stage}/${name}`);
       }
       const combined = `${coreResources}${edgeResources}`;
@@ -1131,8 +1108,7 @@ describe('GitHub OIDC bootstrap', () => {
     for (const stage of ['dev', 'test', 'prod']) {
       const byName = (suffix: string) =>
         policies.find(
-          (policy) =>
-            policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-${suffix}`,
+          (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-${suffix}`,
         );
       const functionStatement = byName('core').Properties.PolicyDocument.Statement.find(
         (statement: any) => statement.Sid === 'ManageOnlyStageFunctions',
@@ -1146,7 +1122,9 @@ describe('GitHub OIDC bootstrap', () => {
           'lambda:GetRuntimeManagementConfig',
         ]),
       );
-      expect(JSON.stringify(functionStatement.Resource)).toContain(`function:roadmap-router-${stage}`);
+      expect(JSON.stringify(functionStatement.Resource)).toContain(
+        `function:roadmap-router-${stage}`,
+      );
 
       const tableStatement = byName('data').Properties.PolicyDocument.Statement.find(
         (statement: any) => statement.Sid === 'ManageOnlyStageTable',
@@ -1169,13 +1147,11 @@ describe('GitHub OIDC bootstrap', () => {
 
     for (const stage of ['dev', 'test', 'prod']) {
       const data = policies.find(
-        (policy) =>
-          policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-data`,
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-data`,
       );
       const statements = data.Properties.PolicyDocument.Statement;
       const mappingTags = statements.find(
-        (statement: any) =>
-          statement.Sid === 'ManageOnlyAccountClosureEventSourceMappingTags',
+        (statement: any) => statement.Sid === 'ManageOnlyAccountClosureEventSourceMappingTags',
       );
       expect(mappingTags.Action).toEqual([
         'lambda:ListTags',
@@ -1191,11 +1167,7 @@ describe('GitHub OIDC bootstrap', () => {
         (statement: any) => statement.Sid === 'ManageAccountClosureEventSourceMapping',
       );
       expect(mappingLifecycle.Action).not.toEqual(
-        expect.arrayContaining([
-          'lambda:ListTags',
-          'lambda:TagResource',
-          'lambda:UntagResource',
-        ]),
+        expect.arrayContaining(['lambda:ListTags', 'lambda:TagResource', 'lambda:UntagResource']),
       );
     }
   });
@@ -1250,12 +1222,11 @@ describe('GitHub OIDC bootstrap', () => {
       expect(createDomain.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(
         cloudFormationApiTagKeys,
       );
-      expect(createDomain.Condition['ForAllValues:StringEquals'][
-        'apigateway:Request/EndpointType'
-      ]).toEqual(['REGIONAL']);
+      expect(
+        createDomain.Condition['ForAllValues:StringEquals']['apigateway:Request/EndpointType'],
+      ).toEqual(['REGIONAL']);
       expect(initialDomainTag).toBeDefined();
-      const expectedDomain =
-        stage === 'prod' ? 'api.roadmap2u.com' : `api.${stage}.roadmap2u.com`;
+      const expectedDomain = stage === 'prod' ? 'api.roadmap2u.com' : `api.${stage}.roadmap2u.com`;
       const encodedDomainTagResource = JSON.stringify(initialDomainTag.Resource);
       expect(initialDomainTag.Action).toBe('apigateway:PUT');
       expect(encodedDomainTagResource).toContain(':apigateway:us-east-1::/tags/arn%3A');
@@ -1299,9 +1270,7 @@ describe('GitHub OIDC bootstrap', () => {
       });
       expect(
         JSON.stringify(
-          manageApi.Condition.StringEqualsIfExists[
-            'apigateway:Request/AccessLoggingDestination'
-          ],
+          manageApi.Condition.StringEqualsIfExists['apigateway:Request/AccessLoggingDestination'],
         ),
       ).toContain(`:log-group:/aws/apigateway/roadmap-api-${stage}:*`);
       expect(manageApi.Action).not.toEqual(
@@ -1309,7 +1278,9 @@ describe('GitHub OIDC bootstrap', () => {
       );
       expect(JSON.stringify(manageApi.Resource)).toContain(':apigateway:us-east-1::/apis/*');
       expect(JSON.stringify(domain.Resource)).toContain(
-        stage === 'prod' ? '/domainnames/api.roadmap2u.com' : `/domainnames/api.${stage}.roadmap2u.com`,
+        stage === 'prod'
+          ? '/domainnames/api.roadmap2u.com'
+          : `/domainnames/api.${stage}.roadmap2u.com`,
       );
       const conditionlessApiMutation = statements.find(
         (statement: any) =>
@@ -1402,9 +1373,7 @@ describe('GitHub OIDC bootstrap', () => {
       const bucket = policy.Properties.PolicyDocument.Statement.find(
         (statement: any) => statement.Sid === 'ManageOnlyStageHostingBucket',
       );
-      expect(bucket.Action).toEqual(
-        expect.arrayContaining(['s3:GetBucketAcl', 's3:ListBucket']),
-      );
+      expect(bucket.Action).toEqual(expect.arrayContaining(['s3:GetBucketAcl', 's3:ListBucket']));
     }
   });
 
@@ -1427,8 +1396,7 @@ describe('GitHub OIDC bootstrap', () => {
         (statement: any) => statement.Sid === 'RequestOnlyStageCertificates',
       );
       const corePolicy = policies.find(
-        (candidate) =>
-          candidate.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-core`,
+        (candidate) => candidate.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-core`,
       );
       const denyExport = corePolicy.Properties.PolicyDocument.Statement.find(
         (statement: any) => statement.Sid === 'DenyExportableStageCertificates',
@@ -1663,8 +1631,7 @@ describe('GitHub OIDC bootstrap', () => {
 
     for (const stage of ['dev', 'test', 'prod']) {
       const stackRead = statements.find(
-        (statement: any) =>
-          statement.Sid === `ReadCommercialInventoryControlPlaneStack${stage}`,
+        (statement: any) => statement.Sid === `ReadCommercialInventoryControlPlaneStack${stage}`,
       );
       const boundaryRead = statements.find(
         (statement: any) => statement.Sid === `ReadCommercialInventoryBoundary${stage}`,

@@ -44,9 +44,7 @@ describe('commercial alarms', () => {
     ) as any[];
 
     expect(topics).toHaveLength(1);
-    expect((topics[0]?.[1] as any).Properties.TopicName).toBe(
-      'roadmap-commercial-alerts-dev',
-    );
+    expect((topics[0]?.[1] as any).Properties.TopicName).toBe('roadmap-commercial-alerts-dev');
     const topicStatements = topicPolicies.flatMap(
       (policy) => policy.Properties.PolicyDocument.Statement,
     );
@@ -59,8 +57,7 @@ describe('commercial alarms', () => {
     );
     const cloudWatchPublish = topicStatements.find(
       (statement) =>
-        statement.Effect === 'Allow' &&
-        statement.Principal?.Service === 'cloudwatch.amazonaws.com',
+        statement.Effect === 'Allow' && statement.Principal?.Service === 'cloudwatch.amazonaws.com',
     );
     expect(cloudWatchPublish).toMatchObject({
       Action: 'sns:Publish',
@@ -126,6 +123,7 @@ describe('commercial alarms', () => {
     ) as any[];
     expect(functions.map(([, resource]) => resource.Properties.FunctionName).sort()).toEqual(
       [
+        'roadmap-access-code-redeemer-dev',
         'roadmap-access-reader-dev',
         'roadmap-account-closure-reconciler-dev',
         'roadmap-account-closure-request-dev',
@@ -136,18 +134,16 @@ describe('commercial alarms', () => {
         'roadmap-post-confirmation-dev',
         'roadmap-pre-signup-dev',
         'roadmap-router-dev',
+        'roadmap-sponsored-access-broker-dev',
       ].sort(),
     );
     for (const metricName of ['Errors', 'Throttles']) {
       const matching = alarms.filter(
         (alarm) =>
-          alarm.Properties.Namespace === 'AWS/Lambda' &&
-          alarm.Properties.MetricName === metricName,
+          alarm.Properties.Namespace === 'AWS/Lambda' && alarm.Properties.MetricName === metricName,
       );
       expect(matching).toHaveLength(functions.length);
-      expect(
-        matching.map((alarm) => JSON.stringify(alarm.Properties.Dimensions)).sort(),
-      ).toEqual(
+      expect(matching.map((alarm) => JSON.stringify(alarm.Properties.Dimensions)).sort()).toEqual(
         functions
           .map(([id]) => JSON.stringify([{ Name: 'FunctionName', Value: { Ref: id } }]))
           .sort(),
@@ -155,8 +151,7 @@ describe('commercial alarms', () => {
     }
     const durationAlarms = alarms.filter(
       (alarm) =>
-        alarm.Properties.Namespace === 'AWS/Lambda' &&
-        alarm.Properties.MetricName === 'Duration',
+        alarm.Properties.Namespace === 'AWS/Lambda' && alarm.Properties.MetricName === 'Duration',
     );
     expect(durationAlarms).toHaveLength(functions.length);
     for (const [functionId, functionResource] of functions) {
@@ -167,9 +162,7 @@ describe('commercial alarms', () => {
       );
       expect(durationAlarm).toBeDefined();
       expect(durationAlarm.Properties.Statistic).toBe('Maximum');
-      expect(durationAlarm.Properties.Threshold).toBe(
-        functionResource.Properties.Timeout * 800,
-      );
+      expect(durationAlarm.Properties.Threshold).toBe(functionResource.Properties.Timeout * 800);
     }
 
     expect(tables).toHaveLength(2);
@@ -199,11 +192,14 @@ describe('commercial alarms', () => {
         expect(expression).toMatchObject({ Expression: 'SUM(METRICS())', ReturnData: true });
         expect(operationMetrics).toHaveLength(DYNAMODB_OPERATIONS.length);
         expect(
-          operationMetrics.map((query: any) =>
-            query.MetricStat.Metric.Dimensions.find(
-              (dimension: any) => dimension.Name === 'Operation',
-            )?.Value,
-          ).sort(),
+          operationMetrics
+            .map(
+              (query: any) =>
+                query.MetricStat.Metric.Dimensions.find(
+                  (dimension: any) => dimension.Name === 'Operation',
+                )?.Value,
+            )
+            .sort(),
         ).toEqual([...DYNAMODB_OPERATIONS].sort());
         for (const query of operationMetrics) {
           expect(query.MetricStat.Metric.Namespace).toBe('AWS/DynamoDB');
@@ -227,17 +223,19 @@ describe('commercial alarms', () => {
     }
 
     expect(
-      alarms.flatMap((alarm) => alarm.Properties.Metrics ?? []).filter(
-        (query: any) =>
-          ['ThrottledRequests', 'SystemErrors'].includes(
-            query.MetricStat?.Metric?.MetricName,
-          ) && query.MetricStat.Metric.Dimensions.length === 1,
-      ),
+      alarms
+        .flatMap((alarm) => alarm.Properties.Metrics ?? [])
+        .filter(
+          (query: any) =>
+            ['ThrottledRequests', 'SystemErrors'].includes(query.MetricStat?.Metric?.MetricName) &&
+            query.MetricStat.Metric.Dimensions.length === 1,
+        ),
     ).toHaveLength(0);
 
     expect(
       alarms.filter(
-        (alarm) => alarm.Properties.Namespace === 'AWS/ApiGateway' && alarm.Properties.MetricName === '5xx',
+        (alarm) =>
+          alarm.Properties.Namespace === 'AWS/ApiGateway' && alarm.Properties.MetricName === '5xx',
       ),
     ).toHaveLength(1);
     expect(
@@ -269,7 +267,9 @@ describe('commercial alarms', () => {
     ]) {
       expect(
         alarms.filter(
-          (alarm) => alarm.Properties.Namespace === 'RoadMap2U' && alarm.Properties.MetricName === metricName,
+          (alarm) =>
+            alarm.Properties.Namespace === 'RoadMap2U' &&
+            alarm.Properties.MetricName === metricName,
         ),
       ).toHaveLength(1);
     }
@@ -286,9 +286,7 @@ describe('commercial alarms', () => {
     ) as any[];
 
     for (const alarm of alarms) {
-      const metricQueries = alarm.Properties.Metrics?.filter(
-        (query: any) => query.MetricStat,
-      );
+      const metricQueries = alarm.Properties.Metrics?.filter((query: any) => query.MetricStat);
       if (metricQueries) {
         for (const query of metricQueries) expect(query.MetricStat.Period).toBe(300);
       } else {
@@ -310,7 +308,7 @@ describe('commercial alarms', () => {
         resource.Type === 'AWS::SNS::Topic' || resource.Type === 'AWS::CloudWatch::Alarm',
     ) as any[];
 
-    expect(protectedResources).toHaveLength(43);
+    expect(protectedResources).toHaveLength(49);
     for (const resource of protectedResources) {
       expect(resource.DeletionPolicy).toBe('Retain');
       expect(resource.UpdateReplacePolicy).toBe('Retain');

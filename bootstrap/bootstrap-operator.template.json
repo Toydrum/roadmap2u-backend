@@ -246,16 +246,19 @@
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-core",
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-api",
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-data",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-commercial-access",
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-edge",
                         "arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-observability",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-core",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-api",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-data",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-commercial-access",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-edge",
                         "arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-observability",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-core",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-api",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-data",
+                        "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-commercial-access",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-edge",
                         "arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-observability"
                       ]
@@ -445,7 +448,7 @@
   "Metadata": {
     "RoadMap2U": {
       "ControlPlaneContractVersion": 34,
-      "StageBootstrapTemplateSha256": "1b42c36334b316ae1b756004943558bfb2dc0e58afa24b20481ec7e65ac8fae1",
+      "StageBootstrapTemplateSha256": "545a28577737e1f094acb2a1d9bfd00de3bff1d613cfdb909990f6230742c8a0",
       "RequiredControlPlaneOutputs": [
         "devInventoryRuntimeBoundaryArn",
         "testInventoryRuntimeBoundaryArn",
