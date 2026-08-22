@@ -1162,6 +1162,44 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
+  it('scopes CloudFormation event source mapping tag lifecycle to account mappings', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const data = policies.find(
+        (policy) =>
+          policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-data`,
+      );
+      const statements = data.Properties.PolicyDocument.Statement;
+      const mappingTags = statements.find(
+        (statement: any) =>
+          statement.Sid === 'ManageOnlyAccountClosureEventSourceMappingTags',
+      );
+      expect(mappingTags.Action).toEqual([
+        'lambda:ListTags',
+        'lambda:TagResource',
+        'lambda:UntagResource',
+      ]);
+      expect(JSON.stringify(mappingTags.Resource)).toContain(
+        `:lambda:us-east-1:${ACCOUNT}:event-source-mapping:*`,
+      );
+      expect(mappingTags.Resource).not.toBe('*');
+
+      const mappingLifecycle = statements.find(
+        (statement: any) => statement.Sid === 'ManageAccountClosureEventSourceMapping',
+      );
+      expect(mappingLifecycle.Action).not.toEqual(
+        expect.arrayContaining([
+          'lambda:ListTags',
+          'lambda:TagResource',
+          'lambda:UntagResource',
+        ]),
+      );
+    }
+  });
+
   it('uses API Gateway request and resource tags to prevent cross-stage API mutation', () => {
     const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) =>
