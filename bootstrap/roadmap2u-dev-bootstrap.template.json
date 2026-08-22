@@ -8,7 +8,7 @@
       "Qualifier": "rmap2udev",
       "Stage": "dev",
       "TerminationProtection": true,
-      "SourceTemplateSha256": "1b42c36334b316ae1b756004943558bfb2dc0e58afa24b20481ec7e65ac8fae1"
+      "SourceTemplateSha256": "545a28577737e1f094acb2a1d9bfd00de3bff1d613cfdb909990f6230742c8a0"
     }
   },
   "Parameters": {
@@ -298,6 +298,9 @@
           },
           {
             "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-data"
+          },
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-commercial-access"
           },
           {
             "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-edge"

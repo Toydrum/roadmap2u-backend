@@ -136,7 +136,7 @@ function assertReadableOwner(
   }
 }
 
-function accessSummary(access: AccessItem, usage: AccessSummary['usage']): AccessSummary {
+export function accessSummary(access: AccessItem, usage: AccessSummary['usage']): AccessSummary {
   return {
     effectivePlanKey: access.effectivePlanKey,
     catalogVersion: access.catalogVersion,
@@ -200,10 +200,7 @@ export function createAccessReader(
   };
 }
 
-function baseUsage(
-  item: unknown,
-  ownerSub: string,
-): AccessSummary['usage'] {
+function baseUsage(item: unknown, ownerSub: string): AccessSummary['usage'] {
   if (
     isRecord(item) &&
     item['pk'] === K.user(ownerSub) &&
@@ -384,9 +381,7 @@ async function materializeAccess(
   }
 }
 
-export function createDynamoAccessResolver(
-  options: DynamoAccessReaderOptions,
-): AccessResolver {
+export function createDynamoAccessResolver(options: DynamoAccessReaderOptions): AccessResolver {
   return new AccessResolver({
     tableName: options.tableName,
     now: options.now,
@@ -396,13 +391,10 @@ export function createDynamoAccessResolver(
   });
 }
 
-export function createDynamoAccessReaderDeps(
-  options: DynamoAccessReaderOptions,
-): AccessReaderDeps {
+export function createDynamoAccessReaderDeps(options: DynamoAccessReaderOptions): AccessReaderDeps {
   const resolver = createDynamoAccessResolver(options);
   return {
-    readOwnerSnapshot: (ownerSub) =>
-      readOwnerSnapshot(options.ddb, options.tableName, ownerSub),
+    readOwnerSnapshot: (ownerSub) => readOwnerSnapshot(options.ddb, options.tableName, ownerSub),
     resolveAccess: async (ownerSub) => (await resolver.resolveFresh(ownerSub)).access,
   };
 }
@@ -416,9 +408,7 @@ function productionReader(): (event: AccessReaderEvent) => Promise<HttpResponse>
   const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
     marshallOptions: { removeUndefinedValues: true },
   });
-  realReader = createAccessReader(
-    createDynamoAccessReaderDeps({ ddb, tableName, now: Date.now }),
-  );
+  realReader = createAccessReader(createDynamoAccessReaderDeps({ ddb, tableName, now: Date.now }));
   return realReader;
 }
 

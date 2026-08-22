@@ -51,34 +51,38 @@ describe('stage backend infrastructure', () => {
     ['dev', ['https://dev.roadmap2u.com', 'http://localhost:4200', 'http://localhost:8826']],
     ['test', ['https://test.roadmap2u.com', 'http://localhost:4200', 'http://localhost:8826']],
     ['prod', ['https://roadmap2u.com']],
-  ] as const)('uses the exact %s resource names and CORS allowlist', (stage, origins) => {
-    const template = backendTemplate(stage);
+  ] as const)(
+    'uses the exact %s resource names and CORS allowlist',
+    (stage, origins) => {
+      const template = backendTemplate(stage);
 
-    template.hasResourceProperties('AWS::DynamoDB::Table', {
-      TableName: `roadmap-${stage}`,
-    });
-    template.hasResourceProperties('AWS::DynamoDB::Table', {
-      TableName: `roadmap-access-audit-${stage}`,
-      BillingMode: 'PAY_PER_REQUEST',
-      AttributeDefinitions: [
-        { AttributeName: 'pk', AttributeType: 'S' },
-        { AttributeName: 'sk', AttributeType: 'S' },
-      ],
-      KeySchema: [
-        { AttributeName: 'pk', KeyType: 'HASH' },
-        { AttributeName: 'sk', KeyType: 'RANGE' },
-      ],
-    });
-    template.hasResourceProperties('AWS::Cognito::UserPool', {
-      UserPoolName: `roadmap-users-${stage}`,
-    });
-    template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
-      Name: `roadmap-api-${stage}`,
-      CorsConfiguration: {
-        AllowOrigins: origins,
-      },
-    });
-  }, 20_000);
+      template.hasResourceProperties('AWS::DynamoDB::Table', {
+        TableName: `roadmap-${stage}`,
+      });
+      template.hasResourceProperties('AWS::DynamoDB::Table', {
+        TableName: `roadmap-access-audit-${stage}`,
+        BillingMode: 'PAY_PER_REQUEST',
+        AttributeDefinitions: [
+          { AttributeName: 'pk', AttributeType: 'S' },
+          { AttributeName: 'sk', AttributeType: 'S' },
+        ],
+        KeySchema: [
+          { AttributeName: 'pk', KeyType: 'HASH' },
+          { AttributeName: 'sk', KeyType: 'RANGE' },
+        ],
+      });
+      template.hasResourceProperties('AWS::Cognito::UserPool', {
+        UserPoolName: `roadmap-users-${stage}`,
+      });
+      template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
+        Name: `roadmap-api-${stage}`,
+        CorsConfiguration: {
+          AllowOrigins: origins,
+        },
+      });
+    },
+    20_000,
+  );
 
   it('uses username-only Cognito and disposable dev data', () => {
     const template = backendTemplate('dev').toJSON();
@@ -87,8 +91,7 @@ describe('stage backend infrastructure', () => {
     ) as any;
     const table = Object.values(template.Resources).find(
       (resource: any) =>
-        resource.Type === 'AWS::DynamoDB::Table' &&
-        resource.Properties.TableName === 'roadmap-dev',
+        resource.Type === 'AWS::DynamoDB::Table' && resource.Properties.TableName === 'roadmap-dev',
     ) as any;
     const auditTable = Object.values(template.Resources).find(
       (resource: any) =>
@@ -152,51 +155,56 @@ describe('stage backend infrastructure', () => {
     ['dev', 7],
     ['test', 14],
     ['prod', 30],
-  ] as const)('retains %s Lambda logs for %d days and imports protected API logs', (stage, days) => {
-    const template = backendTemplate(stage).toJSON();
-    const logGroups = Object.values(template.Resources).filter(
-      (resource: any) => resource.Type === 'AWS::Logs::LogGroup',
-    ) as any[];
-    const lambdaLogs = logGroups.filter((resource) =>
-      JSON.stringify(resource.Properties.LogGroupName).includes('/aws/lambda/'),
-    );
-    const apiLogs = logGroups.filter((resource) =>
-      JSON.stringify(resource.Properties.LogGroupName).includes('/aws/apigateway/'),
-    );
+  ] as const)(
+    'retains %s Lambda logs for %d days and imports protected API logs',
+    (stage, days) => {
+      const template = backendTemplate(stage).toJSON();
+      const logGroups = Object.values(template.Resources).filter(
+        (resource: any) => resource.Type === 'AWS::Logs::LogGroup',
+      ) as any[];
+      const lambdaLogs = logGroups.filter((resource) =>
+        JSON.stringify(resource.Properties.LogGroupName).includes('/aws/lambda/'),
+      );
+      const apiLogs = logGroups.filter((resource) =>
+        JSON.stringify(resource.Properties.LogGroupName).includes('/aws/apigateway/'),
+      );
 
-    expect(
-      lambdaLogs.map((resource) => resource.Properties.LogGroupName).sort(),
-    ).toEqual(
-      [
-        `/aws/lambda/roadmap-access-reader-${stage}`,
-        `/aws/lambda/roadmap-account-closure-reconciler-${stage}`,
-        `/aws/lambda/roadmap-account-closure-request-${stage}`,
-        `/aws/lambda/roadmap-account-closure-worker-${stage}`,
-        `/aws/lambda/roadmap-catalog-${stage}`,
-        `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
-        `/aws/lambda/roadmap-commercial-inventory-executor-${stage}`,
-        `/aws/lambda/roadmap-post-confirmation-${stage}`,
-        `/aws/lambda/roadmap-pre-signup-${stage}`,
-        `/aws/lambda/roadmap-router-${stage}`,
-      ].sort(),
-    );
-    expect(apiLogs).toHaveLength(0);
-    expect(logGroups.every((resource) => resource.Properties.RetentionInDays === days)).toBe(true);
+      expect(lambdaLogs.map((resource) => resource.Properties.LogGroupName).sort()).toEqual(
+        [
+          `/aws/lambda/roadmap-access-code-redeemer-${stage}`,
+          `/aws/lambda/roadmap-access-reader-${stage}`,
+          `/aws/lambda/roadmap-account-closure-reconciler-${stage}`,
+          `/aws/lambda/roadmap-account-closure-request-${stage}`,
+          `/aws/lambda/roadmap-account-closure-worker-${stage}`,
+          `/aws/lambda/roadmap-catalog-${stage}`,
+          `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
+          `/aws/lambda/roadmap-commercial-inventory-executor-${stage}`,
+          `/aws/lambda/roadmap-post-confirmation-${stage}`,
+          `/aws/lambda/roadmap-pre-signup-${stage}`,
+          `/aws/lambda/roadmap-router-${stage}`,
+          `/aws/lambda/roadmap-sponsored-access-broker-${stage}`,
+        ].sort(),
+      );
+      expect(apiLogs).toHaveLength(0);
+      expect(logGroups.every((resource) => resource.Properties.RetentionInDays === days)).toBe(
+        true,
+      );
 
-    const apiStage = Object.values(template.Resources).find(
-      (resource: any) => resource.Type === 'AWS::ApiGatewayV2::Stage',
-    ) as any;
-    const destination = apiStage.Properties.AccessLogSettings.DestinationArn;
-    const accessLogs = JSON.stringify(apiStage.Properties.AccessLogSettings);
-    const serializedDestination = JSON.stringify(destination);
-    expect(serializedDestination).toContain(`RoadMap2U-${stage}-ApiAccessLogGroupName`);
-    expect(serializedDestination).not.toContain('ApiAccessLogGroupArn');
-    expect(serializedDestination.match(/:\\u002a|:\*/g) ?? []).toHaveLength(1);
-    expect(serializedDestination).not.toContain(':*:*');
-    expect(accessLogs).toContain('$context.requestId');
-    expect(accessLogs).toContain('$context.status');
-    expect(accessLogs).not.toMatch(/authorization|identity|requestbody|header/i);
-  });
+      const apiStage = Object.values(template.Resources).find(
+        (resource: any) => resource.Type === 'AWS::ApiGatewayV2::Stage',
+      ) as any;
+      const destination = apiStage.Properties.AccessLogSettings.DestinationArn;
+      const accessLogs = JSON.stringify(apiStage.Properties.AccessLogSettings);
+      const serializedDestination = JSON.stringify(destination);
+      expect(serializedDestination).toContain(`RoadMap2U-${stage}-ApiAccessLogGroupName`);
+      expect(serializedDestination).not.toContain('ApiAccessLogGroupArn');
+      expect(serializedDestination.match(/:\\u002a|:\*/g) ?? []).toHaveLength(1);
+      expect(serializedDestination).not.toContain(':*:*');
+      expect(accessLogs).toContain('$context.requestId');
+      expect(accessLogs).toContain('$context.status');
+      expect(accessLogs).not.toMatch(/authorization|identity|requestbody|header/i);
+    },
+  );
 
   it.each(['dev', 'test', 'prod'] as const)(
     'places %s runtime roles under the stage path and applies the runtime boundary',
@@ -208,6 +216,7 @@ describe('stage backend infrastructure', () => {
 
       expect(functions.map((fn) => fn.Properties.FunctionName).sort()).toEqual(
         [
+          `roadmap-access-code-redeemer-${stage}`,
           `roadmap-access-reader-${stage}`,
           `roadmap-account-closure-reconciler-${stage}`,
           `roadmap-account-closure-request-${stage}`,
@@ -218,6 +227,7 @@ describe('stage backend infrastructure', () => {
           `roadmap-post-confirmation-${stage}`,
           `roadmap-pre-signup-${stage}`,
           `roadmap-router-${stage}`,
+          `roadmap-sponsored-access-broker-${stage}`,
         ].sort(),
       );
       for (const fn of functions) {
@@ -225,8 +235,7 @@ describe('stage backend infrastructure', () => {
         const role = template.Resources[roleLogicalId] as any;
         expect(role.Properties.Path).toBe(`/roadmap2u/${stage}/runtime/`);
         const boundaryName =
-          fn.Properties.FunctionName ===
-          `roadmap-commercial-inventory-executor-${stage}`
+          fn.Properties.FunctionName === `roadmap-commercial-inventory-executor-${stage}`
             ? `roadmap2u-${stage}-inventory-runtime-boundary`
             : `roadmap2u-${stage}-runtime-boundary`;
         expect(JSON.stringify(role.Properties.PermissionsBoundary)).toContain(
@@ -533,12 +542,13 @@ describe('stage backend infrastructure', () => {
 
     const brokerWriteAllows = brokerStatements.filter((statement: any) =>
       (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).some(
-        (action: string) => [
-          'dynamodb:ConditionCheckItem',
-          'dynamodb:DeleteItem',
-          'dynamodb:PutItem',
-          'dynamodb:UpdateItem',
-        ].includes(action),
+        (action: string) =>
+          [
+            'dynamodb:ConditionCheckItem',
+            'dynamodb:DeleteItem',
+            'dynamodb:PutItem',
+            'dynamodb:UpdateItem',
+          ].includes(action),
       ),
     );
     expect(brokerWriteAllows).toHaveLength(2);
@@ -572,10 +582,7 @@ describe('stage backend infrastructure', () => {
       ),
     );
     expect(postWrites).toHaveLength(1);
-    expect(postWrites[0].Action).toEqual([
-      'dynamodb:ConditionCheckItem',
-      'dynamodb:PutItem',
-    ]);
+    expect(postWrites[0].Action).toEqual(['dynamodb:ConditionCheckItem', 'dynamodb:PutItem']);
     expect(postWrites[0].Condition).toEqual({
       StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
     });

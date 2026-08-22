@@ -7,6 +7,7 @@ export interface StageManagedPolicies {
   readonly core: iam.ManagedPolicy;
   readonly api: iam.ManagedPolicy;
   readonly data: iam.ManagedPolicy;
+  readonly commercialAccess: iam.ManagedPolicy;
   readonly edge: iam.ManagedPolicy;
   readonly observability: iam.ManagedPolicy;
   readonly runtimeBoundary: iam.ManagedPolicy;
@@ -92,12 +93,9 @@ function functionArn(stack: Stack, stage: PolicyStage, name: string): string {
 }
 
 function functionArns(stack: Stack, stage: PolicyStage): string[] {
-  return [
-    'pre-signup',
-    'post-confirmation',
-    'router',
-    'account-closure-*',
-  ].map((name) => functionArn(stack, stage, name));
+  return ['pre-signup', 'post-confirmation', 'router', 'account-closure-*'].map((name) =>
+    functionArn(stack, stage, name),
+  );
 }
 
 function eventSourceMappingArn(stack: Stack): string {
@@ -120,12 +118,7 @@ function commercialHttpFunctionArns(stack: Stack, stage: PolicyStage): string[] 
 }
 
 function lambdaLogGroupArns(stack: Stack, stage: PolicyStage): string[] {
-  return [
-    'pre-signup',
-    'post-confirmation',
-    'router',
-    'account-closure-*',
-  ].map((name) =>
+  return ['pre-signup', 'post-confirmation', 'router', 'account-closure-*'].map((name) =>
     Arn.format(
       {
         partition: Aws.PARTITION,
@@ -162,6 +155,21 @@ function commercialHttpLogGroupArns(stack: Stack, stage: PolicyStage): string[] 
   );
 }
 
+function accessCodeRedeemerLogGroupArn(stack: Stack, stage: PolicyStage): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'logs',
+      region: stack.region,
+      account: stack.account,
+      resource: 'log-group',
+      resourceName: `/aws/lambda/roadmap-access-code-redeemer-${stage}`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
+}
+
 function commercialHttpLogArns(stack: Stack, stage: PolicyStage): string[] {
   return commercialHttpLogGroupArns(stack, stage).map((arn) => `${arn}:*`);
 }
@@ -181,10 +189,37 @@ function commercialConfigBrokerLogGroupArn(stack: Stack, stage: PolicyStage): st
   );
 }
 
-function commercialInventoryExecutorLogGroupArn(
-  stack: Stack,
-  stage: PolicyStage,
-): string {
+function sponsoredAccessBrokerLogGroupArn(stack: Stack, stage: PolicyStage): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'logs',
+      region: stack.region,
+      account: stack.account,
+      resource: 'log-group',
+      resourceName: `/aws/lambda/roadmap-sponsored-access-broker-${stage}`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
+}
+
+function accessCodeSecretArn(stack: Stack, stage: PolicyStage): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'secretsmanager',
+      region: stack.region,
+      account: stack.account,
+      resource: 'secret',
+      resourceName: `roadmap2u/${stage}/access-code-hmac/v1-*`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
+}
+
+function commercialInventoryExecutorLogGroupArn(stack: Stack, stage: PolicyStage): string {
   return Arn.format(
     {
       partition: Aws.PARTITION,
@@ -199,17 +234,10 @@ function commercialInventoryExecutorLogGroupArn(
   );
 }
 
-function commercialInventoryExecutorRoleNameArn(
-  stack: Stack,
-  stage: PolicyStage,
-): string {
-  return resourceArn(
-    stack,
-    'iam',
-    'role',
-    `roadmap-commercial-inventory-executor-${stage}`,
-    { region: '' },
-  );
+function commercialInventoryExecutorRoleNameArn(stack: Stack, stage: PolicyStage): string {
+  return resourceArn(stack, 'iam', 'role', `roadmap-commercial-inventory-executor-${stage}`, {
+    region: '',
+  });
 }
 
 function commercialAlarmTopicArn(stack: Stack, stage: PolicyStage): string {
@@ -318,10 +346,7 @@ function route53Statement(
   const domain = tier === 'core' ? apiDomain(stage) : frontendDomain(stage);
   const recordNames =
     tier === 'edge' && stage === 'prod'
-      ? [
-          certificateValidationName(ROOT_DOMAIN),
-          certificateValidationName(`www.${ROOT_DOMAIN}`),
-        ]
+      ? [certificateValidationName(ROOT_DOMAIN), certificateValidationName(`www.${ROOT_DOMAIN}`)]
       : [domain, certificateValidationName(domain)];
 
   return new iam.PolicyStatement({
@@ -433,7 +458,9 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         resources: [
           ...lambdaLogArns(stack, stage),
           ...commercialHttpLogArns(stack, stage),
+          `${accessCodeRedeemerLogGroupArn(stack, stage)}:*`,
           `${commercialConfigBrokerLogGroupArn(stack, stage)}:*`,
+          `${sponsoredAccessBrokerLogGroupArn(stack, stage)}:*`,
         ],
       }),
       new iam.PolicyStatement({
@@ -455,6 +482,11 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         sid: 'AppendOnlyAuditEvents',
         actions: ['dynamodb:PutItem'],
         resources: [auditTableArn(stack, stage)],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ReadOnlySponsoredAccessHmacSecret',
+        actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
+        resources: [accessCodeSecretArn(stack, stage)],
       }),
       new iam.PolicyStatement({
         sid: 'UseOnlyAccountClosureQueues',
@@ -483,10 +515,7 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
   });
 }
 
-function createInventoryRuntimeBoundary(
-  stack: Stack,
-  stage: PolicyStage,
-): iam.ManagedPolicy {
+function createInventoryRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPolicy {
   return new iam.ManagedPolicy(stack, `InventoryRuntimeBoundary${stage}`, {
     managedPolicyName: `roadmap2u-${stage}-inventory-runtime-boundary`,
     path: `/roadmap2u/${stage}/`,
@@ -898,9 +927,7 @@ function createCorePolicies(
         // Request tags are reliable during create; the parent-tag gate remains on the POST above.
         sid: 'TagOnlyCreatingStageApiStage',
         actions: ['apigateway:TagResource'],
-        resources: [
-          resourceArn(stack, 'apigateway', '/apis/*/stages', undefined, { account: '' }),
-        ],
+        resources: [resourceArn(stack, 'apigateway', '/apis/*/stages', undefined, { account: '' })],
         conditions: {
           ...requestTagConditions(stage),
           'ForAllValues:StringEquals': {
@@ -914,9 +941,7 @@ function createCorePolicies(
       new iam.PolicyStatement({
         sid: 'CreateTaggedStageApiDomain',
         actions: ['apigateway:POST'],
-        resources: [
-          resourceArn(stack, 'apigateway', '/domainnames', undefined, { account: '' }),
-        ],
+        resources: [resourceArn(stack, 'apigateway', '/domainnames', undefined, { account: '' })],
         conditions: {
           ...requestTagConditions(stage),
           'ForAllValues:StringEquals': {
@@ -1036,13 +1061,9 @@ function createEdgePolicy(
           'cloudfront:UpdateFunction',
         ],
         resources: [
-          resourceArn(
-            stack,
-            'cloudfront',
-            'function',
-            `roadmap2u-${stage}-request-router`,
-            { region: '' },
-          ),
+          resourceArn(stack, 'cloudfront', 'function', `roadmap2u-${stage}-request-router`, {
+            region: '',
+          }),
         ],
       }),
       new iam.PolicyStatement({
@@ -1072,20 +1093,96 @@ function createEdgePolicy(
           'ssm:PutParameter',
           'ssm:RemoveTagsFromResource',
         ],
-        resources: [
-          'frontend-bucket',
-          'cloudfront-distribution-id',
-          'frontend-url',
-        ].map((name) => resourceArn(stack, 'ssm', 'parameter', `roadmap2u/${stage}/${name}`)),
+        resources: ['frontend-bucket', 'cloudfront-distribution-id', 'frontend-url'].map((name) =>
+          resourceArn(stack, 'ssm', 'parameter', `roadmap2u/${stage}/${name}`),
+        ),
       }),
     ],
   });
 }
 
-function createObservabilityPolicy(
-  stack: Stack,
-  stage: PolicyStage,
-): iam.ManagedPolicy {
+function createCommercialAccessPolicy(stack: Stack, stage: PolicyStage): iam.ManagedPolicy {
+  const standardFunctionActions = [
+    'lambda:AddPermission',
+    'lambda:CreateFunction',
+    'lambda:DeleteFunction',
+    'lambda:GetFunction',
+    'lambda:GetFunctionCodeSigningConfig',
+    'lambda:GetFunctionConfiguration',
+    'lambda:GetFunctionRecursionConfig',
+    'lambda:GetFunctionScalingConfig',
+    'lambda:GetPolicy',
+    'lambda:GetRuntimeManagementConfig',
+    'lambda:ListTags',
+    'lambda:RemovePermission',
+    'lambda:TagResource',
+    'lambda:UntagResource',
+    'lambda:UpdateFunctionCode',
+    'lambda:UpdateFunctionConfiguration',
+  ];
+  return new iam.ManagedPolicy(stack, `CfnCommercialAccessPolicy${stage}`, {
+    managedPolicyName: `roadmap2u-${stage}-cfn-commercial-access`,
+    path: `/roadmap2u/${stage}/`,
+    description: `CloudFormation sponsored-access permissions for RoadMap2U ${stage}`,
+    statements: [
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyAccessCodeRedeemerFunction',
+        actions: standardFunctionActions,
+        resources: [functionArn(stack, stage, 'access-code-redeemer')],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlySponsoredAccessBrokerFunctionUrl',
+        actions: [
+          ...standardFunctionActions,
+          'lambda:CreateFunctionUrlConfig',
+          'lambda:DeleteFunctionUrlConfig',
+          'lambda:GetFunctionUrlConfig',
+          'lambda:UpdateFunctionUrlConfig',
+        ],
+        resources: [functionArn(stack, stage, 'sponsored-access-broker')],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlySponsoredAccessLogGroups',
+        actions: [
+          'logs:CreateLogGroup',
+          'logs:DeleteLogGroup',
+          'logs:PutRetentionPolicy',
+          'logs:TagResource',
+        ],
+        resources: [
+          `${accessCodeRedeemerLogGroupArn(stack, stage)}:*`,
+          `${sponsoredAccessBrokerLogGroupArn(stack, stage)}:*`,
+        ],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlySponsoredAccessLogGroupTags',
+        actions: ['logs:ListTagsForResource', 'logs:TagResource', 'logs:UntagResource'],
+        resources: [
+          accessCodeRedeemerLogGroupArn(stack, stage),
+          sponsoredAccessBrokerLogGroupArn(stack, stage),
+        ],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlySponsoredAccessHmacSecret',
+        actions: [
+          'secretsmanager:CreateSecret',
+          ...(stage === 'prod' ? [] : ['secretsmanager:DeleteSecret']),
+          'secretsmanager:DescribeSecret',
+          'secretsmanager:GetResourcePolicy',
+          'secretsmanager:GetSecretValue',
+          'secretsmanager:ListSecretVersionIds',
+          'secretsmanager:PutSecretValue',
+          'secretsmanager:TagResource',
+          'secretsmanager:UntagResource',
+          'secretsmanager:UpdateSecret',
+        ],
+        resources: [accessCodeSecretArn(stack, stage)],
+      }),
+    ],
+  });
+}
+
+function createObservabilityPolicy(stack: Stack, stage: PolicyStage): iam.ManagedPolicy {
   const topicArn = commercialAlarmTopicArn(stack, stage);
   const inventoryBoundary = policyArn(
     stack,
@@ -1274,12 +1371,14 @@ export function createStageManagedPolicies(
   const runtimeBoundary = createRuntimeBoundary(stack, stage);
   const inventoryRuntimeBoundary = createInventoryRuntimeBoundary(stack, stage);
   const { core, api, data } = createCorePolicies(stack, stage, hostedZoneId);
+  const commercialAccess = createCommercialAccessPolicy(stack, stage);
   const edge = createEdgePolicy(stack, stage, hostedZoneId);
   const observability = createObservabilityPolicy(stack, stage);
   return {
     core,
     api,
     data,
+    commercialAccess,
     edge,
     observability,
     runtimeBoundary,

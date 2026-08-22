@@ -185,6 +185,9 @@
             "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-data"
           },
           {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-commercial-access"
+          },
+          {
             "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-edge"
           },
           {
@@ -226,10 +229,7 @@
                 {
                   "Sid": "CreateOrUpdateWithExactExecutionRole",
                   "Effect": "Allow",
-                  "Action": [
-                    "cloudformation:CreateStack",
-                    "cloudformation:UpdateStack"
-                  ],
+                  "Action": ["cloudformation:CreateStack", "cloudformation:UpdateStack"],
                   "Resource": [
                     {
                       "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Roadmap-${Stage}-Backend/*"

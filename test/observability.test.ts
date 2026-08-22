@@ -136,9 +136,9 @@ describe('observability', () => {
     expect(() => emitMetric('PerUserMetric', 1, 'Count', REQUEST, { service: 'router' })).toThrow(
       'metric is not allowlisted',
     );
-    expect(() => emitMetric('InvocationSucceeded', 1, 'Bytes', REQUEST, { service: 'router' })).toThrow(
-      'metric unit is not allowlisted',
-    );
+    expect(() =>
+      emitMetric('InvocationSucceeded', 1, 'Bytes', REQUEST, { service: 'router' }),
+    ).toThrow('metric unit is not allowlisted');
     expect(() =>
       emitMetric('InvocationSucceeded', 1, 'Count', REQUEST, {
         service: 'router',
@@ -156,6 +156,7 @@ describe('observability', () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
 
     emitCommercialMetric('ConfigurationDrift', 'dev');
+    emitCommercialMetric('AccessCodeIssued', 'dev');
 
     const line = String(info.mock.calls[0]?.[0]);
     expect(JSON.parse(line)).toEqual({
@@ -173,6 +174,7 @@ describe('observability', () => {
       ConfigurationDrift: 1,
     });
     expect(line).not.toMatch(/requestId|correlationId|email|username|body|code|token/i);
+    expect(String(info.mock.calls[1]?.[0])).toContain('AccessCodeIssued');
     expect(() => emitCommercialMetric('PerUserMetric' as never, 'dev')).toThrow(
       'commercial metric is not allowlisted',
     );
@@ -188,9 +190,7 @@ describe('observability', () => {
     emitCommercialBrokerAvailabilityMetric(503, 'test');
 
     expect(info).toHaveBeenCalledOnce();
-    expect(String(info.mock.calls[0]?.[0])).toContain(
-      'CommercialConfigurationUnavailable',
-    );
+    expect(String(info.mock.calls[0]?.[0])).toContain('CommercialConfigurationUnavailable');
   });
 
   it('derives a bounded correlation id and falls back to the request id', () => {
@@ -254,6 +254,8 @@ describe('observability', () => {
       'access-reader',
       'account-closure-request',
       'commercial-inventory-executor',
+      'access-code-redeemer',
+      'sponsored-access-broker',
     ] as const) {
       const wrapped = instrumentHandler(service, async () => ({ statusCode: 204 }));
       await expect(wrapped({})).resolves.toEqual({ statusCode: 204 });
@@ -264,6 +266,8 @@ describe('observability', () => {
     expect(capture).toContain('"service":"access-reader"');
     expect(capture).toContain('"service":"account-closure-request"');
     expect(capture).toContain('"service":"commercial-inventory-executor"');
+    expect(capture).toContain('"service":"access-code-redeemer"');
+    expect(capture).toContain('"service":"sponsored-access-broker"');
   });
 
   it('instruments the real public catalog and JWT access entrypoints without logging requests', async () => {
