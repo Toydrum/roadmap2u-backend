@@ -82,6 +82,29 @@ describe('sponsored access code infrastructure', () => {
     20_000,
   );
 
+  it(
+    'renders redemption throttling with CloudFormation route-setting field names',
+    () => {
+      const template = backend();
+      const defaultStage = Object.values(template.Resources).find(
+        (resource: any) =>
+          resource.Type === 'AWS::ApiGatewayV2::Stage' &&
+          resource.Properties.StageName === '$default',
+      ) as any;
+
+      expect(defaultStage.Properties.RouteSettings).toEqual({
+        'POST /v1/access-codes/redeem': {
+          ThrottlingBurstLimit: 5,
+          ThrottlingRateLimit: 2,
+        },
+      });
+      expect(JSON.stringify(defaultStage.Properties.RouteSettings)).not.toMatch(
+        /throttling(?:Burst|Rate)Limit/,
+      );
+    },
+    20_000,
+  );
+
   it('exposes JWT-only redemption and an isolated IAM-only operator broker', () => {
     const template = backend();
     const [redeemerId, redeemer] = functionByName(template, 'roadmap-access-code-redeemer-dev');

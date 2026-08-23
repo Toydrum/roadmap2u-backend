@@ -1228,8 +1228,8 @@ export class RoadmapStack extends Stack {
     const cfnDefaultStage = defaultStage.node.defaultChild as apigatewayv2.CfnStage;
     cfnDefaultStage.routeSettings = {
       'POST /v1/access-codes/redeem': {
-        throttlingBurstLimit: 5,
-        throttlingRateLimit: 2,
+        ThrottlingBurstLimit: 5,
+        ThrottlingRateLimit: 2,
       },
     };
 
