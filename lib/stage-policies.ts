@@ -1163,6 +1163,14 @@ function createCommercialAccessPolicy(stack: Stack, stage: PolicyStage): iam.Man
         ],
       }),
       new iam.PolicyStatement({
+        sid: 'GenerateOnlySponsoredAccessSecretPassword',
+        actions: ['secretsmanager:GetRandomPassword'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'aws:RequestedRegion': stack.region },
+        },
+      }),
+      new iam.PolicyStatement({
         sid: 'ManageOnlySponsoredAccessHmacSecret',
         actions: [
           'secretsmanager:CreateSecret',

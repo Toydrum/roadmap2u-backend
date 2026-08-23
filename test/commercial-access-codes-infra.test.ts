@@ -221,7 +221,25 @@ describe('sponsored access code infrastructure', () => {
       expect(JSON.stringify(deployStatements)).toContain(
         `secret:roadmap2u/${stage}/access-code-hmac/v1-*`,
       );
-      expect(deployStatements.every((statement: any) => statement.Resource !== '*')).toBe(true);
+      expect(
+        deployStatements.find(
+          (statement: any) => statement.Sid === 'GenerateOnlySponsoredAccessSecretPassword',
+        ),
+      ).toEqual({
+        Action: 'secretsmanager:GetRandomPassword',
+        Condition: { StringEquals: { 'aws:RequestedRegion': 'us-east-1' } },
+        Effect: 'Allow',
+        Resource: '*',
+        Sid: 'GenerateOnlySponsoredAccessSecretPassword',
+      });
+      expect(
+        deployStatements
+          .filter(
+            (statement: any) =>
+              statement.Sid !== 'GenerateOnlySponsoredAccessSecretPassword',
+          )
+          .every((statement: any) => statement.Resource !== '*'),
+      ).toBe(true);
       expect(template.Outputs).toHaveProperty(`${stage}CfnCommercialAccessPolicyArn`);
     }
   });
