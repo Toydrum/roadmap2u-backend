@@ -15,6 +15,7 @@ import type {
 } from './commercial/sponsored-access-broker';
 import { errorResponse, type HttpResponse } from './http';
 import { instrumentHandler } from './observability';
+import { isTrustedRequestId } from './request-id';
 
 export interface SponsoredAccessBrokerEvent {
   readonly rawQueryString?: string;
@@ -39,7 +40,6 @@ const NO_STORE_HEADERS = Object.freeze({
   'content-type': 'application/json',
   'cache-control': 'no-store',
 });
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -145,8 +145,7 @@ export function createSponsoredAccessBrokerHandler(deps: SponsoredAccessBrokerHa
       if (
         typeof actorArn !== 'string' ||
         !actorArn ||
-        typeof requestId !== 'string' ||
-        !REQUEST_ID_PATTERN.test(requestId)
+        !isTrustedRequestId(requestId)
       ) {
         throw new ApiError('UNAUTHENTICATED');
       }

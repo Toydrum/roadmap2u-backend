@@ -1,4 +1,5 @@
 import { PutCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { isTrustedRequestId } from '../request-id';
 
 const ABSENT_KEY_CONDITION = 'attribute_not_exists(pk) AND attribute_not_exists(sk)';
 
@@ -51,8 +52,7 @@ export class AuditWriter {
     if (
       !Number.isSafeInteger(event.timestamp) ||
       event.timestamp < 0 ||
-      !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/.test(event.requestId) ||
-      Buffer.byteLength(event.requestId, 'utf8') > 128
+      !isTrustedRequestId(event.requestId)
     ) {
       throw new Error('invalid audit identity');
     }

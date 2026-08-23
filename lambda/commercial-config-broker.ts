@@ -5,6 +5,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { AuditWriter } from './commercial/audit';
 import type { CommercialMode } from './commercial/flags';
+import { isTrustedRequestId } from './request-id';
 
 export type CommercialConfigCommand =
   | 'bootstrap-flags'
@@ -97,7 +98,6 @@ const STAGE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const ASSUMED_ROLE_ARN_PATTERN =
   /^arn:aws:sts::([0-9]{12}):assumed-role\/([A-Za-z0-9_+=,.@-]{1,64})\/([A-Za-z0-9_+=,.@-]{2,64})$/;
-const AUDIT_REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
 
 function respond(statusCode: number, payload: Readonly<Record<string, unknown>>): CommercialConfigBrokerResponse {
   return { statusCode, headers: JSON_HEADERS, body: JSON.stringify(payload) };
@@ -489,9 +489,7 @@ export function createCommercialConfigBroker(deps: CommercialConfigBrokerDeps) {
     }
     const requestId = event.requestContext?.requestId;
     if (
-      typeof requestId !== 'string' ||
-      !AUDIT_REQUEST_ID_PATTERN.test(requestId) ||
-      Buffer.byteLength(requestId, 'utf8') > 128
+      !isTrustedRequestId(requestId)
     ) {
       return respond(400, { error: 'INVALID_REQUEST' });
     }

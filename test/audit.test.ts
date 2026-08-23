@@ -85,6 +85,23 @@ describe('append-only commercial audit writer', () => {
     });
   });
 
+  it('accepts terminal base64 padding in trusted AWS request ids', () => {
+    const requestId = 'CiVhEg0EoAMEVwg=';
+
+    const item = writer().transactPut({
+      targetKind: 'ACCESS_CODE',
+      targetId: 'e32ad9bb-5327-4e1d-8feb-49493b4e943a',
+      timestamp: 1_723_456_789_012,
+      requestId,
+      action: 'access_code.redeemed',
+      actor: 'USER#redeemer',
+      subject: 'code-grant',
+    }).Put.Item;
+
+    expect(item.requestId).toBe(requestId);
+    expect(item.sk).toBe(`EVENT#1723456789012#${requestId}`);
+  });
+
   it('does not let event payload fields replace generated audit identity', () => {
     const audit = writer();
     const untrustedEvent = {

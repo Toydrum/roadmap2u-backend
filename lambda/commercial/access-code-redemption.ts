@@ -1,4 +1,5 @@
 import { ApiError } from '@app/api/contracts';
+import { isTrustedRequestId } from '../request-id';
 import type { ProfileItem } from '../db';
 import { deriveAccessItem } from './access-resolver';
 import {
@@ -138,7 +139,7 @@ export class AccessCodeRedeemer {
     // segments. Every malformed shape still returns the same public error.
     const parsed = parseAccessCode(input.code);
     if (!parsed) return this.invalid();
-    if (!isBoundedIdentity(input.ownerSub) || !isBoundedIdentity(input.requestId)) {
+    if (!isBoundedIdentity(input.ownerSub) || !isTrustedRequestId(input.requestId)) {
       throw new ApiError('UNAUTHENTICATED');
     }
 

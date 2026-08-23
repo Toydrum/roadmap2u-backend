@@ -85,6 +85,23 @@ describe('access-code HTTP boundaries', () => {
     });
   });
 
+  it('accepts the padded request ids emitted by API Gateway', async () => {
+    const redeem = vi.fn(async () => deriveAccessItem(OWNER, NOW, undefined, []));
+    const handler = createAccessCodeRedeemerHandler({
+      redeem,
+      readUsage: vi.fn(async () => ({ activeTrees: 0, visibleBranchesByTree: {} })),
+    });
+    const event = redeemEvent({ code: CODE }) as any;
+    event.requestContext.requestId = 'CiVhEg0EoAMEVwg=';
+
+    const response = await handler(event);
+
+    expect(response.statusCode).toBe(200);
+    expect(redeem).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 'CiVhEg0EoAMEVwg=' }),
+    );
+  });
+
   it.each([
     [redeemEvent({ code: CODE, planKey: 'premium' })],
     [redeemEvent({ code: CODE }, { rawQueryString: `code=${encodeURIComponent(CODE)}` })],
