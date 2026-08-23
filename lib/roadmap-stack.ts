@@ -1179,7 +1179,7 @@ export class RoadmapStack extends Stack {
       integration: accessReaderIntegration,
       authorizer,
     });
-    api.addRoutes({
+    const [accessCodeRedeemRoute] = api.addRoutes({
       path: '/v1/access-codes/redeem',
       methods: [apigatewayv2.HttpMethod.POST],
       integration: accessCodeRedeemerIntegration,
@@ -1226,6 +1226,9 @@ export class RoadmapStack extends Stack {
       },
     });
     const cfnDefaultStage = defaultStage.node.defaultChild as apigatewayv2.CfnStage;
+    const cfnAccessCodeRedeemRoute = accessCodeRedeemRoute.node
+      .defaultChild as apigatewayv2.CfnRoute;
+    cfnDefaultStage.addDependency(cfnAccessCodeRedeemRoute);
     cfnDefaultStage.routeSettings = {
       'POST /v1/access-codes/redeem': {
         ThrottlingBurstLimit: 5,
