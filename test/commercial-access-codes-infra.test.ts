@@ -86,6 +86,11 @@ describe('sponsored access code infrastructure', () => {
     'renders redemption throttling with CloudFormation route-setting field names',
     () => {
       const template = backend();
+      const [redeemRouteId] = Object.entries(template.Resources).find(
+        ([, resource]: [string, any]) =>
+          resource.Type === 'AWS::ApiGatewayV2::Route' &&
+          resource.Properties.RouteKey === 'POST /v1/access-codes/redeem',
+      ) as [string, any];
       const defaultStage = Object.values(template.Resources).find(
         (resource: any) =>
           resource.Type === 'AWS::ApiGatewayV2::Stage' &&
@@ -101,6 +106,7 @@ describe('sponsored access code infrastructure', () => {
       expect(JSON.stringify(defaultStage.Properties.RouteSettings)).not.toMatch(
         /throttling(?:Burst|Rate)Limit/,
       );
+      expect(defaultStage.DependsOn).toContain(redeemRouteId);
     },
     20_000,
   );
