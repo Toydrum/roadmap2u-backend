@@ -110,6 +110,44 @@ describe('commercial alarms', () => {
     );
   }, 20_000);
 
+  it('preserves deployed Lambda alarm identities and appends new coverage', () => {
+    const resources = renderedBackend().Resources;
+    const stableFunctionOrder = [
+      'pre-signup',
+      'post-confirmation',
+      'config-broker',
+      'inventory-executor',
+      'closure-worker',
+      'closure-reconciler',
+      'router',
+      'catalog',
+      'access-reader',
+      'closure-request',
+      'access-code-redeemer',
+      'sponsored-access-broker',
+    ];
+    const alarmKinds = [
+      ['Errors', 'errors'],
+      ['Throttles', 'throttles'],
+      ['Duration', 'duration'],
+    ] as const;
+
+    for (const [index, functionKey] of stableFunctionOrder.entries()) {
+      for (const [logicalKind, nameKind] of alarmKinds) {
+        const logicalIdPattern = new RegExp(
+          `^CommercialObservabilityLambda${logicalKind}${index}[A-F0-9]{8}$`,
+        );
+        const match = Object.entries(resources).find(([logicalId]) =>
+          logicalIdPattern.test(logicalId),
+        ) as [string, any] | undefined;
+
+        expect(match?.[1].Properties.AlarmName).toBe(
+          `roadmap-commercial-dev-lambda-${functionKey}-${nameKind}`,
+        );
+      }
+    }
+  }, 20_000);
+
   it('covers every real Lambda plus API, both tables, queues and commercial metrics', () => {
     const template = renderedBackend();
     const functions = Object.entries(template.Resources).filter(
