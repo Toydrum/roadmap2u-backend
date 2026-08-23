@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url';
 import { PASSWORD_POLICY } from '@app/auth/auth-types';
 import { createStageManagedPolicies } from './stage-policies';
 import { createCommercialObservability } from './commercial-observability';
+import { bundledAwsSdkEsm } from './lambda-bundling';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT_DOMAIN = 'roadmap2u.com';
@@ -544,12 +545,7 @@ export class RoadmapStack extends Stack {
           },
         ]),
       },
-      bundling: {
-        bundleAwsSDK: true,
-        format: OutputFormat.ESM,
-        tsconfig: join(here, '../tsconfig.json'),
-        target: 'node22',
-      },
+      bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
     });
     sponsoredAccessBrokerRole.addToPolicy(
       new iam.PolicyStatement({
@@ -680,12 +676,7 @@ export class RoadmapStack extends Stack {
         AUDIT_TABLE_NAME: accessAuditTable.tableName,
         ACCOUNT_CLOSURE_QUEUE_URL: accountClosureQueue.queueUrl,
       },
-      bundling: {
-        bundleAwsSDK: true,
-        format: OutputFormat.ESM,
-        tsconfig: join(here, '../tsconfig.json'),
-        target: 'node22',
-      },
+      bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
     });
     accountClosureWorker.addEventSource(
       new SqsEventSource(accountClosureQueue, {
@@ -759,12 +750,7 @@ export class RoadmapStack extends Stack {
         TABLE_NAME: table.tableName,
         ACCOUNT_CLOSURE_QUEUE_URL: accountClosureQueue.queueUrl,
       },
-      bundling: {
-        bundleAwsSDK: true,
-        format: OutputFormat.ESM,
-        tsconfig: join(here, '../tsconfig.json'),
-        target: 'node22',
-      },
+      bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
     });
     accountClosureReconciler.addToRolePolicy(
       new iam.PolicyStatement({
@@ -992,12 +978,7 @@ export class RoadmapStack extends Stack {
         ACCESS_CODE_SECRET_ID: accessCodeHmacSecret.secretArn,
         COMMERCIAL_STAGE: stage,
       },
-      bundling: {
-        bundleAwsSDK: true,
-        format: OutputFormat.ESM,
-        tsconfig: join(here, '../tsconfig.json'),
-        target: 'node22',
-      },
+      bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
     });
     accessCodeRedeemerRole.addToPolicy(
       new iam.PolicyStatement({
