@@ -12,6 +12,7 @@ import {
 import type { AccessItem } from './commercial/model';
 import { errorResponse, type HttpResponse } from './http';
 import { instrumentHandler } from './observability';
+import { isTrustedRequestId } from './request-id';
 
 export interface AccessCodeRedeemerEvent {
   readonly rawPath?: string;
@@ -36,7 +37,6 @@ const NO_STORE_HEADERS = Object.freeze({
   'content-type': 'application/json',
   'cache-control': 'no-store',
 });
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
 const MAX_BODY_BYTES = 512;
 
 function noStore(response: HttpResponse): HttpResponse {
@@ -88,8 +88,7 @@ export function createAccessCodeRedeemerHandler(deps: AccessCodeRedeemerHandlerD
         typeof ownerSub !== 'string' ||
         !ownerSub ||
         ownerSub !== ownerSub.trim() ||
-        typeof requestId !== 'string' ||
-        !REQUEST_ID_PATTERN.test(requestId)
+        !isTrustedRequestId(requestId)
       ) {
         throw new ApiError('UNAUTHENTICATED');
       }

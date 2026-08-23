@@ -134,6 +134,17 @@ function expectApiError(error: unknown, code: string): void {
 describe('AccessCodeRedeemer', () => {
   beforeEach(() => vi.restoreAllMocks());
 
+  it('accepts the padded request ids emitted by API Gateway', async () => {
+    const { proposals, redeemer } = makeDeps();
+
+    await redeem(redeemer, { requestId: 'CiVhEg0EoAMEVwg=' });
+
+    expect(proposals[0]).toMatchObject({
+      requestId: 'CiVhEg0EoAMEVwg=',
+      audit: { requestId: 'CiVhEg0EoAMEVwg=' },
+    });
+  });
+
   it('rejects malformed input before flags, rate limits or any code lookup', async () => {
     const { deps, redeemer } = makeDeps();
 
