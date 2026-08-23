@@ -1297,11 +1297,6 @@ export class RoadmapStack extends Stack {
           durationWarningMilliseconds: 720_000,
         },
         {
-          key: 'sponsored-access-broker',
-          function: sponsoredAccessBroker,
-          durationWarningMilliseconds: 12_000,
-        },
-        {
           key: 'closure-worker',
           function: accountClosureWorker,
           durationWarningMilliseconds: 48_000,
@@ -1327,13 +1322,18 @@ export class RoadmapStack extends Stack {
           durationWarningMilliseconds: 8_000,
         },
         {
+          key: 'closure-request',
+          function: accountClosureRequest,
+          durationWarningMilliseconds: 12_000,
+        },
+        {
           key: 'access-code-redeemer',
           function: accessCodeRedeemer,
           durationWarningMilliseconds: 12_000,
         },
         {
-          key: 'closure-request',
-          function: accountClosureRequest,
+          key: 'sponsored-access-broker',
+          function: sponsoredAccessBroker,
           durationWarningMilliseconds: 12_000,
         },
       ],
