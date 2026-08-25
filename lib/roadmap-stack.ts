@@ -403,7 +403,7 @@ export class RoadmapStack extends Stack {
         excludePunctuation: true,
         passwordLength: 64,
       },
-      removalPolicy,
+      removalPolicy: RemovalPolicy.RETAIN,
     });
     denyCommercialConfigWrites(preSignUpRole, table);
     table.addGlobalSecondaryIndex({
