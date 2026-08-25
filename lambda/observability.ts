@@ -33,14 +33,6 @@ const OBSERVED_SERVICES = [
   'account-closure-request',
 ] as const;
 export type ObservedService = (typeof OBSERVED_SERVICES)[number];
-const METRIC_UNITS: Readonly<Record<string, string>> = {
-  InvocationSucceeded: 'Count',
-  InvocationFailed: 'Count',
-};
-const METRIC_DIMENSION_VALUES: Readonly<Record<string, ReadonlySet<string>>> = {
-  service: new Set(OBSERVED_SERVICES),
-  outcome: new Set(['success', 'failure']),
-};
 const COMMERCIAL_METRICS = new Set([
   'ConfigurationDrift',
   'CommercialConfigurationUnavailable',
@@ -156,44 +148,6 @@ export function structuredLog(
   console[level](JSON.stringify(entry));
 }
 
-export function emitMetric(
-  metricName: string,
-  value: number,
-  unit: string,
-  context: ObservabilityContext,
-  dimensions: Record<string, string> = {},
-): void {
-  const expectedUnit = METRIC_UNITS[metricName];
-  if (!expectedUnit) throw new Error('metric is not allowlisted');
-  if (unit !== expectedUnit) throw new Error('metric unit is not allowlisted');
-  if (!Number.isFinite(value)) throw new Error('metric value must be finite');
-  for (const [name, dimensionValue] of Object.entries(dimensions)) {
-    const allowedValues = METRIC_DIMENSION_VALUES[name];
-    if (!allowedValues) throw new Error('metric dimension is not allowlisted');
-    if (!allowedValues.has(dimensionValue)) {
-      throw new Error('metric dimension value is not allowlisted');
-    }
-  }
-  console.info(
-    JSON.stringify({
-      _aws: {
-        Timestamp: Date.now(),
-        CloudWatchMetrics: [
-          {
-            Namespace: 'RoadMap2U',
-            Dimensions: [Object.keys(dimensions)],
-            Metrics: [{ Name: metricName, Unit: unit }],
-          },
-        ],
-      },
-      ...dimensions,
-      [metricName]: value,
-      requestId: context.requestId,
-      correlationId: context.correlationId,
-    }),
-  );
-}
-
 /** Emits only bounded, stage-level commercial metrics; no request or user data is accepted. */
 export function emitCommercialMetric(
   metricName: CommercialEmfMetricName,
@@ -243,11 +197,9 @@ export function instrumentHandler<TEvent, TArgs extends unknown[], TResult>(
     try {
       const result = await handle(event, ...args);
       structuredLog('info', 'invocation.succeeded', context, { service });
-      emitMetric('InvocationSucceeded', 1, 'Count', context, { service, outcome: 'success' });
       return result;
     } catch (error) {
       structuredLog('error', 'invocation.failed', context, { service, error });
-      emitMetric('InvocationFailed', 1, 'Count', context, { service, outcome: 'failure' });
       throw error;
     }
   };

@@ -111,7 +111,7 @@ describe('commercial inventory executor infrastructure', () => {
   );
 
   it.each(['dev', 'test', 'prod'] as const)(
-    'creates the isolated %s executor, IAM Function URL, log retention and 80%% duration alarm',
+    'creates the isolated %s executor, IAM Function URL and log retention without a duration alarm',
     (stage) => {
       const template = backend(stage);
       const functionName = `roadmap-commercial-inventory-executor-${stage}`;
@@ -137,12 +137,12 @@ describe('commercial inventory executor infrastructure', () => {
           resource.Type === 'AWS::Logs::LogGroup' &&
           resource.Properties.LogGroupName === `/aws/lambda/${functionName}`,
       ) as any;
-      const durationAlarm = Object.values(template.Resources).find(
+      const durationAlarms = Object.values(template.Resources).filter(
         (resource: any) =>
           resource.Type === 'AWS::CloudWatch::Alarm' &&
           resource.Properties.MetricName === 'Duration' &&
           JSON.stringify(resource.Properties.Dimensions).includes(functionId),
-      ) as any;
+      ) as any[];
 
       expect(fn.Properties).toMatchObject({
         FunctionName: functionName,
@@ -201,10 +201,7 @@ describe('commercial inventory executor infrastructure', () => {
       expect(logGroup.Properties.RetentionInDays).toBe(
         { dev: 7, test: 14, prod: 30 }[stage],
       );
-      expect(durationAlarm.Properties).toMatchObject({
-        Threshold: 720_000,
-        Statistic: 'Maximum',
-      });
+      expect(durationAlarms).toHaveLength(0);
       expect(template.Outputs).toHaveProperty('CommercialInventoryExecutorFunctionUrl');
       expect(template.Outputs).toHaveProperty('CommercialInventoryExecutorFunctionArn');
     },

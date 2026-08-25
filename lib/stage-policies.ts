@@ -1174,7 +1174,6 @@ function createCommercialAccessPolicy(stack: Stack, stage: PolicyStage): iam.Man
         sid: 'ManageOnlySponsoredAccessHmacSecret',
         actions: [
           'secretsmanager:CreateSecret',
-          ...(stage === 'prod' ? [] : ['secretsmanager:DeleteSecret']),
           'secretsmanager:DescribeSecret',
           'secretsmanager:GetResourcePolicy',
           'secretsmanager:GetSecretValue',
@@ -1220,7 +1219,7 @@ function createObservabilityPolicy(stack: Stack, stage: PolicyStage): iam.Manage
     'cloudwatch:PutMetricAlarm',
     'cloudwatch:TagResource',
     'cloudwatch:UntagResource',
-    ...(stage === 'prod' ? [] : ['cloudwatch:DeleteAlarms']),
+    'cloudwatch:DeleteAlarms',
   ];
 
   return new iam.ManagedPolicy(stack, `CfnObservabilityPolicy${stage}`, {

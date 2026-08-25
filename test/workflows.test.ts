@@ -168,17 +168,23 @@ describe('backend GitHub Actions', () => {
     expect(ci).not.toContain('ALARM_NOTIFICATION_EMAIL');
   });
 
-  it('documents alarm ownership, confirmation, synthetic test, and the pending drift adapter', () => {
+  it('documents lean alarm profiles, channel verification, and removed fixed-cost signals', () => {
     const runbook = document(join('runbooks', 'commercial-alerts.md'));
 
     expect(runbook).toContain('ALARM_NOTIFICATION_EMAIL');
     expect(runbook).toContain('PendingConfirmation');
     expect(runbook).toContain('roadmap-commercial-${stage}-synthetic');
+    expect(runbook).toContain('| `dev` | 2 | API 5xx y la alarma sintética |');
+    expect(runbook).toContain('| `test` | 1 |');
+    expect(runbook).toContain('| `prod` | 8 |');
+    expect(runbook).toContain('`pre-signup` y `post-confirmation`');
     expect(runbook).toContain('ConfigurationDrift');
     expect(runbook).toContain('emitCommercialMetric');
-    expect(runbook).toContain('Duration');
-    expect(runbook).toContain('80 %');
-    expect(runbook).toContain('TransactionConflict');
+    expect(runbook).toContain('No se crean alarmas `Duration`');
+    expect(runbook).toContain('No se crean alarmas matemáticas de DynamoDB');
+    expect(runbook).toContain('`ThrottledRequests` y `SystemErrors`');
+    expect(runbook).toContain('Lambda `Errors`, API 5xx o los logs estructurados');
+    expect(runbook).toContain('`InvocationSucceeded` ni `InvocationFailed`');
     expect(runbook).toContain('http-api-metrics.html');
     expect(runbook).toContain('no publica una métrica nativa separada para 429');
     expect(runbook).toContain('no completa GATE-100');

@@ -10,7 +10,6 @@ import type { Construct } from 'constructs';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
-import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
@@ -18,35 +17,16 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { DeploymentStage } from './roadmap-stack';
 
 const ALARM_PERIOD = Duration.minutes(5);
-const DYNAMODB_OPERATIONS = [
-  'GetItem',
-  'PutItem',
-  'UpdateItem',
-  'DeleteItem',
-  'Query',
-  'Scan',
-  'BatchGetItem',
-  'BatchWriteItem',
-  'TransactGetItems',
-  'TransactWriteItems',
-] as const;
 
 export interface AlarmedFunction {
   readonly key: string;
   readonly function: lambda.IFunction;
-  readonly durationWarningMilliseconds: number;
-}
-
-export interface AlarmedTable {
-  readonly key: string;
-  readonly table: dynamodb.ITable;
 }
 
 export interface CommercialObservabilityProps {
   readonly stage: DeploymentStage;
   readonly functions: readonly AlarmedFunction[];
   readonly api: apigatewayv2.IHttpApi;
-  readonly tables: readonly AlarmedTable[];
   readonly accountClosureQueue: sqs.IQueue;
   readonly accountClosureDlq: sqs.IQueue;
 }
@@ -68,24 +48,6 @@ function metric(
     dimensionsMap,
     statistic,
     period: ALARM_PERIOD,
-  });
-}
-
-function dynamodbOperationTotal(
-  tableName: string,
-  metricName: 'ThrottledRequests' | 'SystemErrors',
-): cloudwatch.MathExpression {
-  const usingMetrics = Object.fromEntries(
-    DYNAMODB_OPERATIONS.map((operation, index) => [
-      `operation${index}`,
-      metric('AWS/DynamoDB', metricName, { TableName: tableName, Operation: operation }),
-    ]),
-  );
-  return new cloudwatch.MathExpression({
-    expression: 'SUM(METRICS())',
-    usingMetrics,
-    period: ALARM_PERIOD,
-    label: `${metricName} across DynamoDB operations`,
   });
 }
 
@@ -160,111 +122,74 @@ export function createCommercialObservability(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     alarm.addAlarmAction(topicAction);
-    if (props.stage === 'prod') alarm.applyRemovalPolicy(RemovalPolicy.RETAIN);
     alarms.push(alarm);
     return alarm;
   };
 
-  for (const [index, target] of props.functions.entries()) {
-    if (
-      !Number.isInteger(target.durationWarningMilliseconds) ||
-      target.durationWarningMilliseconds <= 0
-    ) {
-      throw new Error('commercial Lambda duration threshold is invalid');
+  if (props.stage === 'prod') {
+    for (const [index, target] of props.functions.entries()) {
+      createAlarm(
+        `LambdaErrors${index}`,
+        `lambda-${target.key}-errors`,
+        metric('AWS/Lambda', 'Errors', { FunctionName: target.function.functionName }),
+      );
     }
+  }
+
+  if (props.stage !== 'test') {
     createAlarm(
-      `LambdaErrors${index}`,
-      `lambda-${target.key}-errors`,
-      metric('AWS/Lambda', 'Errors', { FunctionName: target.function.functionName }),
+      'Api5xx',
+      'api-5xx',
+      metric('AWS/ApiGateway', '5xx', { ApiId: props.api.apiId }),
     );
+  }
+
+  if (props.stage === 'prod') {
     createAlarm(
-      `LambdaThrottles${index}`,
-      `lambda-${target.key}-throttles`,
-      metric('AWS/Lambda', 'Throttles', { FunctionName: target.function.functionName }),
-    );
-    createAlarm(
-      `LambdaDuration${index}`,
-      `lambda-${target.key}-duration`,
+      'AccountClosureQueueAge',
+      'account-closure-queue-age',
       metric(
-        'AWS/Lambda',
-        'Duration',
-        { FunctionName: target.function.functionName },
+        'AWS/SQS',
+        'ApproximateAgeOfOldestMessage',
+        { QueueName: props.accountClosureQueue.queueName },
         'Maximum',
       ),
-      target.durationWarningMilliseconds,
+      600,
+    );
+    createAlarm(
+      'AccountClosureDlqVisible',
+      'account-closure-dlq-visible',
+      metric(
+        'AWS/SQS',
+        'ApproximateNumberOfMessagesVisible',
+        { QueueName: props.accountClosureDlq.queueName },
+        'Maximum',
+      ),
+    );
+    createAlarm(
+      'ConfigurationDrift',
+      'configuration-drift',
+      metric('RoadMap2U', 'ConfigurationDrift', { stage: props.stage }),
+    );
+    createAlarm(
+      'CommercialConfigurationUnavailable',
+      'configuration-unavailable',
+      metric('RoadMap2U', 'CommercialConfigurationUnavailable', { stage: props.stage }),
     );
   }
-
-  createAlarm(
-    'Api5xx',
-    'api-5xx',
-    metric('AWS/ApiGateway', '5xx', { ApiId: props.api.apiId }),
-  );
-
-  for (const [index, target] of props.tables.entries()) {
-    createAlarm(
-      `DynamoThrottles${index}`,
-      `dynamodb-${target.key}-throttled`,
-      dynamodbOperationTotal(target.table.tableName, 'ThrottledRequests'),
-    );
-    createAlarm(
-      `DynamoSystemErrors${index}`,
-      `dynamodb-${target.key}-system-errors`,
-      dynamodbOperationTotal(target.table.tableName, 'SystemErrors'),
-    );
-    createAlarm(
-      `DynamoTransactionConflicts${index}`,
-      `dynamodb-${target.key}-transaction-conflicts`,
-      metric('AWS/DynamoDB', 'TransactionConflict', {
-        TableName: target.table.tableName,
-      }),
-    );
-  }
-
-  createAlarm(
-    'AccountClosureQueueAge',
-    'account-closure-queue-age',
-    metric(
-      'AWS/SQS',
-      'ApproximateAgeOfOldestMessage',
-      { QueueName: props.accountClosureQueue.queueName },
-      'Maximum',
-    ),
-    600,
-  );
-  createAlarm(
-    'AccountClosureDlqVisible',
-    'account-closure-dlq-visible',
-    metric(
-      'AWS/SQS',
-      'ApproximateNumberOfMessagesVisible',
-      { QueueName: props.accountClosureDlq.queueName },
-      'Maximum',
-    ),
-  );
-  createAlarm(
-    'ConfigurationDrift',
-    'configuration-drift',
-    metric('RoadMap2U', 'ConfigurationDrift', { stage: props.stage }),
-  );
-  createAlarm(
-    'CommercialConfigurationUnavailable',
-    'configuration-unavailable',
-    metric('RoadMap2U', 'CommercialConfigurationUnavailable', { stage: props.stage }),
-  );
   const syntheticAlarm = createAlarm(
     'Synthetic',
     'synthetic',
     metric('RoadMap2U', 'CommercialSyntheticAlarm', { stage: props.stage }),
   );
 
-  // Keep this invariant local to the construct so a newly supplied Lambda cannot
-  // silently lose its Errors alarm.
-  if (
-    alarms.length !==
-    props.functions.length * 3 + props.tables.length * 3 + 6
-  ) {
-    throw new Error('commercial alarm inventory is incomplete');
+  const expectedAlarmCount: Record<DeploymentStage, number> = {
+    dev: 2,
+    test: 1,
+    prod: 8,
+  };
+  if (alarms.length !== expectedAlarmCount[props.stage]) {
+    throw new Error('commercial alarm inventory exceeds or misses its stage budget');
   }
 
   return { topic, syntheticAlarm };
