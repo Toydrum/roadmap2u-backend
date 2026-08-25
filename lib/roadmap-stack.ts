@@ -1263,69 +1263,13 @@ export class RoadmapStack extends Stack {
         {
           key: 'pre-signup',
           function: preSignUp,
-          durationWarningMilliseconds: 8_000,
         },
         {
           key: 'post-confirmation',
           function: postConfirmation,
-          durationWarningMilliseconds: 8_000,
-        },
-        {
-          key: 'config-broker',
-          function: commercialConfigBroker,
-          durationWarningMilliseconds: 8_000,
-        },
-        {
-          key: 'inventory-executor',
-          function: commercialInventoryExecutor,
-          durationWarningMilliseconds: 720_000,
-        },
-        {
-          key: 'closure-worker',
-          function: accountClosureWorker,
-          durationWarningMilliseconds: 48_000,
-        },
-        {
-          key: 'closure-reconciler',
-          function: accountClosureReconciler,
-          durationWarningMilliseconds: 24_000,
-        },
-        {
-          key: 'router',
-          function: router,
-          durationWarningMilliseconds: 12_000,
-        },
-        {
-          key: 'catalog',
-          function: catalog,
-          durationWarningMilliseconds: 4_000,
-        },
-        {
-          key: 'access-reader',
-          function: accessReader,
-          durationWarningMilliseconds: 8_000,
-        },
-        {
-          key: 'closure-request',
-          function: accountClosureRequest,
-          durationWarningMilliseconds: 12_000,
-        },
-        {
-          key: 'access-code-redeemer',
-          function: accessCodeRedeemer,
-          durationWarningMilliseconds: 12_000,
-        },
-        {
-          key: 'sponsored-access-broker',
-          function: sponsoredAccessBroker,
-          durationWarningMilliseconds: 12_000,
         },
       ],
       api,
-      tables: [
-        { key: 'primary', table },
-        { key: 'access-audit', table: accessAuditTable },
-      ],
       accountClosureQueue,
       accountClosureDlq,
     });

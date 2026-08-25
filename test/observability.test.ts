@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   emitCommercialBrokerAvailabilityMetric,
   emitCommercialMetric,
-  emitMetric,
   instrumentHandler,
   resolveObservabilityContext,
   structuredLog,
@@ -89,69 +88,6 @@ describe('observability', () => {
     });
   });
 
-  it('emits CloudWatch Embedded Metric Format with trace identifiers', () => {
-    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
-
-    emitMetric('InvocationSucceeded', 1, 'Count', REQUEST, {
-      service: 'router',
-      outcome: 'success',
-    });
-
-    expect(info).toHaveBeenCalledOnce();
-    const parsed = JSON.parse(info.mock.calls[0]?.[0] as string) as {
-      _aws: {
-        CloudWatchMetrics: Array<{
-          Namespace: string;
-          Dimensions: string[][];
-          Metrics: Array<{ Name: string; Unit: string }>;
-        }>;
-      };
-      InvocationSucceeded: number;
-      requestId: string;
-      correlationId: string;
-      service: string;
-      outcome: string;
-    };
-    expect(parsed._aws.CloudWatchMetrics).toEqual([
-      {
-        Namespace: 'RoadMap2U',
-        Dimensions: [['service', 'outcome']],
-        Metrics: [{ Name: 'InvocationSucceeded', Unit: 'Count' }],
-      },
-    ]);
-    expect(parsed).toMatchObject({
-      InvocationSucceeded: 1,
-      requestId: REQUEST.requestId,
-      correlationId: REQUEST.correlationId,
-      service: 'router',
-      outcome: 'success',
-    });
-    expect(parsed._aws.CloudWatchMetrics[0]?.Dimensions[0]).not.toContain('requestId');
-    expect(parsed._aws.CloudWatchMetrics[0]?.Dimensions[0]).not.toContain('correlationId');
-  });
-
-  it('rejects unbounded metric names, units, dimension names, and dimension values', () => {
-    vi.spyOn(console, 'info').mockImplementation(() => undefined);
-
-    expect(() => emitMetric('PerUserMetric', 1, 'Count', REQUEST, { service: 'router' })).toThrow(
-      'metric is not allowlisted',
-    );
-    expect(() =>
-      emitMetric('InvocationSucceeded', 1, 'Bytes', REQUEST, { service: 'router' }),
-    ).toThrow('metric unit is not allowlisted');
-    expect(() =>
-      emitMetric('InvocationSucceeded', 1, 'Count', REQUEST, {
-        service: 'router',
-        requestId: 'high-cardinality-request',
-      }),
-    ).toThrow('metric dimension is not allowlisted');
-    expect(() =>
-      emitMetric('InvocationSucceeded', 1, 'Count', REQUEST, {
-        service: 'per-user-service-name',
-      }),
-    ).toThrow('metric dimension value is not allowlisted');
-  });
-
   it('emits allowlisted commercial EMF without identifiers or personal data', () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
 
@@ -235,7 +171,9 @@ describe('observability', () => {
     expect(capture).not.toContain('never-log-this-body');
     expect(capture).not.toContain('never-log-this-output');
     expect(capture).toContain('lambda-request');
-    expect(capture).toContain('InvocationSucceeded');
+    expect(capture).toContain('invocation.succeeded');
+    expect(capture).not.toContain('InvocationSucceeded');
+    expect(capture).not.toContain('CloudWatchMetrics');
   });
 
   it('accepts only allowlisted service names at compile time', () => {
@@ -323,7 +261,9 @@ describe('observability', () => {
       .map(([line]) => String(line))
       .join('\n');
     expect(capture).not.toContain('never-log-this-error-secret');
-    expect(capture).toContain('InvocationFailed');
+    expect(capture).toContain('invocation.failed');
+    expect(capture).not.toContain('InvocationFailed');
+    expect(capture).not.toContain('CloudWatchMetrics');
   });
 
   it('instruments the router and Cognito entrypoints without changing their responses', async () => {

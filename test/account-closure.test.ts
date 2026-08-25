@@ -1305,7 +1305,9 @@ describe('account closure instrumentation', () => {
     expect(capture).toContain('"service":"account-closure-worker"');
     expect(capture).toContain('"requestId":"worker-request-id"');
     expect(capture).toContain('"correlationId":"worker-request-id"');
-    expect(capture).toContain('InvocationSucceeded');
+    expect(capture).toContain('invocation.succeeded');
+    expect(capture).not.toContain('InvocationSucceeded');
+    expect(capture).not.toContain('CloudWatchMetrics');
     for (const secret of [
       'never-log-message-id',
       'never-log-sub',
@@ -1344,7 +1346,9 @@ describe('account closure instrumentation', () => {
     expect(capture).toContain('"service":"account-closure-reconciler"');
     expect(capture).toContain('"requestId":"reconciler-request-id"');
     expect(capture).toContain('"correlationId":"reconciler-request-id"');
-    expect(capture).toContain('InvocationSucceeded');
+    expect(capture).toContain('invocation.succeeded');
+    expect(capture).not.toContain('InvocationSucceeded');
+    expect(capture).not.toContain('CloudWatchMetrics');
     for (const secret of [
       'never-log-reconciler-sub',
       'never-log-reconciler-username',

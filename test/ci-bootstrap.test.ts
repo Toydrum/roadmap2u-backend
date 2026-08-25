@@ -385,6 +385,49 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
+  it('allows only stage-scoped commercial alarm cleanup and never secret deletion', () => {
+    const template = bootstrapTemplate().toJSON();
+    const managedPolicies = Object.values(template.Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+
+    const allActions = managedPolicies
+      .flatMap((policy) => policy.Properties.PolicyDocument.Statement)
+      .flatMap((statement: any) =>
+        Array.isArray(statement.Action) ? statement.Action : [statement.Action],
+      );
+    expect(allActions).not.toContain('secretsmanager:DeleteSecret');
+
+    const allCleanupStatements = managedPolicies
+      .flatMap((policy) => policy.Properties.PolicyDocument.Statement)
+      .filter((statement: any) =>
+        (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).includes(
+          'cloudwatch:DeleteAlarms',
+        ),
+      );
+    expect(allCleanupStatements).toHaveLength(3);
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const policy = managedPolicies.find(
+        (candidate) =>
+          candidate.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-observability`,
+      );
+      const cleanupStatements = policy.Properties.PolicyDocument.Statement.filter(
+        (statement: any) =>
+          (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).includes(
+            'cloudwatch:DeleteAlarms',
+          ),
+      );
+
+      expect(cleanupStatements).toHaveLength(1);
+      const cleanupResource = JSON.stringify(cleanupStatements[0].Resource);
+      expect(cleanupResource).toContain(`alarm:roadmap-commercial-${stage}-*`);
+      for (const otherStage of ['dev', 'test', 'prod'].filter((value) => value !== stage)) {
+        expect(cleanupResource).not.toContain(`alarm:roadmap-commercial-${otherStage}-*`);
+      }
+    }
+  });
+
   it('lets only the backend OIDC role inspect its topic and exercise its synthetic alarm', () => {
     const template = bootstrapTemplate().toJSON();
     const roles = Object.entries(template.Resources).filter(
