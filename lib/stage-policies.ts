@@ -5,10 +5,16 @@ export type PolicyStage = 'dev' | 'test' | 'prod';
 
 // Append stages only after their SSM control-plane preparation is complete.
 // Keeping prior stages in this set makes the rollout monotonic.
-const ACCESS_CODE_SSM_MIGRATED_STAGES: ReadonlySet<PolicyStage> = new Set(['dev']);
+const ACCESS_CODE_SSM_STAGES: ReadonlySet<PolicyStage> = new Set(['dev', 'test']);
+// dev retains its migrated secret; prod still uses its legacy secret. test was initialized in SSM.
+const ACCESS_CODE_HMAC_SECRET_STAGES: ReadonlySet<PolicyStage> = new Set(['dev', 'prod']);
 
-export function isAccessCodeSsmMigratedStage(stage: PolicyStage): boolean {
-  return ACCESS_CODE_SSM_MIGRATED_STAGES.has(stage);
+export function usesAccessCodeSsm(stage: PolicyStage): boolean {
+  return ACCESS_CODE_SSM_STAGES.has(stage);
+}
+
+export function hasAccessCodeHmacSecret(stage: PolicyStage): boolean {
+  return ACCESS_CODE_HMAC_SECRET_STAGES.has(stage);
 }
 
 export interface StageManagedPolicies {
@@ -506,7 +512,7 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         actions: ['dynamodb:PutItem'],
         resources: [auditTableArn(stack, stage)],
       }),
-      ...(isAccessCodeSsmMigratedStage(stage)
+      ...(usesAccessCodeSsm(stage)
         ? [
             new iam.PolicyStatement({
               sid: 'ReadOnlySponsoredAccessHmacParameter',
@@ -515,11 +521,15 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
             }),
           ]
         : []),
-      new iam.PolicyStatement({
-        sid: 'ReadOnlyRetainedSponsoredAccessHmacSecretDuringMigration',
-        actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
-        resources: [retainedAccessCodeSecretArn(stack, stage)],
-      }),
+      ...(hasAccessCodeHmacSecret(stage)
+        ? [
+            new iam.PolicyStatement({
+              sid: 'ReadOnlyRetainedSponsoredAccessHmacSecretDuringMigration',
+              actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
+              resources: [retainedAccessCodeSecretArn(stack, stage)],
+            }),
+          ]
+        : []),
       new iam.PolicyStatement({
         sid: 'UseOnlyAccountClosureQueues',
         actions: [
@@ -1194,7 +1204,7 @@ function createCommercialAccessPolicy(stack: Stack, stage: PolicyStage): iam.Man
           sponsoredAccessBrokerLogGroupArn(stack, stage),
         ],
       }),
-      ...(!isAccessCodeSsmMigratedStage(stage)
+      ...(!usesAccessCodeSsm(stage)
         ? [
             new iam.PolicyStatement({
               sid: 'GenerateOnlySponsoredAccessSecretPassword',

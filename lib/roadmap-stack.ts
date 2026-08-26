@@ -38,7 +38,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PASSWORD_POLICY } from '@app/auth/auth-types';
-import { createStageManagedPolicies, isAccessCodeSsmMigratedStage } from './stage-policies';
+import {
+  createStageManagedPolicies,
+  hasAccessCodeHmacSecret,
+  usesAccessCodeSsm,
+} from './stage-policies';
 import { createCommercialObservability } from './commercial-observability';
 import { bundledAwsSdkEsm } from './lambda-bundling';
 
@@ -2091,7 +2095,7 @@ export class RoadmapCiBootstrapStack extends Stack {
         ],
       }),
     );
-    if (isAccessCodeSsmMigratedStage(stage)) {
+    if (usesAccessCodeSsm(stage)) {
       role.addToPolicy(
         new iam.PolicyStatement({
           sid: `InspectSponsoredAccessHmacMetadata${stage}`,
@@ -2110,15 +2114,17 @@ export class RoadmapCiBootstrapStack extends Stack {
         }),
       );
     }
-    role.addToPolicy(
-      new iam.PolicyStatement({
-        sid: `InspectSponsoredAccessHmacSecret${stage}`,
-        actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetResourcePolicy'],
-        resources: [
-          `arn:${Aws.PARTITION}:secretsmanager:${this.region}:${this.account}:secret:roadmap2u/${stage}/access-code-hmac/v1-*`,
-        ],
-      }),
-    );
+    if (hasAccessCodeHmacSecret(stage)) {
+      role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: `InspectSponsoredAccessHmacSecret${stage}`,
+          actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetResourcePolicy'],
+          resources: [
+            `arn:${Aws.PARTITION}:secretsmanager:${this.region}:${this.account}:secret:roadmap2u/${stage}/access-code-hmac/v1-*`,
+          ],
+        }),
+      );
+    }
     role.addToPolicy(
       new iam.PolicyStatement({
         sid: `ReadSponsoredAccessRuntimeBoundary${stage}`,

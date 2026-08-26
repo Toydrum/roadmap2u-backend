@@ -311,7 +311,7 @@ describe('sponsored access code infrastructure', () => {
       const secretManagement = deployStatements.find(
         (statement: any) => statement.Sid === 'ManageOnlySponsoredAccessHmacSecret',
       );
-      if (stage === 'dev') {
+      if (stage !== 'prod') {
         expect(randomPassword).toBeUndefined();
         expect(secretManagement).toBeUndefined();
         expect(JSON.stringify(deployStatements)).not.toMatch(/secretsmanager:/i);

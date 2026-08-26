@@ -317,8 +317,8 @@ describe('backend GitHub Actions', () => {
     expect(precheck).toContain('jq -e');
     expect(precheck).toContain('[[ "$OPERATION" != "rollback" ]]');
     expect(precheck).toContain('[[ ! -f "$CAPABILITIES" ]]');
-    expect(precheck).toContain('dev) EXPECTED_STORE="ssm-secure-string-v1"');
-    expect(precheck).toContain('test|prod) EXPECTED_STORE="secrets-manager-v1"');
+    expect(precheck).toContain('dev|test) EXPECTED_STORE="ssm-secure-string-v1"');
+    expect(precheck).toContain('prod) EXPECTED_STORE="secrets-manager-v1"');
     expect(precheck).toContain('Artifact HMAC store');
     expect(precheck).toContain('does not match the current');
     expect(capability).toContain('/backend-release-capabilities/${SHA}');
@@ -354,6 +354,9 @@ describe('backend GitHub Actions', () => {
     expect(readiness).toContain('--mode ssm');
     expect(readiness).toContain('--parameter-resource "$PARAMETER_ARN"');
     expect(readiness).toContain('--retained-secret-resource "$RETAINED_SECRET_ARN"');
+    expect(readiness).toContain('VALIDATOR_ARGS+=(--retained-secret-resource "$RETAINED_SECRET_ARN")');
+    expect(readiness).toContain('test) ;;');
+    expect(readiness).toContain('"${VALIDATOR_ARGS[@]}"');
     expect(legacyReadiness).toContain(
       "steps.hmac-capability.outputs.store == 'secrets-manager-v1'",
     );
