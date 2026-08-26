@@ -7,7 +7,7 @@ type BoundaryValidatorModule = {
     readonly mode: 'ssm' | 'secrets-manager';
     readonly parameterResource?: string;
     readonly policyDocument: Record<string, unknown>;
-    readonly retainedSecretResource: string;
+    readonly retainedSecretResource?: string;
   }): void;
 };
 
@@ -69,6 +69,43 @@ describe('HMAC runtime-boundary validator', () => {
         secretStatement(),
       ]),
     ).not.toThrow();
+  });
+
+  it('accepts an SSM-only boundary for a stage initialized without a legacy secret', async () => {
+    const { validateHmacRuntimeBoundary } = await validatorModule();
+    const policyDocument = {
+      Version: '2012-10-17',
+      Statement: [ssmStatement()],
+    };
+
+    expect(() =>
+      validateHmacRuntimeBoundary({
+        mode: 'ssm',
+        parameterResource: PARAMETER_RESOURCE,
+        policyDocument,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateHmacRuntimeBoundary({
+        mode: 'ssm',
+        parameterResource: PARAMETER_RESOURCE,
+        policyDocument: {
+          ...policyDocument,
+          Statement: [ssmStatement(), secretStatement()],
+        },
+      }),
+    ).toThrow('Expected 0 Secrets Manager allow statement(s)');
+  });
+
+  it('still requires the exact secret resource in legacy mode', async () => {
+    const { validateHmacRuntimeBoundary } = await validatorModule();
+
+    expect(() =>
+      validateHmacRuntimeBoundary({
+        mode: 'secrets-manager',
+        policyDocument: { Version: '2012-10-17', Statement: [secretStatement()] },
+      }),
+    ).toThrow('retainedSecretResource is required in secrets-manager mode');
   });
 
   it('accepts the exact legacy Secrets Manager statement and no SSM authority', async () => {

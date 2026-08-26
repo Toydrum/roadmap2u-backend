@@ -58,8 +58,12 @@ export function validateHmacRuntimeBoundary({
 }) {
   if (!MODES.has(mode)) throw new Error('mode must be ssm or secrets-manager');
   if (!isRecord(policyDocument)) throw new Error('Policy document must be an object');
-  if (typeof retainedSecretResource !== 'string' || retainedSecretResource.length === 0) {
-    throw new Error('retainedSecretResource is required');
+  const hasRetainedSecret = retainedSecretResource !== undefined;
+  if (hasRetainedSecret && (typeof retainedSecretResource !== 'string' || retainedSecretResource.length === 0)) {
+    throw new Error('retainedSecretResource must be a non-empty string when provided');
+  }
+  if (mode === 'secrets-manager' && !hasRetainedSecret) {
+    throw new Error('retainedSecretResource is required in secrets-manager mode');
   }
   if (mode === 'ssm' && (typeof parameterResource !== 'string' || parameterResource.length === 0)) {
     throw new Error('parameterResource is required in ssm mode');
@@ -120,16 +124,21 @@ export function validateHmacRuntimeBoundary({
     }
   }
 
-  if (secretAllows.length !== 1) throw new Error('Expected one Secrets Manager allow statement');
-  const [secretAllow] = secretAllows;
-  if (
-    !exactStatement(secretAllow.statement, {
-      actions: EXPECTED_SECRET_ACTIONS,
-      resource: retainedSecretResource,
-      sid: 'ReadOnlyRetainedSponsoredAccessHmacSecretDuringMigration',
-    })
-  ) {
-    throw new Error('Secrets Manager HMAC statement does not match the exact expected authority');
+  const expectedSecretCount = hasRetainedSecret ? 1 : 0;
+  if (secretAllows.length !== expectedSecretCount) {
+    throw new Error(`Expected ${expectedSecretCount} Secrets Manager allow statement(s)`);
+  }
+  if (hasRetainedSecret) {
+    const [secretAllow] = secretAllows;
+    if (
+      !exactStatement(secretAllow.statement, {
+        actions: EXPECTED_SECRET_ACTIONS,
+        resource: retainedSecretResource,
+        sid: 'ReadOnlyRetainedSponsoredAccessHmacSecretDuringMigration',
+      })
+    ) {
+      throw new Error('Secrets Manager HMAC statement does not match the exact expected authority');
+    }
   }
 }
 

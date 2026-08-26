@@ -201,8 +201,8 @@ jobs:
           set -euo pipefail
           CAPABILITIES="shared/backend-release-capabilities.json"
           case "$STAGE" in
-            dev) EXPECTED_STORE="ssm-secure-string-v1" ;;
-            test|prod) EXPECTED_STORE="secrets-manager-v1" ;;
+            dev|test) EXPECTED_STORE="ssm-secure-string-v1" ;;
+            prod) EXPECTED_STORE="secrets-manager-v1" ;;
             *)
               echo "Unsupported deployment stage: ${STAGE}." >&2
               exit 1
@@ -365,25 +365,36 @@ jobs:
             --output json)"
           jq -e '((.Policies // []) | length) == 0' <<<"$RESOURCE_POLICIES" >/dev/null
 
-          RETAINED_SECRET_METADATA="$(aws secretsmanager describe-secret \
-            --secret-id "$SECRET_NAME" \
-            --output json)"
-          jq -e \
-            --arg name "$SECRET_NAME" \
-            --arg arn_prefix "$SECRET_ARN_PREFIX" \
-            --arg stage "$STAGE" '
-              def values($key): [(.Tags // [])[] | select(.Key == $key) | .Value];
-              .Name == $name and
-              (.ARN | startswith($arn_prefix)) and
-              .DeletedDate == null and
-              values("roadmap2u-project") == ["RoadMap2U"] and
-              values("roadmap2u-stage") == [$stage]
-            ' <<<"$RETAINED_SECRET_METADATA" >/dev/null
-          RETAINED_SECRET_RESOURCE_POLICY="$(aws secretsmanager get-resource-policy \
-            --secret-id "$SECRET_NAME" \
-            --output json)"
-          jq -e '(.ResourcePolicy // "") == ""' \
-            <<<"$RETAINED_SECRET_RESOURCE_POLICY" >/dev/null
+          VALIDATOR_ARGS=(--mode ssm --parameter-resource "$PARAMETER_ARN")
+          case "$STAGE" in
+            dev)
+              RETAINED_SECRET_METADATA="$(aws secretsmanager describe-secret \
+                --secret-id "$SECRET_NAME" \
+                --output json)"
+              jq -e \
+                --arg name "$SECRET_NAME" \
+                --arg arn_prefix "$SECRET_ARN_PREFIX" \
+                --arg stage "$STAGE" '
+                  def values($key): [(.Tags // [])[] | select(.Key == $key) | .Value];
+                  .Name == $name and
+                  (.ARN | startswith($arn_prefix)) and
+                  .DeletedDate == null and
+                  values("roadmap2u-project") == ["RoadMap2U"] and
+                  values("roadmap2u-stage") == [$stage]
+                ' <<<"$RETAINED_SECRET_METADATA" >/dev/null
+              RETAINED_SECRET_RESOURCE_POLICY="$(aws secretsmanager get-resource-policy \
+                --secret-id "$SECRET_NAME" \
+                --output json)"
+              jq -e '(.ResourcePolicy // "") == ""' \
+                <<<"$RETAINED_SECRET_RESOURCE_POLICY" >/dev/null
+              VALIDATOR_ARGS+=(--retained-secret-resource "$RETAINED_SECRET_ARN")
+              ;;
+            test) ;;
+            *)
+              echo "Unsupported SSM HMAC stage: ${STAGE}." >&2
+              exit 1
+              ;;
+          esac
 
           EXPECTED_RUNTIME_BOUNDARY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/roadmap2u/${STAGE}/roadmap2u-${STAGE}-runtime-boundary"
           RUNTIME_BOUNDARY_OUTPUT="$(aws cloudformation describe-stacks \
@@ -401,9 +412,7 @@ jobs:
             --query 'PolicyVersion.Document' \
             --output json)"
           node scripts/validate-hmac-runtime-boundary.mjs \
-            --mode ssm \
-            --parameter-resource "$PARAMETER_ARN" \
-            --retained-secret-resource "$RETAINED_SECRET_ARN" \
+            "${VALIDATOR_ARGS[@]}" \
             <<<"$POLICY_DOCUMENT"
 
       - name: Validate legacy sponsored-access HMAC control plane

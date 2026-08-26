@@ -743,7 +743,7 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
-  it('keeps dev dual during rollback while unmigrated stages remain on Secrets Manager', () => {
+  it('models dev dual, test SSM-only, and prod on legacy Secrets Manager', () => {
     const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
     ) as any[];
@@ -761,21 +761,28 @@ describe('GitHub OIDC bootstrap', () => {
           statement.Sid === 'ReadOnlyRetainedSponsoredAccessHmacSecretDuringMigration',
       );
 
-      expect(retainedSecretRead).toMatchObject({
-        Action: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
-        Effect: 'Allow',
-      });
-      expect(JSON.stringify(retainedSecretRead.Resource)).toContain(
-        `:secret:roadmap2u/${stage}/access-code-hmac/v1-`,
-      );
-      if (stage === 'dev') {
+      if (stage === 'test') {
+        expect(retainedSecretRead).toBeUndefined();
+      } else {
+        expect(retainedSecretRead).toMatchObject({
+          Action: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
+          Effect: 'Allow',
+        });
+        expect(JSON.stringify(retainedSecretRead.Resource)).toContain(
+          `:secret:roadmap2u/${stage}/access-code-hmac/v1-`,
+        );
+      }
+      if (stage !== 'prod') {
         expect(parameterRead).toMatchObject({ Action: 'ssm:GetParameter', Effect: 'Allow' });
         expect(JSON.stringify(parameterRead.Resource)).toContain(
-          ':parameter/roadmap2u/dev/access-code-hmac/v1',
+          `:parameter/roadmap2u/${stage}/access-code-hmac/v1`,
         );
       } else {
         expect(parameterRead).toBeUndefined();
         expect(JSON.stringify(statements)).not.toContain('ssm:GetParameter');
+      }
+      if (stage === 'test') {
+        expect(JSON.stringify(statements)).not.toContain('secretsmanager:');
       }
     }
   });
@@ -798,7 +805,7 @@ describe('GitHub OIDC bootstrap', () => {
         (statement: any) => statement.Sid === 'ManageOnlySponsoredAccessHmacSecret',
       );
 
-      if (stage === 'dev') {
+      if (stage !== 'prod') {
         expect(randomPassword).toBeUndefined();
         expect(secretManagement).toBeUndefined();
         expect(JSON.stringify(statements)).not.toContain('secretsmanager:');
@@ -1815,7 +1822,7 @@ describe('GitHub OIDC bootstrap', () => {
         `:policy/roadmap2u/${stage}/roadmap2u-${stage}-runtime-boundary`,
       );
 
-      if (stage === 'dev') {
+      if (stage !== 'prod') {
         expect(metadata).toMatchObject({
           Action: 'ssm:DescribeParameters',
           Effect: 'Allow',
@@ -1826,18 +1833,22 @@ describe('GitHub OIDC bootstrap', () => {
           expect.arrayContaining(['ssm:GetResourcePolicies', 'ssm:ListTagsForResource']),
         );
         expect(JSON.stringify(tags.Resource)).toContain(
-          ':parameter/roadmap2u/dev/access-code-hmac/v1',
+          `:parameter/roadmap2u/${stage}/access-code-hmac/v1`,
         );
-        expect(legacySecret).toMatchObject({
-          Action: expect.arrayContaining([
-            'secretsmanager:DescribeSecret',
-            'secretsmanager:GetResourcePolicy',
-          ]),
-          Effect: 'Allow',
-        });
-        expect(JSON.stringify(legacySecret.Resource)).toContain(
-          ':secret:roadmap2u/dev/access-code-hmac/v1-*',
-        );
+        if (stage === 'dev') {
+          expect(legacySecret).toMatchObject({
+            Action: expect.arrayContaining([
+              'secretsmanager:DescribeSecret',
+              'secretsmanager:GetResourcePolicy',
+            ]),
+            Effect: 'Allow',
+          });
+          expect(JSON.stringify(legacySecret.Resource)).toContain(
+            ':secret:roadmap2u/dev/access-code-hmac/v1-*',
+          );
+        } else {
+          expect(legacySecret).toBeUndefined();
+        }
       } else {
         expect(metadata).toBeUndefined();
         expect(tags).toBeUndefined();
