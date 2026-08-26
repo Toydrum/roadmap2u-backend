@@ -4,11 +4,14 @@ import {
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
 import {
+  DescribeParametersCommand,
   GetParameterCommand,
+  GetResourcePoliciesCommand,
   PutParameterCommand,
   SSMClient,
 } from '@aws-sdk/client-ssm';
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
+import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import {
   generateAccessCodeHmacMaterial,
   runAccessCodeHmacMigrationCli,
@@ -16,6 +19,16 @@ import {
 import { pathToFileURL } from 'node:url';
 
 const REGION = 'us-east-1';
+
+export function createHardenedCredentialProvider({ requestHandler } = {}) {
+  return defaultProvider({
+    clientConfig: {
+      region: REGION,
+      ignoreConfiguredEndpointUrls: true,
+      ...(requestHandler ? { requestHandler } : {}),
+    },
+  });
+}
 
 export async function main({
   argv = process.argv.slice(2),
@@ -25,9 +38,22 @@ export async function main({
   if (argv[0] === 'apply' && !process.stdin.isTTY) {
     throw new Error('apply requires an interactive terminal');
   }
-  const sts = new STSClient({ region: REGION });
-  const secrets = new SecretsManagerClient({ region: REGION });
-  const ssm = new SSMClient({ region: REGION });
+  const credentials = createHardenedCredentialProvider();
+  const sts = new STSClient({
+    region: REGION,
+    ignoreConfiguredEndpointUrls: true,
+    credentials,
+  });
+  const secrets = new SecretsManagerClient({
+    region: REGION,
+    ignoreConfiguredEndpointUrls: true,
+    credentials,
+  });
+  const ssm = new SSMClient({
+    region: REGION,
+    ignoreConfiguredEndpointUrls: true,
+    credentials,
+  });
   try {
     return await runAccessCodeHmacMigrationCli({
       argv,
@@ -36,6 +62,8 @@ export async function main({
       getCallerIdentity: (input) => sts.send(new GetCallerIdentityCommand(input)),
       describeSecret: (input) => secrets.send(new DescribeSecretCommand(input)),
       getSecretValue: (input) => secrets.send(new GetSecretValueCommand(input)),
+      describeParameters: (input) => ssm.send(new DescribeParametersCommand(input)),
+      getResourcePolicies: (input) => ssm.send(new GetResourcePoliciesCommand(input)),
       getParameter: (input) => ssm.send(new GetParameterCommand(input)),
       putParameter: (input) => ssm.send(new PutParameterCommand(input)),
       generateSecretMaterial: generateAccessCodeHmacMaterial,

@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
+import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { describe, expect, it, vi } from 'vitest';
 
 type MigrationResult = Readonly<Record<string, any>> & {
@@ -10,6 +13,12 @@ type MigrationResult = Readonly<Record<string, any>> & {
 
 type MigrationCliModule = {
   runAccessCodeHmacMigrationCli(options: Record<string, unknown>): Promise<MigrationResult>;
+};
+
+type MigrationEntrypointModule = {
+  createHardenedCredentialProvider(options?: {
+    requestHandler?: Record<string, unknown>;
+  }): () => Promise<Record<string, unknown>>;
 };
 
 const SOURCE_KEY = 'A'.repeat(64);
@@ -27,6 +36,7 @@ const MODULE_PATH = join(
   'access-code-hmac-migration-cli.mjs',
 );
 const MODULE_EXISTS = existsSync(MODULE_PATH);
+const ENTRYPOINT_PATH = join(process.cwd(), 'scripts', 'migrate-access-code-hmac.mjs');
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -41,11 +51,19 @@ function fixture({
   sourceExists = true,
   targetValue,
   targetType = 'SecureString',
+  targetTier = 'Standard',
+  targetKeyId = 'alias/aws/ssm',
+  targetDataType = 'text',
+  targetPolicies = [],
 }: {
   readonly sourceValue?: string;
   readonly sourceExists?: boolean;
   readonly targetValue?: string;
   readonly targetType?: 'String' | 'SecureString';
+  readonly targetTier?: 'Standard' | 'Advanced' | 'Intelligent-Tiering';
+  readonly targetKeyId?: string;
+  readonly targetDataType?: string;
+  readonly targetPolicies?: readonly Record<string, unknown>[];
 } = {}) {
   const output: string[] = [];
   const getCallerIdentity = vi.fn(async () => ({
@@ -61,6 +79,21 @@ function fixture({
     return { ARN: `arn:aws:secretsmanager:us-east-1:${AWS_ACCOUNT_ID}:secret:${SOURCE_SECRET_ID}` };
   });
   const getSecretValue = vi.fn(async () => ({ SecretString: sourceValue }));
+  const describeParameters = vi.fn(async () => ({
+    Parameters:
+      targetValue === undefined
+        ? []
+        : [
+            {
+              Name: TARGET_PARAMETER_NAME,
+              Type: targetType,
+              Tier: targetTier,
+              KeyId: targetKeyId,
+              DataType: targetDataType,
+            },
+          ],
+  }));
+  const getResourcePolicies = vi.fn(async () => ({ Policies: [...targetPolicies] }));
   const getParameter = vi.fn(async () =>
     targetValue === undefined
       ? undefined
@@ -80,6 +113,8 @@ function fixture({
     getCallerIdentity,
     describeSecret,
     getSecretValue,
+    describeParameters,
+    getResourcePolicies,
     getParameter,
     putParameter,
     generateSecretMaterial,
@@ -89,6 +124,8 @@ function fixture({
       getCallerIdentity,
       describeSecret,
       getSecretValue,
+      describeParameters,
+      getResourcePolicies,
       getParameter,
       putParameter,
       generateSecretMaterial,
@@ -114,6 +151,113 @@ describe('access-code HMAC migration CLI', () => {
 
   it('provides the injectable migration module', () => {
     expect(MODULE_EXISTS).toBe(true);
+  });
+
+  it('shares explicit hardened credentials across every AWS client', () => {
+    const entrypoint = readFileSync(ENTRYPOINT_PATH, 'utf8');
+    expect(entrypoint).toContain("import { defaultProvider } from '@aws-sdk/credential-provider-node'");
+    expect(entrypoint).toContain('const credentials = createHardenedCredentialProvider()');
+    for (const client of ['STSClient', 'SecretsManagerClient', 'SSMClient']) {
+      const constructor = entrypoint.slice(entrypoint.indexOf(`new ${client}({`));
+      expect(constructor.slice(0, constructor.indexOf('});'))).toContain('credentials,');
+      expect(constructor.slice(0, constructor.indexOf('});'))).toContain(
+        'ignoreConfiguredEndpointUrls: true',
+      );
+    }
+  });
+
+  it('ignores STS endpoint overrides inside web-identity credential resolution', async () => {
+    const temporaryDirectory = mkdtempSync(join(tmpdir(), 'roadmap2u-hmac-credentials-'));
+    const tokenFile = join(temporaryDirectory, 'token');
+    writeFileSync(tokenFile, 'signed-web-identity-token', 'utf8');
+    const environmentKeys = [
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_SESSION_TOKEN',
+      'AWS_PROFILE',
+      'AWS_DEFAULT_PROFILE',
+      'AWS_SHARED_CREDENTIALS_FILE',
+      'AWS_CONFIG_FILE',
+      'AWS_WEB_IDENTITY_TOKEN_FILE',
+      'AWS_ROLE_ARN',
+      'AWS_ROLE_SESSION_NAME',
+      'AWS_EC2_METADATA_DISABLED',
+      'AWS_ENDPOINT_URL',
+      'AWS_ENDPOINT_URL_STS',
+      'AWS_IGNORE_CONFIGURED_ENDPOINT_URLS',
+    ] as const;
+    const previousEnvironment = new Map(
+      environmentKeys.map((key) => [key, process.env[key]] as const),
+    );
+    const requestedHosts: string[] = [];
+    const requestHandler = {
+      handle: vi.fn(async (request: { hostname: string }) => {
+        requestedHosts.push(request.hostname);
+        const body = `<?xml version="1.0" encoding="UTF-8"?>
+          <AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+            <AssumeRoleWithWebIdentityResult>
+              <Credentials>
+                <AccessKeyId>ASIAEXAMPLE123456789</AccessKeyId>
+                <SecretAccessKey>exampleSecretAccessKey0000000000000000000</SecretAccessKey>
+                <SessionToken>example-session-token</SessionToken>
+                <Expiration>2035-01-01T00:00:00Z</Expiration>
+              </Credentials>
+              <SubjectFromWebIdentityToken>subject</SubjectFromWebIdentityToken>
+              <AssumedRoleUser>
+                <Arn>arn:aws:sts::${AWS_ACCOUNT_ID}:assumed-role/test-role/test-session</Arn>
+                <AssumedRoleId>AROAEXAMPLE:test-session</AssumedRoleId>
+              </AssumedRoleUser>
+              <Audience>sts.amazonaws.com</Audience>
+            </AssumeRoleWithWebIdentityResult>
+            <ResponseMetadata><RequestId>00000000-0000-0000-0000-000000000000</RequestId></ResponseMetadata>
+          </AssumeRoleWithWebIdentityResponse>`;
+        return {
+          response: {
+            statusCode: 200,
+            headers: { 'content-type': 'text/xml' },
+            body: Readable.from([body]),
+          },
+        };
+      }),
+    };
+
+    try {
+      for (const key of environmentKeys) delete process.env[key];
+      process.env.AWS_SHARED_CREDENTIALS_FILE = join(temporaryDirectory, 'missing-credentials');
+      process.env.AWS_CONFIG_FILE = join(temporaryDirectory, 'missing-config');
+      process.env.AWS_WEB_IDENTITY_TOKEN_FILE = tokenFile;
+      process.env.AWS_ROLE_ARN = `arn:aws:iam::${AWS_ACCOUNT_ID}:role/test-role`;
+      process.env.AWS_ROLE_SESSION_NAME = 'test-session';
+      process.env.AWS_EC2_METADATA_DISABLED = 'true';
+      process.env.AWS_ENDPOINT_URL_STS = 'https://override.invalid';
+      process.env.AWS_IGNORE_CONFIGURED_ENDPOINT_URLS = 'false';
+
+      const unprotectedCredentials = defaultProvider({
+        clientConfig: {
+          region: 'us-east-1',
+          ignoreConfiguredEndpointUrls: false,
+          requestHandler,
+        },
+      });
+      await unprotectedCredentials();
+      expect(requestedHosts).toEqual(['override.invalid']);
+      requestedHosts.length = 0;
+
+      const entrypoint = (await import(
+        `${pathToFileURL(ENTRYPOINT_PATH).href}?credentials-test=${Date.now()}`
+      )) as MigrationEntrypointModule;
+      const credentials = await entrypoint.createHardenedCredentialProvider({ requestHandler })();
+
+      expect(credentials.accessKeyId).toBe('ASIAEXAMPLE123456789');
+      expect(requestedHosts).toEqual(['sts.us-east-1.amazonaws.com']);
+      expect(requestedHosts).not.toContain('override.invalid');
+    } finally {
+      for (const [key, value] of previousEnvironment) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
   });
 });
 
@@ -174,6 +318,29 @@ describeWithModule('access-code HMAC migration contract', () => {
     expect(f.putParameter).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['non-Standard tier', { targetTier: 'Advanced' as const }, /Standard/i],
+    ['unexpected KMS key', { targetKeyId: 'alias/unapproved' }, /alias\/aws\/ssm|KMS/i],
+    ['non-text data type', { targetDataType: 'aws:ec2:image' }, /data type|text/i],
+    [
+      'resource policy',
+      { targetPolicies: [{ Policy: '{"Version":"2012-10-17"}', PolicyHash: 'hash' }] },
+      /resource polic/i,
+    ],
+  ])('rejects an existing target with %s before decrypting it', async (_label, overrides, error) => {
+    const { runAccessCodeHmacMigrationCli } = await cliModule();
+    const f = fixture({ targetValue: SOURCE_VALUE, ...overrides });
+
+    await expect(
+      runAccessCodeHmacMigrationCli({
+        ...f.options,
+        argv: ['plan', '--stage', 'dev', '--mode', 'migrate'],
+      }),
+    ).rejects.toThrow(error);
+    expect(f.getParameter).not.toHaveBeenCalled();
+    expect(f.putParameter).not.toHaveBeenCalled();
+  });
+
   it('plans a dev migration using decrypted in-memory reads and exposes only fingerprints', async () => {
     const { runAccessCodeHmacMigrationCli } = await cliModule();
     const f = fixture();
@@ -185,10 +352,12 @@ describeWithModule('access-code HMAC migration contract', () => {
 
     expect(f.getCallerIdentity).toHaveBeenCalledOnce();
     expect(f.getSecretValue).toHaveBeenCalledWith({ SecretId: SOURCE_SECRET_ID });
-    expect(f.getParameter).toHaveBeenCalledWith({
-      Name: TARGET_PARAMETER_NAME,
-      WithDecryption: true,
+    expect(f.describeParameters).toHaveBeenCalledWith({
+      ParameterFilters: [
+        { Key: 'Name', Option: 'Equals', Values: [TARGET_PARAMETER_NAME] },
+      ],
     });
+    expect(f.getParameter).not.toHaveBeenCalled();
     expect(f.putParameter).not.toHaveBeenCalled();
     expect(f.generateSecretMaterial).not.toHaveBeenCalled();
     expect(result).toMatchObject({
@@ -348,6 +517,14 @@ describeWithModule('access-code HMAC migration contract', () => {
     });
 
     expect(f.putParameter).not.toHaveBeenCalled();
+    expect(f.describeParameters).toHaveBeenCalledWith({
+      ParameterFilters: [
+        { Key: 'Name', Option: 'Equals', Values: [TARGET_PARAMETER_NAME] },
+      ],
+    });
+    expect(f.getResourcePolicies).toHaveBeenCalledWith({
+      ResourceArn: `arn:aws:ssm:us-east-1:${AWS_ACCOUNT_ID}:parameter/roadmap2u/dev/access-code-hmac/v1`,
+    });
     expect(result).toMatchObject({ status: 'already-migrated', changed: false });
     expectNoPlaintext({ result, output: f.output }, [SOURCE_KEY, SOURCE_VALUE]);
   });
@@ -435,10 +612,10 @@ describeWithModule('access-code HMAC migration contract', () => {
 
     expect(f.getSecretValue).toHaveBeenCalledWith({ SecretId: secretId });
     expect(f.describeSecret).not.toHaveBeenCalled();
-    expect(f.getParameter).toHaveBeenCalledWith({
-      Name: parameterName,
-      WithDecryption: true,
+    expect(f.describeParameters).toHaveBeenCalledWith({
+      ParameterFilters: [{ Key: 'Name', Option: 'Equals', Values: [parameterName] }],
     });
+    expect(f.getParameter).not.toHaveBeenCalled();
     expect(plan).toMatchObject({ mode: 'migrate', stage });
   });
 
@@ -474,10 +651,10 @@ describeWithModule('access-code HMAC migration contract', () => {
       expect(f.describeSecret).toHaveBeenCalledWith({
         SecretId: `roadmap2u/${stage}/access-code-hmac/v1`,
       });
-      expect(f.getParameter).toHaveBeenCalledWith({
-        Name: parameterName,
-        WithDecryption: true,
+      expect(f.describeParameters).toHaveBeenCalledWith({
+        ParameterFilters: [{ Key: 'Name', Option: 'Equals', Values: [parameterName] }],
       });
+      expect(f.getParameter).not.toHaveBeenCalled();
       expect(f.generateSecretMaterial).not.toHaveBeenCalled();
       expectNoPlaintext({ plan, output: f.output }, [GENERATED_KEY]);
       f.output.length = 0;

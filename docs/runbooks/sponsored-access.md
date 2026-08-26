@@ -102,9 +102,9 @@ El cambio de flags usa `npm run commercial:set`. Lee primero la revisión autori
 
 La llave HMAC vive en un parámetro Standard `SecureString` llamado `/roadmap2u/<stage>/access-code-hmac/v1`, cifrado con la llave administrada `alias/aws/ssm`. CloudFormation sólo referencia su nombre: no crea el parámetro ni materializa el valor en la plantilla, outputs o variables de entorno. Broker y canjeador sólo reciben `ssm:GetParameter` sobre el ARN exacto.
 
-La migración se ejecuta por stage antes de desplegar el runtime SSM. No admite plaintext por argumentos, variables de entorno ni archivos; el valor viaja únicamente en memoria entre los SDK de AWS. Antes de leer Secrets Manager o SSM, consulta STS y exige la cuenta RoadMap2U `765932874577`; una sesión AWS de otra cuenta falla sin tocar ningún secreto o parámetro. También rechaza localmente cualquier keyring que exceda el límite de 4 KiB del tier Standard.
+La migración se ejecuta por stage antes de desplegar el runtime SSM. No admite plaintext por argumentos, variables de entorno ni archivos; el valor viaja únicamente en memoria entre los SDK de AWS. STS, Secrets Manager y SSM comparten un provider explícito de credenciales cuya configuración también endurece los clientes STS anidados de web identity; tanto esa cadena como los tres clientes de servicio ignoran endpoints configurados por environment o perfil para impedir que un override reciba credenciales, bearer tokens o el keyring. Antes de leer Secrets Manager o SSM, consulta STS y exige la cuenta RoadMap2U `765932874577`; una sesión AWS de otra cuenta falla sin tocar ningún secreto o parámetro. También rechaza localmente cualquier keyring que exceda el límite de 4 KiB del tier Standard.
 
-El permissions boundary del runtime se transiciona por stage. Durante el corte inicial, `dev` permite como máximo la lectura del parámetro SSM exacto y del secreto retenido limitado por cuenta, región, stage y el prefijo físico `v1-*` que exige Secrets Manager, para conservar una ruta de rollback revisada; `test` y `prod` continúan permitiendo como máximo sólo Secrets Manager hasta que llegue su propia ventana. El boundary no concede permisos por sí mismo: el runtime final de `dev` conserva únicamente la identity policy de SSM. Antes de migrar otro stage, actualiza primero el control plane para poner sólo ese stage en transición. Retira definitivamente el permiso legado cuando los tres stages hayan terminado su ventana de observación.
+El permissions boundary del runtime se transiciona por stage. Durante el corte inicial, `dev` permite como máximo la lectura del parámetro SSM exacto y del secreto retenido limitado por cuenta, región, stage y el prefijo físico `v1-*` que exige Secrets Manager, para conservar una ruta de recuperación revisada; `test` y `prod` continúan permitiendo como máximo sólo Secrets Manager hasta que llegue su propia ventana. El boundary no concede permisos por sí mismo: el runtime final de `dev` conserva únicamente la identity policy de SSM. La autoridad CloudFormation para administrar el secreto anterior también se retira sólo de `dev`; se conserva en `test` y `prod` mientras esos stages sigan usando su template legado. El manifiesto describe el provider real del artefacto —este template es SSM en las tres etapas— y el workflow lo compara con el control plane actual: permite `dev` y bloquea su promoción a `test`/`prod`. Un rollback de un SHA legacy sin manifiesto requiere una atestación owner-issued, inmutable para el rol de deploy, que identifique su provider exacto; nunca se infiere sólo por tener un release marker. Antes de migrar otro stage, actualiza primero el control plane y después el gate esperado de ese stage. Retira definitivamente los permisos legados cuando cada stage haya terminado su ventana de observación.
 
 Para cualquier stage que ya tenga el secreto anterior, copia el keyring actual de Secrets Manager. Empieza en `dev`:
 
@@ -119,7 +119,7 @@ npm run commercial:migrate-hmac -- apply --stage dev --mode migrate `
   --confirm-stage dev --confirm-hash <hash-del-plan>
 ```
 
-El apply usa `Overwrite=false`: si el parámetro ya existe con el mismo fingerprint y es `SecureString` devuelve `already-migrated`; si es `String` o contiene otro valor falla cerrado. Nunca borres o reemplaces el parámetro para forzar la operación sin investigar la diferencia.
+El apply usa `Overwrite=false`: si el parámetro ya existe, primero exige metadata exacta `SecureString`, tier `Standard`, `alias/aws/ssm`, data type `text` y ausencia de resource policies; sólo después lo descifra para comparar el fingerprint. Si todo coincide devuelve `already-migrated`; ante cualquier diferencia falla cerrado. Nunca borres o reemplaces el parámetro para forzar la operación sin investigar la diferencia.
 
 Repite `migrate` con `--stage test` o `--stage prod` cuando esos stacks ya hayan creado el secreto anterior. Esto conserva las versiones que validan códigos pendientes; no uses `initialize` para reemplazarlas.
 
@@ -137,7 +137,7 @@ Orden para un stage existente que ya tiene el secreto anterior:
 
 1. Despliega primero el commit de preparación que marca el secreto existente con `Retain`.
 2. Ejecuta `plan` y `apply`; confirma el tipo `SecureString`, tier `Standard` y fingerprint sin mostrar el valor.
-3. Actualiza `Roadmap-CiBootstrap` con el estado transicional del stage y verifica en el diff que los stages no migrados conservan su boundary anterior.
+3. Actualiza `Roadmap-CiBootstrap` con el estado transicional del stage y verifica en el diff que los stages no migrados conservan su boundary y autoridad CloudFormation anteriores. El workflow debe poder validar, sin leer el valor, metadata Standard `SecureString`, `alias/aws/ssm`, tags y el statement exacto `ReadOnlySponsoredAccessHmacParameter`.
 4. Despliega el commit final SSM y verifica emisión/canje con las flags controladas.
 5. Conserva el secreto retenido durante la ventana de observación. No lo elimines en el mismo cambio.
 6. Cuando la validación y el rollback window terminen, programa su eliminación con recovery window y autorización separada.
@@ -149,7 +149,7 @@ Orden para un stage nuevo sin secreto anterior:
 3. Despliega directamente el commit final SSM y verifica emisión/canje con las flags controladas.
 4. Si falla la validación, apaga emisión y canje y corrige IAM o el parámetro mediante un cambio revisado; este flujo no tiene secreto retenido como rollback.
 
-Si falla la validación después del cambio, apaga emisión y canje y conserva ambos almacenes. Corrige IAM o restaura el parámetro desde el secreto retenido mediante un cambio revisado; no pegues el JSON en la terminal. El secreto retenido ya no pertenece a la plantilla final, por lo que no se debe asumir que redesplegar directamente la plantilla antigua lo volverá a adoptar.
+Si falla la validación después del cambio, apaga emisión y canje y conserva ambos almacenes. Corrige IAM o restaura el parámetro desde el secreto retenido mediante un cambio revisado; no pegues el JSON en la terminal. El secreto retenido ya no pertenece a la plantilla final, por lo que no se debe asumir que redesplegar directamente la plantilla antigua lo volverá a adoptar. Para un stage migrado, el workflow exige un artefacto `ssm-secure-string-v1` y rechaza como rollback cualquier SHA legacy; la recuperación segura es un forward-fix compatible con SSM o una restauración revisada del parámetro. Los stages cuyo control plane sigue en Secrets Manager sólo admiten SHAs legacy con marcador y atestación exacta, y rechazan este artefacto SSM mientras no estén preparados.
 
 ## Rotación de la llave HMAC
 

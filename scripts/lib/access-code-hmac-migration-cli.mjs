@@ -10,6 +10,7 @@ const KEY_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
 const KEY_MATERIAL = /^[A-Za-z0-9_-]{32,128}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const AWS_ACCOUNT_ID = '765932874577';
+const AWS_REGION = 'us-east-1';
 const STANDARD_PARAMETER_MAX_BYTES = 4096;
 
 function isRecord(value) {
@@ -136,17 +137,51 @@ function parseKeyring(raw, label) {
   };
 }
 
-async function readTarget(getParameter, parameterName) {
-  let result;
-  try {
-    result = await getParameter({ Name: parameterName, WithDecryption: true });
-  } catch (error) {
-    if (error?.name === 'ParameterNotFound') return undefined;
-    throw error;
+function parameterArn(stage) {
+  return `arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/roadmap2u/${stage}/access-code-hmac/v1`;
+}
+
+async function readTarget(dependencies, stage, parameterName) {
+  const metadataResult = await dependencies.describeParameters({
+    ParameterFilters: [{ Key: 'Name', Option: 'Equals', Values: [parameterName] }],
+  });
+  const metadata = metadataResult?.Parameters;
+  if (!Array.isArray(metadata)) {
+    throw new Error('target parameter metadata response is invalid');
   }
-  if (result === undefined) return undefined;
-  if (result?.Parameter?.Type !== 'SecureString') {
+  if (metadata.length === 0) return undefined;
+  if (metadata.length !== 1 || metadata[0]?.Name !== parameterName) {
+    throw new Error('target parameter metadata is ambiguous');
+  }
+  if (metadata[0].Type !== 'SecureString') {
     throw new Error('target parameter must be a SecureString');
+  }
+  if (metadata[0].Tier !== 'Standard') {
+    throw new Error('target parameter must use the Standard tier');
+  }
+  if (metadata[0].KeyId !== 'alias/aws/ssm') {
+    throw new Error('target parameter must use the approved KMS key alias/aws/ssm');
+  }
+  if (metadata[0].DataType !== 'text') {
+    throw new Error('target parameter data type must be text');
+  }
+
+  const policyResult = await dependencies.getResourcePolicies({
+    ResourceArn: parameterArn(stage),
+  });
+  if (policyResult?.Policies !== undefined && !Array.isArray(policyResult.Policies)) {
+    throw new Error('target parameter resource policy response is invalid');
+  }
+  if ((policyResult?.Policies ?? []).length !== 0) {
+    throw new Error('target parameter must not have a resource policy');
+  }
+
+  const result = await dependencies.getParameter({
+    Name: parameterName,
+    WithDecryption: true,
+  });
+  if (result?.Parameter?.Type !== 'SecureString') {
+    throw new Error('target parameter must remain a SecureString');
   }
   const raw = result?.Parameter?.Value;
   if (typeof raw !== 'string') {
@@ -204,7 +239,7 @@ async function buildContext(parsed, dependencies) {
       throw new Error('source secret already exists; use migrate to preserve its keyring');
     }
   }
-  const target = await readTarget(dependencies.getParameter, parameterName);
+  const target = await readTarget(dependencies, parsed.stage, parameterName);
   const targetStatus =
     target === undefined
       ? 'absent'
@@ -278,6 +313,8 @@ export async function runAccessCodeHmacMigrationCli(options) {
     'getCallerIdentity',
     'describeSecret',
     'getSecretValue',
+    'describeParameters',
+    'getResourcePolicies',
     'getParameter',
     'putParameter',
   ]) {

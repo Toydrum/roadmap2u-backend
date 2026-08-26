@@ -1,5 +1,7 @@
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { RoadmapCiBootstrapStack, RoadmapStack } from '../lib/roadmap-stack';
 
@@ -60,6 +62,21 @@ function statementBySid(statements: any[], sid: string): any {
 }
 
 describe('sponsored access code infrastructure', () => {
+  it('declares the synthesized SSM provider for every stage release artifact', () => {
+    const capabilities = JSON.parse(
+      readFileSync(join(process.cwd(), 'shared', 'backend-release-capabilities.json'), 'utf8'),
+    );
+
+    expect(capabilities).toEqual({
+      schemaVersion: 1,
+      accessCodeHmacStores: {
+        dev: 'ssm-secure-string-v1',
+        test: 'ssm-secure-string-v1',
+        prod: 'ssm-secure-string-v1',
+      },
+    });
+  });
+
   it.each(['dev', 'test', 'prod'] as const)(
     'references a pre-provisioned %s HMAC SecureString without synthesizing secret material',
     (stage) => {
@@ -288,9 +305,34 @@ describe('sponsored access code infrastructure', () => {
       expect(JSON.stringify(deployStatements)).toContain(
         `:function:roadmap-sponsored-access-broker-${stage}`,
       );
-      expect(JSON.stringify(deployStatements)).not.toMatch(/secretsmanager:/i);
+      const randomPassword = deployStatements.find(
+        (statement: any) => statement.Sid === 'GenerateOnlySponsoredAccessSecretPassword',
+      );
+      const secretManagement = deployStatements.find(
+        (statement: any) => statement.Sid === 'ManageOnlySponsoredAccessHmacSecret',
+      );
+      if (stage === 'dev') {
+        expect(randomPassword).toBeUndefined();
+        expect(secretManagement).toBeUndefined();
+        expect(JSON.stringify(deployStatements)).not.toMatch(/secretsmanager:/i);
+      } else {
+        expect(randomPassword).toMatchObject({
+          Action: 'secretsmanager:GetRandomPassword',
+          Effect: 'Allow',
+          Resource: '*',
+        });
+        expect(secretManagement.Action).toContain('secretsmanager:GetSecretValue');
+        expect(JSON.stringify(secretManagement.Resource)).toContain(
+          `:secret:roadmap2u/${stage}/access-code-hmac/v1-`,
+        );
+      }
       expect(
-        deployStatements.every((statement: any) => statement.Resource !== '*'),
+        deployStatements
+          .filter(
+            (statement: any) =>
+              statement.Sid !== 'GenerateOnlySponsoredAccessSecretPassword',
+          )
+          .every((statement: any) => statement.Resource !== '*'),
       ).toBe(true);
       expect(template.Outputs).toHaveProperty(`${stage}CfnCommercialAccessPolicyArn`);
     }

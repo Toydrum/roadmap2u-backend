@@ -38,7 +38,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PASSWORD_POLICY } from '@app/auth/auth-types';
-import { createStageManagedPolicies } from './stage-policies';
+import { createStageManagedPolicies, isAccessCodeSsmMigratedStage } from './stage-policies';
 import { createCommercialObservability } from './commercial-observability';
 import { bundledAwsSdkEsm } from './lambda-bundling';
 
@@ -1974,6 +1974,10 @@ export class RoadmapCiBootstrapStack extends Stack {
     return this.parameterArn(`/roadmap2u/${stage}/backend-release-manifests/*`);
   }
 
+  private backendReleaseCapabilityAttestationArn(stage: DeploymentStage): string {
+    return this.parameterArn(`/roadmap2u/${stage}/backend-release-capabilities/*`);
+  }
+
   private commercialAlarmTopicArn(stage: DeploymentStage): string {
     return `arn:${Aws.PARTITION}:sns:us-east-1:${this.account}:roadmap-commercial-alerts-${stage}`;
   }
@@ -2047,6 +2051,7 @@ export class RoadmapCiBootstrapStack extends Stack {
           ...this.publicConfigArns(stage),
           ...this.markerReadArns(stage, 'backend'),
           this.backendReleaseManifestArn(stage),
+          this.backendReleaseCapabilityAttestationArn(stage),
           this.parameterArn(`/cdk-bootstrap/${bootstrapQualifier}/version`),
         ],
       }),
@@ -2083,6 +2088,43 @@ export class RoadmapCiBootstrapStack extends Stack {
         actions: ['iam:GetPolicy'],
         resources: [
           `arn:${Aws.PARTITION}:iam::${this.account}:policy/roadmap2u/${stage}/roadmap2u-${stage}-inventory-runtime-boundary`,
+        ],
+      }),
+    );
+    if (isAccessCodeSsmMigratedStage(stage)) {
+      role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: `InspectSponsoredAccessHmacMetadata${stage}`,
+          actions: ['ssm:DescribeParameters'],
+          resources: ['*'],
+          conditions: {
+            StringEquals: { 'aws:RequestedRegion': this.region },
+          },
+        }),
+      );
+      role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: `InspectSponsoredAccessHmacTags${stage}`,
+          actions: ['ssm:GetResourcePolicies', 'ssm:ListTagsForResource'],
+          resources: [this.parameterArn(`/roadmap2u/${stage}/access-code-hmac/v1`)],
+        }),
+      );
+    }
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: `InspectSponsoredAccessHmacSecret${stage}`,
+        actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetResourcePolicy'],
+        resources: [
+          `arn:${Aws.PARTITION}:secretsmanager:${this.region}:${this.account}:secret:roadmap2u/${stage}/access-code-hmac/v1-*`,
+        ],
+      }),
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: `ReadSponsoredAccessRuntimeBoundary${stage}`,
+        actions: ['iam:GetPolicy', 'iam:GetPolicyVersion'],
+        resources: [
+          `arn:${Aws.PARTITION}:iam::${this.account}:policy/roadmap2u/${stage}/roadmap2u-${stage}-runtime-boundary`,
         ],
       }),
     );
