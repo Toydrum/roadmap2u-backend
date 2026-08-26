@@ -743,6 +743,43 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
+  it('keeps dev dual during rollback while unmigrated stages remain on Secrets Manager', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const boundary = policies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-runtime-boundary`,
+      );
+      const statements = boundary.Properties.PolicyDocument.Statement;
+      const parameterRead = statements.find(
+        (statement: any) => statement.Sid === 'ReadOnlySponsoredAccessHmacParameter',
+      );
+      const retainedSecretRead = statements.find(
+        (statement: any) =>
+          statement.Sid === 'ReadOnlyRetainedSponsoredAccessHmacSecretDuringMigration',
+      );
+
+      expect(retainedSecretRead).toMatchObject({
+        Action: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
+        Effect: 'Allow',
+      });
+      expect(JSON.stringify(retainedSecretRead.Resource)).toContain(
+        `:secret:roadmap2u/${stage}/access-code-hmac/v1-`,
+      );
+      if (stage === 'dev') {
+        expect(parameterRead).toMatchObject({ Action: 'ssm:GetParameter', Effect: 'Allow' });
+        expect(JSON.stringify(parameterRead.Resource)).toContain(
+          ':parameter/roadmap2u/dev/access-code-hmac/v1',
+        );
+      } else {
+        expect(parameterRead).toBeUndefined();
+        expect(JSON.stringify(statements)).not.toContain('ssm:GetParameter');
+      }
+    }
+  });
+
   it('keeps policy-size headroom below the IAM 6144-character limit', () => {
     const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',

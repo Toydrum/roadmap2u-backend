@@ -104,6 +104,8 @@ La llave HMAC vive en un parámetro Standard `SecureString` llamado `/roadmap2u/
 
 La migración se ejecuta por stage antes de desplegar el runtime SSM. No admite plaintext por argumentos, variables de entorno ni archivos; el valor viaja únicamente en memoria entre los SDK de AWS. Antes de leer Secrets Manager o SSM, consulta STS y exige la cuenta RoadMap2U `765932874577`; una sesión AWS de otra cuenta falla sin tocar ningún secreto o parámetro. También rechaza localmente cualquier keyring que exceda el límite de 4 KiB del tier Standard.
 
+El permissions boundary del runtime se transiciona por stage. Durante el corte inicial, `dev` permite como máximo la lectura del parámetro SSM exacto y del secreto retenido limitado por cuenta, región, stage y el prefijo físico `v1-*` que exige Secrets Manager, para conservar una ruta de rollback revisada; `test` y `prod` continúan permitiendo como máximo sólo Secrets Manager hasta que llegue su propia ventana. El boundary no concede permisos por sí mismo: el runtime final de `dev` conserva únicamente la identity policy de SSM. Antes de migrar otro stage, actualiza primero el control plane para poner sólo ese stage en transición. Retira definitivamente el permiso legado cuando los tres stages hayan terminado su ventana de observación.
+
 Para cualquier stage que ya tenga el secreto anterior, copia el keyring actual de Secrets Manager. Empieza en `dev`:
 
 ```powershell
@@ -135,9 +137,10 @@ Orden para un stage existente que ya tiene el secreto anterior:
 
 1. Despliega primero el commit de preparación que marca el secreto existente con `Retain`.
 2. Ejecuta `plan` y `apply`; confirma el tipo `SecureString`, tier `Standard` y fingerprint sin mostrar el valor.
-3. Despliega el commit final SSM y verifica emisión/canje con las flags controladas.
-4. Conserva el secreto retenido durante la ventana de observación. No lo elimines en el mismo cambio.
-5. Cuando la validación y el rollback window terminen, programa su eliminación con recovery window y autorización separada.
+3. Actualiza `Roadmap-CiBootstrap` con el estado transicional del stage y verifica en el diff que los stages no migrados conservan su boundary anterior.
+4. Despliega el commit final SSM y verifica emisión/canje con las flags controladas.
+5. Conserva el secreto retenido durante la ventana de observación. No lo elimines en el mismo cambio.
+6. Cuando la validación y el rollback window terminen, programa su eliminación con recovery window y autorización separada.
 
 Orden para un stage nuevo sin secreto anterior:
 

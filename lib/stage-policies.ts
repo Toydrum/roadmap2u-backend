@@ -219,6 +219,21 @@ function accessCodeParameterArn(stack: Stack, stage: PolicyStage): string {
   );
 }
 
+function retainedAccessCodeSecretArn(stack: Stack, stage: PolicyStage): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'secretsmanager',
+      region: stack.region,
+      account: stack.account,
+      resource: 'secret',
+      resourceName: `roadmap2u/${stage}/access-code-hmac/v1-*`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
+}
+
 function commercialInventoryExecutorLogGroupArn(stack: Stack, stage: PolicyStage): string {
   return Arn.format(
     {
@@ -483,10 +498,19 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         actions: ['dynamodb:PutItem'],
         resources: [auditTableArn(stack, stage)],
       }),
+      ...(stage === 'dev'
+        ? [
+            new iam.PolicyStatement({
+              sid: 'ReadOnlySponsoredAccessHmacParameter',
+              actions: ['ssm:GetParameter'],
+              resources: [accessCodeParameterArn(stack, stage)],
+            }),
+          ]
+        : []),
       new iam.PolicyStatement({
-        sid: 'ReadOnlySponsoredAccessHmacParameter',
-        actions: ['ssm:GetParameter'],
-        resources: [accessCodeParameterArn(stack, stage)],
+        sid: 'ReadOnlyRetainedSponsoredAccessHmacSecretDuringMigration',
+        actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
+        resources: [retainedAccessCodeSecretArn(stack, stage)],
       }),
       new iam.PolicyStatement({
         sid: 'UseOnlyAccountClosureQueues',
