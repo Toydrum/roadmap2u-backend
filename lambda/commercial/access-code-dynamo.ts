@@ -1,6 +1,6 @@
 import { ApiError, type AccessSummary } from '@app/api/contracts';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { GetSecretValueCommand, type SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { GetParameterCommand, type SSMClient } from '@aws-sdk/client-ssm';
 import {
   GetCommand,
   TransactGetCommand,
@@ -44,10 +44,10 @@ import {
 
 export interface AccessCodeDynamoOptions {
   readonly ddb: DynamoDBDocumentClient;
-  readonly secrets: SecretsManagerClient;
+  readonly ssm: SSMClient;
   readonly tableName: string;
   readonly auditTableName: string;
-  readonly secretId: string;
+  readonly parameterName: string;
   readonly stage: CommercialMetricStage;
   readonly now: () => number;
 }
@@ -166,14 +166,17 @@ async function readGrantSnapshot(
   };
 }
 
-async function secretString(options: AccessCodeDynamoOptions): Promise<string> {
-  const result = await options.secrets.send(
-    new GetSecretValueCommand({ SecretId: options.secretId }),
+async function parameterString(options: AccessCodeDynamoOptions): Promise<string> {
+  const result = await options.ssm.send(
+    new GetParameterCommand({ Name: options.parameterName, WithDecryption: true }),
   );
-  if (typeof result.SecretString !== 'string') {
-    throw new Error('invalid access-code secret');
+  if (result.Parameter?.Type !== 'SecureString') {
+    throw new Error('access-code parameter must be a SecureString');
   }
-  return result.SecretString;
+  if (typeof result.Parameter?.Value !== 'string') {
+    throw new Error('invalid access-code parameter');
+  }
+  return result.Parameter.Value;
 }
 
 function flagsResolver(options: AccessCodeDynamoOptions): CommercialFlagsResolver {
@@ -208,7 +211,7 @@ export function createDynamoAccessCodeRedemptionDeps(
       consumeAccessCodeAttempt(options.ddb, options.tableName, ownerSub, now),
     readCode: (issuanceId) => readCode(options, issuanceId),
     readSecretKey: async (version) =>
-      parseAccessCodeSecret(await secretString(options), version).key,
+      parseAccessCodeSecret(await parameterString(options), version).key,
     readAccountSnapshot: (ownerSub) => readAccountSnapshot(options, ownerSub),
     commitRedemption: async (proposal) => {
       try {
@@ -246,7 +249,7 @@ export function createDynamoSponsoredAccessBrokerDeps(
     readCommand: (commandId) => readCommand(options, commandId),
     readCode: (issuanceId) => readCode(options, issuanceId),
     readGrantSnapshot: (issuanceId) => readGrantSnapshot(options, issuanceId),
-    readActiveSecretKey: async () => parseAccessCodeSecret(await secretString(options)),
+    readActiveSecretKey: async () => parseAccessCodeSecret(await parameterString(options)),
     nextIssuanceId: randomUUID,
     randomBytes,
     commit: async (proposal: SponsoredAccessBrokerProposal) => {

@@ -204,16 +204,16 @@ function sponsoredAccessBrokerLogGroupArn(stack: Stack, stage: PolicyStage): str
   );
 }
 
-function accessCodeSecretArn(stack: Stack, stage: PolicyStage): string {
+function accessCodeParameterArn(stack: Stack, stage: PolicyStage): string {
   return Arn.format(
     {
       partition: Aws.PARTITION,
-      service: 'secretsmanager',
+      service: 'ssm',
       region: stack.region,
       account: stack.account,
-      resource: 'secret',
-      resourceName: `roadmap2u/${stage}/access-code-hmac/v1-*`,
-      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      resource: 'parameter',
+      resourceName: `roadmap2u/${stage}/access-code-hmac/v1`,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
     },
     stack,
   );
@@ -484,9 +484,9 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         resources: [auditTableArn(stack, stage)],
       }),
       new iam.PolicyStatement({
-        sid: 'ReadOnlySponsoredAccessHmacSecret',
-        actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
-        resources: [accessCodeSecretArn(stack, stage)],
+        sid: 'ReadOnlySponsoredAccessHmacParameter',
+        actions: ['ssm:GetParameter'],
+        resources: [accessCodeParameterArn(stack, stage)],
       }),
       new iam.PolicyStatement({
         sid: 'UseOnlyAccountClosureQueues',
@@ -1161,29 +1161,6 @@ function createCommercialAccessPolicy(stack: Stack, stage: PolicyStage): iam.Man
           accessCodeRedeemerLogGroupArn(stack, stage),
           sponsoredAccessBrokerLogGroupArn(stack, stage),
         ],
-      }),
-      new iam.PolicyStatement({
-        sid: 'GenerateOnlySponsoredAccessSecretPassword',
-        actions: ['secretsmanager:GetRandomPassword'],
-        resources: ['*'],
-        conditions: {
-          StringEquals: { 'aws:RequestedRegion': stack.region },
-        },
-      }),
-      new iam.PolicyStatement({
-        sid: 'ManageOnlySponsoredAccessHmacSecret',
-        actions: [
-          'secretsmanager:CreateSecret',
-          'secretsmanager:DescribeSecret',
-          'secretsmanager:GetResourcePolicy',
-          'secretsmanager:GetSecretValue',
-          'secretsmanager:ListSecretVersionIds',
-          'secretsmanager:PutSecretValue',
-          'secretsmanager:TagResource',
-          'secretsmanager:UntagResource',
-          'secretsmanager:UpdateSecret',
-        ],
-        resources: [accessCodeSecretArn(stack, stage)],
       }),
     ],
   });

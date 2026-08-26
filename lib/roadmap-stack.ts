@@ -31,7 +31,6 @@ import { AccessLogFormat } from 'aws-cdk-lib/aws-apigateway';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import { ApiGatewayv2DomainProperties, CloudFrontTarget } from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { createHash } from 'node:crypto';
@@ -292,6 +291,19 @@ export class RoadmapStack extends Stack {
     const removalPolicy = production ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY;
     const apiDomain = apiDomainFor(stage);
     const parameterPrefix = `/roadmap2u/${stage}`;
+    const accessCodeHmacParameterName = `${parameterPrefix}/access-code-hmac/v1`;
+    const accessCodeHmacParameterArn = Arn.format(
+      {
+        partition: Aws.PARTITION,
+        service: 'ssm',
+        region: this.region,
+        account: this.account,
+        resource: 'parameter',
+        resourceName: accessCodeHmacParameterName.replace(/^\//, ''),
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      },
+      this,
+    );
     const contractHash = props.contractHash ?? calculateContractHash();
     Tags.of(this).add('roadmap2u-project', 'RoadMap2U');
     Tags.of(this).add('roadmap2u-stage', stage);
@@ -393,17 +405,6 @@ export class RoadmapStack extends Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: production },
       deletionProtection: production,
       removalPolicy,
-    });
-    const accessCodeHmacSecret = new secretsmanager.Secret(this, 'AccessCodeHmacSecret', {
-      secretName: `roadmap2u/${stage}/access-code-hmac/v1`,
-      description: `RoadMap2U ${stage} sponsored access code HMAC keys`,
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({ activeVersion: 'v1' }),
-        generateStringKey: 'v1',
-        excludePunctuation: true,
-        passwordLength: 64,
-      },
-      removalPolicy: RemovalPolicy.RETAIN,
     });
     denyCommercialConfigWrites(preSignUpRole, table);
     table.addGlobalSecondaryIndex({
@@ -534,7 +535,7 @@ export class RoadmapStack extends Stack {
       environment: {
         TABLE_NAME: table.tableName,
         AUDIT_TABLE_NAME: accessAuditTable.tableName,
-        ACCESS_CODE_SECRET_ID: accessCodeHmacSecret.secretArn,
+        ACCESS_CODE_PARAMETER_NAME: accessCodeHmacParameterName,
         COMMERCIAL_STAGE: stage,
         SPONSORED_ACCESS_ALLOWLIST: JSON.stringify([
           {
@@ -593,7 +594,13 @@ export class RoadmapStack extends Stack {
         },
       }),
     );
-    accessCodeHmacSecret.grantRead(sponsoredAccessBrokerRole);
+    sponsoredAccessBrokerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadSponsoredAccessHmacParameter',
+        actions: ['ssm:GetParameter'],
+        resources: [accessCodeHmacParameterArn],
+      }),
+    );
     denyCommercialConfigWrites(sponsoredAccessBrokerRole, table);
     const sponsoredAccessBrokerUrl = sponsoredAccessBroker.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.AWS_IAM,
@@ -975,7 +982,7 @@ export class RoadmapStack extends Stack {
       environment: {
         TABLE_NAME: table.tableName,
         AUDIT_TABLE_NAME: accessAuditTable.tableName,
-        ACCESS_CODE_SECRET_ID: accessCodeHmacSecret.secretArn,
+        ACCESS_CODE_PARAMETER_NAME: accessCodeHmacParameterName,
         COMMERCIAL_STAGE: stage,
       },
       bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
@@ -1033,7 +1040,13 @@ export class RoadmapStack extends Stack {
         },
       }),
     );
-    accessCodeHmacSecret.grantRead(accessCodeRedeemerRole);
+    accessCodeRedeemerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadSponsoredAccessHmacParameter',
+        actions: ['ssm:GetParameter'],
+        resources: [accessCodeHmacParameterArn],
+      }),
+    );
     denyCommercialConfigWrites(accessCodeRedeemerRole, table);
 
     const accountClosureRequestName = `roadmap-account-closure-request-${stage}`;

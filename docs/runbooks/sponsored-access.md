@@ -98,16 +98,68 @@ Cada mutación sigue el mismo ciclo dry run y `--apply --confirm-stage <stage> -
 
 El cambio de flags usa `npm run commercial:set`. Lee primero la revisión autoritativa, ejecuta el dry run con `--expected-revision`, `--access-code-issuance-enabled` o `--access-code-redemption-enabled`, y aplica únicamente con el hash resultante. No actives pagos en este flujo.
 
-## Rotación del secreto HMAC
+## Migración inicial a Parameter Store
 
-La rotación no se realiza con el rol de emisión. Debe ejecutarse como un cambio controlado de Secrets Manager y despliegue:
+La llave HMAC vive en un parámetro Standard `SecureString` llamado `/roadmap2u/<stage>/access-code-hmac/v1`, cifrado con la llave administrada `alias/aws/ssm`. CloudFormation sólo referencia su nombre: no crea el parámetro ni materializa el valor en la plantilla, outputs o variables de entorno. Broker y canjeador sólo reciben `ssm:GetParameter` sobre el ARN exacto.
 
-1. Añade una versión nueva al JSON del secreto, conserva todas las versiones aún referenciadas por códigos pendientes y cambia `activeVersion` a la nueva versión.
-2. Verifica que una emisión nueva guarde la versión nueva y que un código pendiente de la versión anterior todavía pueda validarse.
-3. Revoca o deja vencer todos los códigos pendientes de una versión anterior antes de retirarla.
-4. Si hubo exposición, apaga emisión y canje, revoca códigos pendientes, rota el secreto, redespliega y reactiva primero en `dev` y `test`.
+La migración se ejecuta por stage antes de desplegar el runtime SSM. No admite plaintext por argumentos, variables de entorno ni archivos; el valor viaja únicamente en memoria entre los SDK de AWS. Antes de leer Secrets Manager o SSM, consulta STS y exige la cuenta RoadMap2U `765932874577`; una sesión AWS de otra cuenta falla sin tocar ningún secreto o parámetro. También rechaza localmente cualquier keyring que exceda el límite de 4 KiB del tier Standard.
 
-Nunca reemplaces el JSON dejando sólo la versión nueva mientras existan códigos pendientes: cada registro guarda `secretKeyVersion` y necesita esa clave para validar el HMAC.
+Para cualquier stage que ya tenga el secreto anterior, copia el keyring actual de Secrets Manager. Empieza en `dev`:
+
+```powershell
+npm run commercial:migrate-hmac -- plan --stage dev --mode migrate
+```
+
+Revisa `stage`, los fingerprints, el estado del destino y `confirmationHash`. En una terminal interactiva repite:
+
+```powershell
+npm run commercial:migrate-hmac -- apply --stage dev --mode migrate `
+  --confirm-stage dev --confirm-hash <hash-del-plan>
+```
+
+El apply usa `Overwrite=false`: si el parámetro ya existe con el mismo fingerprint y es `SecureString` devuelve `already-migrated`; si es `String` o contiene otro valor falla cerrado. Nunca borres o reemplaces el parámetro para forzar la operación sin investigar la diferencia.
+
+Repite `migrate` con `--stage test` o `--stage prod` cuando esos stacks ya hayan creado el secreto anterior. Esto conserva las versiones que validan códigos pendientes; no uses `initialize` para reemplazarlas.
+
+Sólo para un stage `test` o `prod` completamente nuevo que nunca tuvo el secreto anterior, genera la llave directamente en SSM. Antes de planear, `initialize` consulta Secrets Manager con `DescribeSecret` y falla si el origen existe; el plan no genera material y el apply lo crea sólo después de volver a comprobar la ausencia y validar la confirmación:
+
+```powershell
+npm run commercial:migrate-hmac -- plan --stage test --mode initialize
+npm run commercial:migrate-hmac -- apply --stage test --mode initialize `
+  --confirm-stage test --confirm-hash <hash-del-plan>
+```
+
+Migra o inicializa `prod` únicamente dentro de una ventana de producción aprobada.
+
+Orden para un stage existente que ya tiene el secreto anterior:
+
+1. Despliega primero el commit de preparación que marca el secreto existente con `Retain`.
+2. Ejecuta `plan` y `apply`; confirma el tipo `SecureString`, tier `Standard` y fingerprint sin mostrar el valor.
+3. Despliega el commit final SSM y verifica emisión/canje con las flags controladas.
+4. Conserva el secreto retenido durante la ventana de observación. No lo elimines en el mismo cambio.
+5. Cuando la validación y el rollback window terminen, programa su eliminación con recovery window y autorización separada.
+
+Orden para un stage nuevo sin secreto anterior:
+
+1. No despliegues el commit de preparación, porque ese template crearía el secreto que `initialize` exige ausente.
+2. Ejecuta `plan` y `apply --mode initialize`; confirma el tipo `SecureString`, tier `Standard` y fingerprint sin mostrar el valor.
+3. Despliega directamente el commit final SSM y verifica emisión/canje con las flags controladas.
+4. Si falla la validación, apaga emisión y canje y corrige IAM o el parámetro mediante un cambio revisado; este flujo no tiene secreto retenido como rollback.
+
+Si falla la validación después del cambio, apaga emisión y canje y conserva ambos almacenes. Corrige IAM o restaura el parámetro desde el secreto retenido mediante un cambio revisado; no pegues el JSON en la terminal. El secreto retenido ya no pertenece a la plantilla final, por lo que no se debe asumir que redesplegar directamente la plantilla antigua lo volverá a adoptar.
+
+## Rotación de la llave HMAC
+
+La rotación no se realiza con el rol de emisión. Debe ejecutarse como un cambio controlado sobre el mismo `SecureString`:
+
+1. Lee el keyring con `WithDecryption=true` sólo dentro de una herramienta operativa que no lo imprima.
+2. Añade una versión nueva al JSON, conserva todas las versiones aún referenciadas por códigos pendientes y cambia `activeVersion` a la nueva versión.
+3. Actualiza el parámetro de forma condicionada y registra únicamente fingerprints y versión de Parameter Store.
+4. Verifica que una emisión nueva guarde la versión nueva y que un código pendiente de la versión anterior todavía pueda validarse.
+5. Revoca o deja vencer todos los códigos pendientes de una versión anterior antes de retirarla.
+6. Si hubo exposición, apaga emisión y canje, revoca códigos pendientes, rota la llave, redespliega y reactiva primero en `dev` y `test`.
+
+No uses `aws ssm put-parameter --value ...` con el JSON en la línea de comandos. Nunca reemplaces el keyring dejando sólo la versión nueva mientras existan códigos pendientes: cada registro guarda `secretKeyVersion` y necesita esa versión para validar el HMAC.
 
 ## Verificación y respuesta
 
