@@ -743,6 +743,84 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
+  it('keeps dev dual during rollback while unmigrated stages remain on Secrets Manager', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const boundary = policies.find(
+        (policy) => policy.Properties.ManagedPolicyName === `roadmap2u-${stage}-runtime-boundary`,
+      );
+      const statements = boundary.Properties.PolicyDocument.Statement;
+      const parameterRead = statements.find(
+        (statement: any) => statement.Sid === 'ReadOnlySponsoredAccessHmacParameter',
+      );
+      const retainedSecretRead = statements.find(
+        (statement: any) =>
+          statement.Sid === 'ReadOnlyRetainedSponsoredAccessHmacSecretDuringMigration',
+      );
+
+      expect(retainedSecretRead).toMatchObject({
+        Action: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
+        Effect: 'Allow',
+      });
+      expect(JSON.stringify(retainedSecretRead.Resource)).toContain(
+        `:secret:roadmap2u/${stage}/access-code-hmac/v1-`,
+      );
+      if (stage === 'dev') {
+        expect(parameterRead).toMatchObject({ Action: 'ssm:GetParameter', Effect: 'Allow' });
+        expect(JSON.stringify(parameterRead.Resource)).toContain(
+          ':parameter/roadmap2u/dev/access-code-hmac/v1',
+        );
+      } else {
+        expect(parameterRead).toBeUndefined();
+        expect(JSON.stringify(statements)).not.toContain('ssm:GetParameter');
+      }
+    }
+  });
+
+  it('keeps legacy secret deployment authority only for unmigrated stages', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const policy = policies.find(
+        (candidate) =>
+          candidate.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-commercial-access`,
+      );
+      const statements = policy.Properties.PolicyDocument.Statement;
+      const randomPassword = statements.find(
+        (statement: any) => statement.Sid === 'GenerateOnlySponsoredAccessSecretPassword',
+      );
+      const secretManagement = statements.find(
+        (statement: any) => statement.Sid === 'ManageOnlySponsoredAccessHmacSecret',
+      );
+
+      if (stage === 'dev') {
+        expect(randomPassword).toBeUndefined();
+        expect(secretManagement).toBeUndefined();
+        expect(JSON.stringify(statements)).not.toContain('secretsmanager:');
+      } else {
+        expect(randomPassword).toMatchObject({
+          Action: 'secretsmanager:GetRandomPassword',
+          Effect: 'Allow',
+          Resource: '*',
+        });
+        expect(secretManagement.Action).toContain('secretsmanager:GetSecretValue');
+        expect(JSON.stringify(secretManagement.Resource)).toContain(
+          `:secret:roadmap2u/${stage}/access-code-hmac/v1-`,
+        );
+        for (const other of ['dev', 'test', 'prod'].filter((candidate) => candidate !== stage)) {
+          expect(JSON.stringify(secretManagement.Resource)).not.toContain(
+            `:secret:roadmap2u/${other}/access-code-hmac/`,
+          );
+        }
+      }
+    }
+  });
+
   it('keeps policy-size headroom below the IAM 6144-character limit', () => {
     const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
@@ -1691,6 +1769,89 @@ describe('GitHub OIDC bootstrap', () => {
       expect(JSON.stringify(boundaryRead.Resource)).toContain(
         `:policy/roadmap2u/${stage}/roadmap2u-${stage}-inventory-runtime-boundary`,
       );
+    }
+  });
+
+  it('reads but cannot write immutable pre-manifest HMAC release attestations', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Policy',
+    ) as any[];
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const attestationPath = `/roadmap2u/${stage}/backend-release-capabilities/*`;
+      const backendRead = policies
+        .flatMap((policy) => policy.Properties.PolicyDocument.Statement)
+        .find((statement: any) => statement.Sid === `ReadReleaseProofAndPublicConfig${stage}`);
+      const backendWrite = policies
+        .flatMap((policy) => policy.Properties.PolicyDocument.Statement)
+        .find((statement: any) => statement.Sid === `WriteBackendReleaseProof${stage}`);
+
+      expect(JSON.stringify(backendRead.Resource)).toContain(attestationPath);
+      expect(JSON.stringify(backendWrite.Resource)).not.toContain(attestationPath);
+    }
+  });
+
+  it('lets each deployment inspect its exact HMAC metadata and runtime boundary', () => {
+    const statements = Object.values(bootstrapTemplate().toJSON().Resources)
+      .filter((resource: any) => resource.Type === 'AWS::IAM::Policy')
+      .flatMap((resource: any) => resource.Properties.PolicyDocument.Statement);
+
+    for (const stage of ['dev', 'test', 'prod']) {
+      const metadata = statements.find(
+        (statement: any) => statement.Sid === `InspectSponsoredAccessHmacMetadata${stage}`,
+      );
+      const tags = statements.find(
+        (statement: any) => statement.Sid === `InspectSponsoredAccessHmacTags${stage}`,
+      );
+      const boundary = statements.find(
+        (statement: any) => statement.Sid === `ReadSponsoredAccessRuntimeBoundary${stage}`,
+      );
+      const legacySecret = statements.find(
+        (statement: any) => statement.Sid === `InspectSponsoredAccessHmacSecret${stage}`,
+      );
+
+      expect(boundary.Action).toEqual(['iam:GetPolicy', 'iam:GetPolicyVersion']);
+      expect(JSON.stringify(boundary.Resource)).toContain(
+        `:policy/roadmap2u/${stage}/roadmap2u-${stage}-runtime-boundary`,
+      );
+
+      if (stage === 'dev') {
+        expect(metadata).toMatchObject({
+          Action: 'ssm:DescribeParameters',
+          Effect: 'Allow',
+          Resource: '*',
+        });
+        expect(metadata.Condition.StringEquals['aws:RequestedRegion']).toBe('us-east-1');
+        expect(tags.Action).toEqual(
+          expect.arrayContaining(['ssm:GetResourcePolicies', 'ssm:ListTagsForResource']),
+        );
+        expect(JSON.stringify(tags.Resource)).toContain(
+          ':parameter/roadmap2u/dev/access-code-hmac/v1',
+        );
+        expect(legacySecret).toMatchObject({
+          Action: expect.arrayContaining([
+            'secretsmanager:DescribeSecret',
+            'secretsmanager:GetResourcePolicy',
+          ]),
+          Effect: 'Allow',
+        });
+        expect(JSON.stringify(legacySecret.Resource)).toContain(
+          ':secret:roadmap2u/dev/access-code-hmac/v1-*',
+        );
+      } else {
+        expect(metadata).toBeUndefined();
+        expect(tags).toBeUndefined();
+        expect(legacySecret).toMatchObject({
+          Action: expect.arrayContaining([
+            'secretsmanager:DescribeSecret',
+            'secretsmanager:GetResourcePolicy',
+          ]),
+          Effect: 'Allow',
+        });
+        expect(JSON.stringify(legacySecret.Resource)).toContain(
+          `:secret:roadmap2u/${stage}/access-code-hmac/v1-*`,
+        );
+      }
     }
   });
 

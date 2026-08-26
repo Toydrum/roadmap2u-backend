@@ -195,6 +195,45 @@ jobs:
           fi
           echo "::add-mask::$ALARM_NOTIFICATION_EMAIL"
 
+      - name: Precheck stage HMAC release capability
+        id: hmac-capability-manifest
+        run: |
+          set -euo pipefail
+          CAPABILITIES="shared/backend-release-capabilities.json"
+          case "$STAGE" in
+            dev) EXPECTED_STORE="ssm-secure-string-v1" ;;
+            test|prod) EXPECTED_STORE="secrets-manager-v1" ;;
+            *)
+              echo "Unsupported deployment stage: ${STAGE}." >&2
+              exit 1
+              ;;
+          esac
+          echo "expected_store=$EXPECTED_STORE" >> "$GITHUB_OUTPUT"
+          if [[ ! -f "$CAPABILITIES" ]]; then
+            if [[ "$OPERATION" != "rollback" ]]; then
+              echo "A stage-aware HMAC capability manifest is required for deploy or promotion." >&2
+              exit 1
+            fi
+            echo "needs_attestation=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ARTIFACT_STORE="$(jq -er --arg stage "$STAGE" '
+            if .schemaVersion == 1 then .accessCodeHmacStores[$stage] else error("unsupported schema") end
+          ' "$CAPABILITIES")"
+          case "$ARTIFACT_STORE" in
+            ssm-secure-string-v1|secrets-manager-v1) ;;
+            *)
+              echo "Unsupported artifact HMAC store for ${STAGE}." >&2
+              exit 1
+              ;;
+          esac
+          if [[ "$ARTIFACT_STORE" != "$EXPECTED_STORE" ]]; then
+            echo "Artifact HMAC store ${ARTIFACT_STORE} does not match the current ${STAGE} control plane ${EXPECTED_STORE}." >&2
+            exit 1
+          fi
+          echo "needs_attestation=false" >> "$GITHUB_OUTPUT"
+          echo "store=$ARTIFACT_STORE" >> "$GITHUB_OUTPUT"
+
       - name: Configure AWS credentials through OIDC
         uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
@@ -217,6 +256,37 @@ jobs:
             PROOF="$(aws ssm get-parameter --name "/roadmap2u/${STAGE}/backend-releases/${SHA}" --query Parameter.Value --output text)"
             test "$PROOF" = "$SHA"
           fi
+
+      - name: Resolve stage HMAC release capability
+        id: hmac-capability
+        env:
+          EXPECTED_STORE: ${{ steps.hmac-capability-manifest.outputs.expected_store }}
+          MANIFEST_STORE: ${{ steps.hmac-capability-manifest.outputs.store }}
+          NEEDS_ATTESTATION: ${{ steps.hmac-capability-manifest.outputs.needs_attestation }}
+        run: |
+          set -euo pipefail
+          if [[ "$NEEDS_ATTESTATION" == "true" ]]; then
+            ATTESTATION_NAME="/roadmap2u/${STAGE}/backend-release-capabilities/${SHA}"
+            ARTIFACT_STORE="$(aws ssm get-parameter \
+              --name "$ATTESTATION_NAME" \
+              --query Parameter.Value \
+              --output text)"
+          else
+            test "$NEEDS_ATTESTATION" = "false"
+            ARTIFACT_STORE="$MANIFEST_STORE"
+          fi
+          case "$ARTIFACT_STORE" in
+            ssm-secure-string-v1|secrets-manager-v1) ;;
+            *)
+              echo "Unsupported artifact HMAC store for ${STAGE}." >&2
+              exit 1
+              ;;
+          esac
+          if [[ "$ARTIFACT_STORE" != "$EXPECTED_STORE" ]]; then
+            echo "Artifact HMAC store ${ARTIFACT_STORE} does not match the current ${STAGE} control plane ${EXPECTED_STORE}." >&2
+            exit 1
+          fi
+          echo "store=$ARTIFACT_STORE" >> "$GITHUB_OUTPUT"
 
       - name: Validate pre-deploy CloudFormation states
         run: |
@@ -255,6 +325,133 @@ jobs:
             --query 'Policy.Arn' \
             --output text)"
           test "$BOUNDARY_POLICY_ARN" = "$EXPECTED_BOUNDARY_ARN"
+
+      - name: Validate sponsored-access HMAC control plane
+        if: ${{ steps.hmac-capability.outputs.store == 'ssm-secure-string-v1' }}
+        run: |
+          set -euo pipefail
+          PARAMETER_NAME="/roadmap2u/${STAGE}/access-code-hmac/v1"
+          PARAMETER_ARN="arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/roadmap2u/${STAGE}/access-code-hmac/v1"
+          SECRET_NAME="roadmap2u/${STAGE}/access-code-hmac/v1"
+          SECRET_ARN_PREFIX="arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:${SECRET_NAME}-"
+          RETAINED_SECRET_ARN="${SECRET_ARN_PREFIX}*"
+          METADATA="$(aws ssm describe-parameters \
+            --parameter-filters "Key=Name,Option=Equals,Values=${PARAMETER_NAME}" \
+            --output json)"
+          jq -e \
+            --arg name "$PARAMETER_NAME" '
+              (.Parameters | length) == 1 and
+              .Parameters[0].Name == $name and
+              .Parameters[0].Type == "SecureString" and
+              .Parameters[0].Tier == "Standard" and
+              .Parameters[0].KeyId == "alias/aws/ssm" and
+              .Parameters[0].DataType == "text"
+            ' <<<"$METADATA" >/dev/null
+
+          TAGS="$(aws ssm list-tags-for-resource \
+            --resource-type Parameter \
+            --resource-id "$PARAMETER_NAME" \
+            --output json)"
+          jq -e \
+            --arg stage "$STAGE" '
+              def values($key): [.TagList[] | select(.Key == $key) | .Value];
+              values("roadmap2u-project") == ["RoadMap2U"] and
+              values("roadmap2u-stage") == [$stage] and
+              values("roadmap2u-purpose") == ["sponsored-access-hmac"]
+            ' <<<"$TAGS" >/dev/null
+
+          RESOURCE_POLICIES="$(aws ssm get-resource-policies \
+            --resource-arn "$PARAMETER_ARN" \
+            --output json)"
+          jq -e '((.Policies // []) | length) == 0' <<<"$RESOURCE_POLICIES" >/dev/null
+
+          RETAINED_SECRET_METADATA="$(aws secretsmanager describe-secret \
+            --secret-id "$SECRET_NAME" \
+            --output json)"
+          jq -e \
+            --arg name "$SECRET_NAME" \
+            --arg arn_prefix "$SECRET_ARN_PREFIX" \
+            --arg stage "$STAGE" '
+              def values($key): [(.Tags // [])[] | select(.Key == $key) | .Value];
+              .Name == $name and
+              (.ARN | startswith($arn_prefix)) and
+              .DeletedDate == null and
+              values("roadmap2u-project") == ["RoadMap2U"] and
+              values("roadmap2u-stage") == [$stage]
+            ' <<<"$RETAINED_SECRET_METADATA" >/dev/null
+          RETAINED_SECRET_RESOURCE_POLICY="$(aws secretsmanager get-resource-policy \
+            --secret-id "$SECRET_NAME" \
+            --output json)"
+          jq -e '(.ResourcePolicy // "") == ""' \
+            <<<"$RETAINED_SECRET_RESOURCE_POLICY" >/dev/null
+
+          EXPECTED_RUNTIME_BOUNDARY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/roadmap2u/${STAGE}/roadmap2u-${STAGE}-runtime-boundary"
+          RUNTIME_BOUNDARY_OUTPUT="$(aws cloudformation describe-stacks \
+            --stack-name 'Roadmap-CiBootstrap' \
+            --query "Stacks[0].Outputs[?OutputKey=='${STAGE}RuntimeBoundaryArn'].OutputValue" \
+            --output text)"
+          test "$RUNTIME_BOUNDARY_OUTPUT" = "$EXPECTED_RUNTIME_BOUNDARY_ARN"
+          DEFAULT_VERSION="$(aws iam get-policy \
+            --policy-arn "$EXPECTED_RUNTIME_BOUNDARY_ARN" \
+            --query 'Policy.DefaultVersionId' \
+            --output text)"
+          POLICY_DOCUMENT="$(aws iam get-policy-version \
+            --policy-arn "$EXPECTED_RUNTIME_BOUNDARY_ARN" \
+            --version-id "$DEFAULT_VERSION" \
+            --query 'PolicyVersion.Document' \
+            --output json)"
+          node scripts/validate-hmac-runtime-boundary.mjs \
+            --mode ssm \
+            --parameter-resource "$PARAMETER_ARN" \
+            --retained-secret-resource "$RETAINED_SECRET_ARN" \
+            <<<"$POLICY_DOCUMENT"
+
+      - name: Validate legacy sponsored-access HMAC control plane
+        if: ${{ steps.hmac-capability.outputs.store == 'secrets-manager-v1' }}
+        run: |
+          set -euo pipefail
+          SECRET_NAME="roadmap2u/${STAGE}/access-code-hmac/v1"
+          SECRET_ARN_PREFIX="arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:roadmap2u/${STAGE}/access-code-hmac/v1-"
+          RETAINED_SECRET_ARN="${SECRET_ARN_PREFIX}*"
+          SECRET_METADATA="$(aws secretsmanager describe-secret \
+            --secret-id "$SECRET_NAME" \
+            --output json)"
+          jq -e \
+            --arg name "$SECRET_NAME" \
+            --arg arn_prefix "$SECRET_ARN_PREFIX" \
+            --arg stage "$STAGE" '
+              def values($key): [(.Tags // [])[] | select(.Key == $key) | .Value];
+              .Name == $name and
+              (.ARN | startswith($arn_prefix)) and
+              .DeletedDate == null and
+              values("roadmap2u-project") == ["RoadMap2U"] and
+              values("roadmap2u-stage") == [$stage]
+            ' <<<"$SECRET_METADATA" >/dev/null
+
+          SECRET_RESOURCE_POLICY="$(aws secretsmanager get-resource-policy \
+            --secret-id "$SECRET_NAME" \
+            --output json)"
+          jq -e '(.ResourcePolicy // "") == ""' <<<"$SECRET_RESOURCE_POLICY" >/dev/null
+
+          EXPECTED_RUNTIME_BOUNDARY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/roadmap2u/${STAGE}/roadmap2u-${STAGE}-runtime-boundary"
+          RUNTIME_BOUNDARY_OUTPUT="$(aws cloudformation describe-stacks \
+            --stack-name 'Roadmap-CiBootstrap' \
+            --query "Stacks[0].Outputs[?OutputKey=='${STAGE}RuntimeBoundaryArn'].OutputValue" \
+            --output text)"
+          test "$RUNTIME_BOUNDARY_OUTPUT" = "$EXPECTED_RUNTIME_BOUNDARY_ARN"
+          DEFAULT_VERSION="$(aws iam get-policy \
+            --policy-arn "$EXPECTED_RUNTIME_BOUNDARY_ARN" \
+            --query 'Policy.DefaultVersionId' \
+            --output text)"
+          POLICY_DOCUMENT="$(aws iam get-policy-version \
+            --policy-arn "$EXPECTED_RUNTIME_BOUNDARY_ARN" \
+            --version-id "$DEFAULT_VERSION" \
+            --query 'PolicyVersion.Document' \
+            --output json)"
+          node scripts/validate-hmac-runtime-boundary.mjs \
+            --mode secrets-manager \
+            --retained-secret-resource "$RETAINED_SECRET_ARN" \
+            <<<"$POLICY_DOCUMENT"
 
       - name: Review CDK diff
         env:

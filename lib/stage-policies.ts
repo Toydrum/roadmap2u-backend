@@ -3,6 +3,14 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 
 export type PolicyStage = 'dev' | 'test' | 'prod';
 
+// Append stages only after their SSM control-plane preparation is complete.
+// Keeping prior stages in this set makes the rollout monotonic.
+const ACCESS_CODE_SSM_MIGRATED_STAGES: ReadonlySet<PolicyStage> = new Set(['dev']);
+
+export function isAccessCodeSsmMigratedStage(stage: PolicyStage): boolean {
+  return ACCESS_CODE_SSM_MIGRATED_STAGES.has(stage);
+}
+
 export interface StageManagedPolicies {
   readonly core: iam.ManagedPolicy;
   readonly api: iam.ManagedPolicy;
@@ -204,7 +212,22 @@ function sponsoredAccessBrokerLogGroupArn(stack: Stack, stage: PolicyStage): str
   );
 }
 
-function accessCodeSecretArn(stack: Stack, stage: PolicyStage): string {
+function accessCodeParameterArn(stack: Stack, stage: PolicyStage): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'ssm',
+      region: stack.region,
+      account: stack.account,
+      resource: 'parameter',
+      resourceName: `roadmap2u/${stage}/access-code-hmac/v1`,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    },
+    stack,
+  );
+}
+
+function retainedAccessCodeSecretArn(stack: Stack, stage: PolicyStage): string {
   return Arn.format(
     {
       partition: Aws.PARTITION,
@@ -483,10 +506,19 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         actions: ['dynamodb:PutItem'],
         resources: [auditTableArn(stack, stage)],
       }),
+      ...(isAccessCodeSsmMigratedStage(stage)
+        ? [
+            new iam.PolicyStatement({
+              sid: 'ReadOnlySponsoredAccessHmacParameter',
+              actions: ['ssm:GetParameter'],
+              resources: [accessCodeParameterArn(stack, stage)],
+            }),
+          ]
+        : []),
       new iam.PolicyStatement({
-        sid: 'ReadOnlySponsoredAccessHmacSecret',
+        sid: 'ReadOnlyRetainedSponsoredAccessHmacSecretDuringMigration',
         actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
-        resources: [accessCodeSecretArn(stack, stage)],
+        resources: [retainedAccessCodeSecretArn(stack, stage)],
       }),
       new iam.PolicyStatement({
         sid: 'UseOnlyAccountClosureQueues',
@@ -1162,29 +1194,33 @@ function createCommercialAccessPolicy(stack: Stack, stage: PolicyStage): iam.Man
           sponsoredAccessBrokerLogGroupArn(stack, stage),
         ],
       }),
-      new iam.PolicyStatement({
-        sid: 'GenerateOnlySponsoredAccessSecretPassword',
-        actions: ['secretsmanager:GetRandomPassword'],
-        resources: ['*'],
-        conditions: {
-          StringEquals: { 'aws:RequestedRegion': stack.region },
-        },
-      }),
-      new iam.PolicyStatement({
-        sid: 'ManageOnlySponsoredAccessHmacSecret',
-        actions: [
-          'secretsmanager:CreateSecret',
-          'secretsmanager:DescribeSecret',
-          'secretsmanager:GetResourcePolicy',
-          'secretsmanager:GetSecretValue',
-          'secretsmanager:ListSecretVersionIds',
-          'secretsmanager:PutSecretValue',
-          'secretsmanager:TagResource',
-          'secretsmanager:UntagResource',
-          'secretsmanager:UpdateSecret',
-        ],
-        resources: [accessCodeSecretArn(stack, stage)],
-      }),
+      ...(!isAccessCodeSsmMigratedStage(stage)
+        ? [
+            new iam.PolicyStatement({
+              sid: 'GenerateOnlySponsoredAccessSecretPassword',
+              actions: ['secretsmanager:GetRandomPassword'],
+              resources: ['*'],
+              conditions: {
+                StringEquals: { 'aws:RequestedRegion': stack.region },
+              },
+            }),
+            new iam.PolicyStatement({
+              sid: 'ManageOnlySponsoredAccessHmacSecret',
+              actions: [
+                'secretsmanager:CreateSecret',
+                'secretsmanager:DescribeSecret',
+                'secretsmanager:GetResourcePolicy',
+                'secretsmanager:GetSecretValue',
+                'secretsmanager:ListSecretVersionIds',
+                'secretsmanager:PutSecretValue',
+                'secretsmanager:TagResource',
+                'secretsmanager:UntagResource',
+                'secretsmanager:UpdateSecret',
+              ],
+              resources: [retainedAccessCodeSecretArn(stack, stage)],
+            }),
+          ]
+        : []),
     ],
   });
 }

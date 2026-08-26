@@ -291,6 +291,86 @@ describe('backend GitHub Actions', () => {
     expect(contents.indexOf('Validate commercial inventory control plane')).toBeLessThan(diff);
   });
 
+  it('matches artifact HMAC capability to the current stage control plane', () => {
+    const contents = workflow('deploy.yml');
+    const precheck = namedStep(contents, 'Precheck stage HMAC release capability');
+    const capability = namedStep(contents, 'Resolve stage HMAC release capability');
+    const readiness = namedStep(contents, 'Validate sponsored-access HMAC control plane');
+    const legacyReadiness = namedStep(
+      contents,
+      'Validate legacy sponsored-access HMAC control plane',
+    );
+    const diff = contents.indexOf('Review CDK diff');
+    const manifest = JSON.parse(repositoryFile('shared/backend-release-capabilities.json'));
+
+    expect(manifest.accessCodeHmacStores).toEqual({
+      dev: 'ssm-secure-string-v1',
+      test: 'ssm-secure-string-v1',
+      prod: 'ssm-secure-string-v1',
+    });
+    expect(capability).toContain('id: hmac-capability');
+    expect(precheck).toContain('id: hmac-capability-manifest');
+    expect(precheck).toContain('shared/backend-release-capabilities.json');
+    expect(precheck).toContain('accessCodeHmacStores[$stage]');
+    expect(precheck).toContain('ssm-secure-string-v1');
+    expect(precheck).toContain('secrets-manager-v1');
+    expect(precheck).toContain('jq -e');
+    expect(precheck).toContain('[[ "$OPERATION" != "rollback" ]]');
+    expect(precheck).toContain('[[ ! -f "$CAPABILITIES" ]]');
+    expect(precheck).toContain('dev) EXPECTED_STORE="ssm-secure-string-v1"');
+    expect(precheck).toContain('test|prod) EXPECTED_STORE="secrets-manager-v1"');
+    expect(precheck).toContain('Artifact HMAC store');
+    expect(precheck).toContain('does not match the current');
+    expect(capability).toContain('/backend-release-capabilities/${SHA}');
+    expect(capability).toContain('aws ssm get-parameter');
+    expect(capability).not.toContain('ARTIFACT_STORE="secrets-manager-v1"');
+    expect(capability).toContain('Artifact HMAC store');
+    expect(capability).toContain('does not match the current');
+    expect(capability).toContain('store=$ARTIFACT_STORE');
+    expect(contents.indexOf('Precheck stage HMAC release capability')).toBeLessThan(
+      contents.indexOf('Configure AWS credentials through OIDC'),
+    );
+    expect(contents.indexOf('Resolve stage HMAC release capability')).toBeGreaterThan(
+      contents.indexOf('Verify AWS account and promotion proof'),
+    );
+
+    expect(readiness).toContain(
+      "steps.hmac-capability.outputs.store == 'ssm-secure-string-v1'",
+    );
+    expect(readiness).toContain('aws ssm describe-parameters');
+    expect(readiness).toContain('aws ssm list-tags-for-resource');
+    expect(readiness).toContain('aws ssm get-resource-policies');
+    expect(readiness).toContain('aws secretsmanager describe-secret');
+    expect(readiness).toContain('aws secretsmanager get-resource-policy');
+    expect(readiness).toContain('.DeletedDate == null');
+    expect(readiness).not.toContain('aws ssm get-parameter');
+    expect(readiness).not.toContain('--with-decryption');
+    expect(readiness).toContain('SecureString');
+    expect(readiness).toContain('Standard');
+    expect(readiness).toContain('alias/aws/ssm');
+    expect(readiness).toContain('${STAGE}RuntimeBoundaryArn');
+    expect(readiness).toContain('aws iam get-policy-version');
+    expect(readiness).toContain('validate-hmac-runtime-boundary.mjs');
+    expect(readiness).toContain('--mode ssm');
+    expect(readiness).toContain('--parameter-resource "$PARAMETER_ARN"');
+    expect(readiness).toContain('--retained-secret-resource "$RETAINED_SECRET_ARN"');
+    expect(legacyReadiness).toContain(
+      "steps.hmac-capability.outputs.store == 'secrets-manager-v1'",
+    );
+    expect(legacyReadiness).toContain('aws secretsmanager describe-secret');
+    expect(legacyReadiness).toContain('aws secretsmanager get-resource-policy');
+    expect(legacyReadiness).not.toContain('aws secretsmanager get-secret-value');
+    expect(legacyReadiness).toContain('.DeletedDate == null');
+    expect(legacyReadiness).not.toContain('roadmap2u-purpose');
+    expect(legacyReadiness).toContain('validate-hmac-runtime-boundary.mjs');
+    expect(legacyReadiness).toContain('--mode secrets-manager');
+    expect(legacyReadiness).toContain('--retained-secret-resource "$RETAINED_SECRET_ARN"');
+    expect(contents.indexOf('Validate sponsored-access HMAC control plane')).toBeLessThan(diff);
+    expect(contents.indexOf('Validate legacy sponsored-access HMAC control plane')).toBeLessThan(
+      diff,
+    );
+  });
+
   it('keeps deployment behind one stage environment approval', () => {
     const contents = workflow('deploy.yml');
     expect(contents.match(/^\s+environment:/gm) ?? []).toHaveLength(1);

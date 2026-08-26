@@ -31,7 +31,6 @@ import { AccessLogFormat } from 'aws-cdk-lib/aws-apigateway';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import { ApiGatewayv2DomainProperties, CloudFrontTarget } from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { createHash } from 'node:crypto';
@@ -39,7 +38,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PASSWORD_POLICY } from '@app/auth/auth-types';
-import { createStageManagedPolicies } from './stage-policies';
+import { createStageManagedPolicies, isAccessCodeSsmMigratedStage } from './stage-policies';
 import { createCommercialObservability } from './commercial-observability';
 import { bundledAwsSdkEsm } from './lambda-bundling';
 
@@ -292,6 +291,19 @@ export class RoadmapStack extends Stack {
     const removalPolicy = production ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY;
     const apiDomain = apiDomainFor(stage);
     const parameterPrefix = `/roadmap2u/${stage}`;
+    const accessCodeHmacParameterName = `${parameterPrefix}/access-code-hmac/v1`;
+    const accessCodeHmacParameterArn = Arn.format(
+      {
+        partition: Aws.PARTITION,
+        service: 'ssm',
+        region: this.region,
+        account: this.account,
+        resource: 'parameter',
+        resourceName: accessCodeHmacParameterName.replace(/^\//, ''),
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      },
+      this,
+    );
     const contractHash = props.contractHash ?? calculateContractHash();
     Tags.of(this).add('roadmap2u-project', 'RoadMap2U');
     Tags.of(this).add('roadmap2u-stage', stage);
@@ -393,17 +405,6 @@ export class RoadmapStack extends Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: production },
       deletionProtection: production,
       removalPolicy,
-    });
-    const accessCodeHmacSecret = new secretsmanager.Secret(this, 'AccessCodeHmacSecret', {
-      secretName: `roadmap2u/${stage}/access-code-hmac/v1`,
-      description: `RoadMap2U ${stage} sponsored access code HMAC keys`,
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({ activeVersion: 'v1' }),
-        generateStringKey: 'v1',
-        excludePunctuation: true,
-        passwordLength: 64,
-      },
-      removalPolicy: RemovalPolicy.RETAIN,
     });
     denyCommercialConfigWrites(preSignUpRole, table);
     table.addGlobalSecondaryIndex({
@@ -534,7 +535,7 @@ export class RoadmapStack extends Stack {
       environment: {
         TABLE_NAME: table.tableName,
         AUDIT_TABLE_NAME: accessAuditTable.tableName,
-        ACCESS_CODE_SECRET_ID: accessCodeHmacSecret.secretArn,
+        ACCESS_CODE_PARAMETER_NAME: accessCodeHmacParameterName,
         COMMERCIAL_STAGE: stage,
         SPONSORED_ACCESS_ALLOWLIST: JSON.stringify([
           {
@@ -593,7 +594,13 @@ export class RoadmapStack extends Stack {
         },
       }),
     );
-    accessCodeHmacSecret.grantRead(sponsoredAccessBrokerRole);
+    sponsoredAccessBrokerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadSponsoredAccessHmacParameter',
+        actions: ['ssm:GetParameter'],
+        resources: [accessCodeHmacParameterArn],
+      }),
+    );
     denyCommercialConfigWrites(sponsoredAccessBrokerRole, table);
     const sponsoredAccessBrokerUrl = sponsoredAccessBroker.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.AWS_IAM,
@@ -975,7 +982,7 @@ export class RoadmapStack extends Stack {
       environment: {
         TABLE_NAME: table.tableName,
         AUDIT_TABLE_NAME: accessAuditTable.tableName,
-        ACCESS_CODE_SECRET_ID: accessCodeHmacSecret.secretArn,
+        ACCESS_CODE_PARAMETER_NAME: accessCodeHmacParameterName,
         COMMERCIAL_STAGE: stage,
       },
       bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
@@ -1033,7 +1040,13 @@ export class RoadmapStack extends Stack {
         },
       }),
     );
-    accessCodeHmacSecret.grantRead(accessCodeRedeemerRole);
+    accessCodeRedeemerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadSponsoredAccessHmacParameter',
+        actions: ['ssm:GetParameter'],
+        resources: [accessCodeHmacParameterArn],
+      }),
+    );
     denyCommercialConfigWrites(accessCodeRedeemerRole, table);
 
     const accountClosureRequestName = `roadmap-account-closure-request-${stage}`;
@@ -1961,6 +1974,10 @@ export class RoadmapCiBootstrapStack extends Stack {
     return this.parameterArn(`/roadmap2u/${stage}/backend-release-manifests/*`);
   }
 
+  private backendReleaseCapabilityAttestationArn(stage: DeploymentStage): string {
+    return this.parameterArn(`/roadmap2u/${stage}/backend-release-capabilities/*`);
+  }
+
   private commercialAlarmTopicArn(stage: DeploymentStage): string {
     return `arn:${Aws.PARTITION}:sns:us-east-1:${this.account}:roadmap-commercial-alerts-${stage}`;
   }
@@ -2034,6 +2051,7 @@ export class RoadmapCiBootstrapStack extends Stack {
           ...this.publicConfigArns(stage),
           ...this.markerReadArns(stage, 'backend'),
           this.backendReleaseManifestArn(stage),
+          this.backendReleaseCapabilityAttestationArn(stage),
           this.parameterArn(`/cdk-bootstrap/${bootstrapQualifier}/version`),
         ],
       }),
@@ -2070,6 +2088,43 @@ export class RoadmapCiBootstrapStack extends Stack {
         actions: ['iam:GetPolicy'],
         resources: [
           `arn:${Aws.PARTITION}:iam::${this.account}:policy/roadmap2u/${stage}/roadmap2u-${stage}-inventory-runtime-boundary`,
+        ],
+      }),
+    );
+    if (isAccessCodeSsmMigratedStage(stage)) {
+      role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: `InspectSponsoredAccessHmacMetadata${stage}`,
+          actions: ['ssm:DescribeParameters'],
+          resources: ['*'],
+          conditions: {
+            StringEquals: { 'aws:RequestedRegion': this.region },
+          },
+        }),
+      );
+      role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: `InspectSponsoredAccessHmacTags${stage}`,
+          actions: ['ssm:GetResourcePolicies', 'ssm:ListTagsForResource'],
+          resources: [this.parameterArn(`/roadmap2u/${stage}/access-code-hmac/v1`)],
+        }),
+      );
+    }
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: `InspectSponsoredAccessHmacSecret${stage}`,
+        actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetResourcePolicy'],
+        resources: [
+          `arn:${Aws.PARTITION}:secretsmanager:${this.region}:${this.account}:secret:roadmap2u/${stage}/access-code-hmac/v1-*`,
+        ],
+      }),
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: `ReadSponsoredAccessRuntimeBoundary${stage}`,
+        actions: ['iam:GetPolicy', 'iam:GetPolicyVersion'],
+        resources: [
+          `arn:${Aws.PARTITION}:iam::${this.account}:policy/roadmap2u/${stage}/roadmap2u-${stage}-runtime-boundary`,
         ],
       }),
     );

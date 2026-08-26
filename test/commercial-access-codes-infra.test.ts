@@ -1,5 +1,7 @@
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { RoadmapCiBootstrapStack, RoadmapStack } from '../lib/roadmap-stack';
 
@@ -60,24 +62,54 @@ function statementBySid(statements: any[], sid: string): any {
 }
 
 describe('sponsored access code infrastructure', () => {
+  it('declares the synthesized SSM provider for every stage release artifact', () => {
+    const capabilities = JSON.parse(
+      readFileSync(join(process.cwd(), 'shared', 'backend-release-capabilities.json'), 'utf8'),
+    );
+
+    expect(capabilities).toEqual({
+      schemaVersion: 1,
+      accessCodeHmacStores: {
+        dev: 'ssm-secure-string-v1',
+        test: 'ssm-secure-string-v1',
+        prod: 'ssm-secure-string-v1',
+      },
+    });
+  });
+
   it.each(['dev', 'test', 'prod'] as const)(
-    'creates an AWS-generated versioned %s HMAC secret without plaintext',
+    'references a pre-provisioned %s HMAC SecureString without synthesizing secret material',
     (stage) => {
       const template = backend(stage);
-      const secret = Object.values(template.Resources).find(
+      const [, redeemer] = functionByName(
+        template,
+        `roadmap-access-code-redeemer-${stage}`,
+      );
+      const [, broker] = functionByName(
+        template,
+        `roadmap-sponsored-access-broker-${stage}`,
+      );
+      const secrets = Object.values(template.Resources).filter(
+        (resource: any) => resource.Type === 'AWS::SecretsManager::Secret',
+      );
+      const hmacParameters = Object.values(template.Resources).filter(
         (resource: any) =>
-          resource.Type === 'AWS::SecretsManager::Secret' &&
-          resource.Properties.Name === `roadmap2u/${stage}/access-code-hmac/v1`,
-      ) as any;
+          resource.Type === 'AWS::SSM::Parameter' &&
+          String(resource.Properties?.Name).includes('access-code-hmac'),
+      );
 
-      expect(secret.Properties.GenerateSecretString).toMatchObject({
-        SecretStringTemplate: JSON.stringify({ activeVersion: 'v1' }),
-        GenerateStringKey: 'v1',
-        ExcludePunctuation: true,
-        PasswordLength: 64,
-      });
-      expect(secret.Properties.SecretString).toBeUndefined();
+      expect(secrets).toEqual([]);
+      expect(hmacParameters).toEqual([]);
+      expect(JSON.stringify(template)).not.toContain('GenerateSecretString');
       expect(JSON.stringify(template)).not.toContain('RM2U1.');
+      for (const fn of [redeemer, broker]) {
+        expect(fn.Properties.Environment.Variables).toMatchObject({
+          ACCESS_CODE_PARAMETER_NAME: `/roadmap2u/${stage}/access-code-hmac/v1`,
+        });
+        expect(fn.Properties.Environment.Variables).not.toHaveProperty(
+          'ACCESS_CODE_SECRET_ID',
+        );
+      }
     },
     20_000,
   );
@@ -149,7 +181,6 @@ describe('sponsored access code infrastructure', () => {
       expect(fn.Properties.Environment.Variables).toMatchObject({
         TABLE_NAME: { Ref: expect.stringMatching(/^Table/) },
         AUDIT_TABLE_NAME: { Ref: expect.stringMatching(/^AccessAuditTable/) },
-        ACCESS_CODE_SECRET_ID: { Ref: expect.stringMatching(/^AccessCodeHmacSecret/) },
         COMMERCIAL_STAGE: 'dev',
       });
     }
@@ -175,10 +206,37 @@ describe('sponsored access code infrastructure', () => {
     expect(brokerPolicy).toMatch(/dynamodb:GetItem/);
     expect(brokerPolicy).toMatch(/dynamodb:ConditionCheckItem/);
     expect(brokerPolicy).toContain('TransactWriteItems');
-    expect(redeemerPolicy).toMatch(/secretsmanager:GetSecretValue/);
-    expect(brokerPolicy).toMatch(/secretsmanager:GetSecretValue/);
-    expect(redeemerPolicy).not.toMatch(/secretsmanager:(?:Put|Update|Delete)/);
-    expect(brokerPolicy).not.toMatch(/secretsmanager:(?:Put|Update|Delete)/);
+    const expectedParameterArn = {
+      'Fn::Join': [
+        '',
+        [
+          'arn:',
+          { Ref: 'AWS::Partition' },
+          `:ssm:us-east-1:${ACCOUNT}:parameter/roadmap2u/dev/access-code-hmac/v1`,
+        ],
+      ],
+    };
+    for (const statements of [redeemerStatements, brokerStatements]) {
+      const ssmStatements = statements.filter((statement) => {
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        return actions.some((action: string) => action?.startsWith('ssm:'));
+      });
+      const ssmActions = ssmStatements.flatMap((statement) =>
+        Array.isArray(statement.Action) ? statement.Action : [statement.Action],
+      );
+
+      expect(ssmStatements).toHaveLength(1);
+      expect(ssmStatements[0]).toMatchObject({
+        Action: 'ssm:GetParameter',
+        Effect: 'Allow',
+        Resource: expectedParameterArn,
+      });
+      expect(ssmActions).toEqual(['ssm:GetParameter']);
+      expect(JSON.stringify(statements)).not.toMatch(
+        /ssm:(?:GetParameterHistory|GetParameters|GetParametersByPath)/,
+      );
+      expect(JSON.stringify(statements)).not.toMatch(/secretsmanager:/i);
+    }
 
     expect(
       statementBySid(brokerStatements, 'ReadSponsoredAccessState').Condition,
@@ -247,20 +305,27 @@ describe('sponsored access code infrastructure', () => {
       expect(JSON.stringify(deployStatements)).toContain(
         `:function:roadmap-sponsored-access-broker-${stage}`,
       );
-      expect(JSON.stringify(deployStatements)).toContain(
-        `secret:roadmap2u/${stage}/access-code-hmac/v1-*`,
+      const randomPassword = deployStatements.find(
+        (statement: any) => statement.Sid === 'GenerateOnlySponsoredAccessSecretPassword',
       );
-      expect(
-        deployStatements.find(
-          (statement: any) => statement.Sid === 'GenerateOnlySponsoredAccessSecretPassword',
-        ),
-      ).toEqual({
-        Action: 'secretsmanager:GetRandomPassword',
-        Condition: { StringEquals: { 'aws:RequestedRegion': 'us-east-1' } },
-        Effect: 'Allow',
-        Resource: '*',
-        Sid: 'GenerateOnlySponsoredAccessSecretPassword',
-      });
+      const secretManagement = deployStatements.find(
+        (statement: any) => statement.Sid === 'ManageOnlySponsoredAccessHmacSecret',
+      );
+      if (stage === 'dev') {
+        expect(randomPassword).toBeUndefined();
+        expect(secretManagement).toBeUndefined();
+        expect(JSON.stringify(deployStatements)).not.toMatch(/secretsmanager:/i);
+      } else {
+        expect(randomPassword).toMatchObject({
+          Action: 'secretsmanager:GetRandomPassword',
+          Effect: 'Allow',
+          Resource: '*',
+        });
+        expect(secretManagement.Action).toContain('secretsmanager:GetSecretValue');
+        expect(JSON.stringify(secretManagement.Resource)).toContain(
+          `:secret:roadmap2u/${stage}/access-code-hmac/v1-`,
+        );
+      }
       expect(
         deployStatements
           .filter(
