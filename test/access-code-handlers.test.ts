@@ -51,7 +51,7 @@ describe('access-code HTTP boundaries', () => {
         grantId: 'code-test',
         sourceKind: 'sponsored',
         status: 'active',
-        catalogVersion: '2026-08-prepayment-v1',
+        catalogVersion: '2026-09-family-v1',
         planKey: 'premium',
         limits: { maxActiveTrees: null, maxVisibleBranchesPerTree: null },
         capabilities: { cloudSync: true, social: true, family: false },

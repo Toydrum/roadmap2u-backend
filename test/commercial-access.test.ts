@@ -20,13 +20,65 @@ import {
 } from '../lambda/commercial/access-resolver';
 
 describe('prepayment commercial catalog', () => {
-  it('publishes the exact Free and Premium launch offer without enabling payments', () => {
+  it('publishes the exact individual and family offers without enabling payments', () => {
     expect(PREPAYMENT_CATALOG).toEqual({
-      version: '2026-08-prepayment-v1',
-      pricingVersion: 'launch-2026',
+      version: '2026-09-family-v1',
+      pricingVersion: 'family-launch-2026',
       currency: 'MXN',
       taxInclusive: true,
       paymentsEnabled: false,
+      offers: [
+        {
+          offerKey: 'premium_individual',
+          planKey: 'premium',
+          minorSeats: 0,
+          additionalResponsibleSeat: 0,
+          prices: {
+            month: { amountMinor: 9_900 },
+            year: { amountMinor: 94_900 },
+          },
+        },
+        {
+          offerKey: 'family_1_minor',
+          planKey: 'premium',
+          minorSeats: 1,
+          additionalResponsibleSeat: 0,
+          prices: {
+            month: { amountMinor: 14_900 },
+            year: { amountMinor: 142_900 },
+          },
+        },
+        {
+          offerKey: 'family_2_minors',
+          planKey: 'premium',
+          minorSeats: 2,
+          additionalResponsibleSeat: 0,
+          prices: {
+            month: { amountMinor: 18_900 },
+            year: { amountMinor: 180_900 },
+          },
+        },
+        {
+          offerKey: 'family_1_minor_1_additional_responsible',
+          planKey: 'premium',
+          minorSeats: 1,
+          additionalResponsibleSeat: 1,
+          prices: {
+            month: { amountMinor: 19_900 },
+            year: { amountMinor: 190_900 },
+          },
+        },
+        {
+          offerKey: 'family_2_minors_1_additional_responsible',
+          planKey: 'premium',
+          minorSeats: 2,
+          additionalResponsibleSeat: 1,
+          prices: {
+            month: { amountMinor: 23_900 },
+            year: { amountMinor: 228_900 },
+          },
+        },
+      ],
       plans: {
         free: {
           limits: { maxActiveTrees: 2, maxVisibleBranchesPerTree: 10 },
@@ -51,7 +103,7 @@ describe('prepayment commercial catalog', () => {
   it('allowlists one Premium offer whose cadence never changes capabilities', () => {
     expect(ADMIN_GRANT_OFFERS).toEqual({
       premium_demo: {
-        catalogVersion: '2026-08-prepayment-v1',
+        catalogVersion: '2026-09-family-v1',
         planKey: 'premium',
         minDurationSeconds: 86_400,
         maxDurationSeconds: 157_680_000,

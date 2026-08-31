@@ -61,9 +61,9 @@ describe('vendored frontend contracts', () => {
       commitSha: expect.stringMatching(/^[0-9a-f]{40}$/),
       contractHash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
-    expect(lock['commitSha']).toBe('74475c58336ff658ac3d479d36cbd30019541e39');
+    expect(lock['commitSha']).toBe('81df0894fe5643b31963a11b528f6a14a00ea5dd');
     expect(lock['contractHash']).toBe(
-      'c5192d0edf8b801e88d6aff680a89b9e81fd527dc4faeb0cbe5d0a0af62bc442',
+      '433ff83548ac9ec806a2352a59b403438220bb05f25c2fa70dc1e776d253d61c',
     );
     expect(lock['contractHash']).toBe(contractHash(join(backendRoot, 'shared')));
   });
@@ -265,6 +265,15 @@ describe('vendored frontend contracts', () => {
         mkdirSync(dirname(source), { recursive: true });
         writeFileSync(source, `// ${relativePath}\n`, 'utf8');
       }
+      const runGit = (...args: string[]) =>
+        spawnSync('git', ['-C', fakeFrontend, ...args], { encoding: 'utf8' });
+      expect(runGit('init', '--quiet').status).toBe(0);
+      expect(runGit('config', 'user.name', 'RoadMap2U Contract Test').status).toBe(0);
+      expect(runGit('config', 'user.email', 'contract-test@roadmap2u.invalid').status).toBe(0);
+      expect(runGit('config', 'commit.gpgsign', 'false').status).toBe(0);
+      expect(runGit('add', 'src/app/core').status).toBe(0);
+      expect(runGit('commit', '--quiet', '-m', 'contract fixture').status).toBe(0);
+      const commitSha = runGit('rev-parse', 'HEAD').stdout.trim();
 
       const result = spawnSync(process.execPath, [scriptCopy], {
         cwd: fakeBackend,
@@ -278,6 +287,14 @@ describe('vendored frontend contracts', () => {
           `// ${relativePath}\n`,
         );
       }
+      expect(
+        JSON.parse(readFileSync(join(fakeBackend, 'shared', 'contracts-source.json'), 'utf8')),
+      ).toEqual({
+        schemaVersion: 1,
+        repository: 'Toydrum/RoadMap2U',
+        commitSha,
+        contractHash: contractHash(join(fakeBackend, 'shared')),
+      });
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
     }

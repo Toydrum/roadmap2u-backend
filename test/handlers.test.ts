@@ -734,7 +734,21 @@ describe('ApiError', () => {
     ['SYNC_CLIENT_UPGRADE_REQUIRED', 426],
     ['USAGE_MIGRATION_IN_PROGRESS', 409],
     ['COMMERCIAL_CONFIGURATION_UNAVAILABLE', 503],
-  ] as const)('maps commercial error %s to HTTP %i', (code, status) => {
+    ['ADULT_MINOR_FRIENDSHIP_FORBIDDEN', 400],
+    ['ACCOUNT_TYPE_INCOMPATIBLE', 409],
+    ['RESPONSIBLE_SCOPE_REQUIRED', 403],
+    ['CONSENT_INCOMPLETE', 409],
+    ['MINOR_ALREADY_COVERED', 409],
+    ['HOUSEHOLD_CAPACITY_EXCEEDED', 409],
+    ['CURRENT_PRIMARY_APPROVAL_REQUIRED', 403],
+    ['LEGAL_REGION_UNSUPPORTED', 422],
+    ['OFFER_NOT_ALLOWED', 400],
+    ['CHECKOUT_IN_PROGRESS', 409],
+    ['SUBSCRIPTION_CONFLICT', 409],
+    ['PAYMENT_REQUIRED', 402],
+    ['REAUTHENTICATION_REQUIRED', 401],
+    ['STALE_REVISION', 409],
+  ] as const)('maps server error %s to HTTP %i', (code, status) => {
     expect(errorResponse(new ApiError(code)).statusCode).toBe(status);
   });
 });

@@ -62,7 +62,7 @@ function access(ownerSub: string, social: boolean): AccessItem {
     sk: 'ACCESS',
     ownerSub,
     effectivePlanKey: social ? 'premium' : 'free',
-    catalogVersion: '2026-08-prepayment-v1',
+    catalogVersion: '2026-09-family-v1',
     status: 'active',
     activeSources: social
       ? [{ kind: 'sponsored', sourceId: 'premium-test', planKey: 'premium', validUntil: null }]
@@ -86,7 +86,7 @@ function premiumGrant(ownerSub: string): GrantItem {
     grantId: 'premium-test',
     sourceKind: 'sponsored',
     status: 'active',
-    catalogVersion: '2026-08-prepayment-v1',
+    catalogVersion: '2026-09-family-v1',
     planKey: 'premium',
     limits: { maxActiveTrees: null, maxVisibleBranchesPerTree: null },
     capabilities: { cloudSync: true, social: true, family: false },

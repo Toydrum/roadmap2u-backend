@@ -170,7 +170,7 @@ function freeAccess(ownerSub: string): AccessItem {
     sk: 'ACCESS',
     ownerSub,
     effectivePlanKey: 'free',
-    catalogVersion: '2026-08-prepayment-v1',
+    catalogVersion: '2026-09-family-v1',
     status: 'active',
     activeSources: [{ kind: 'default', sourceId: 'default', planKey: 'free', validUntil: null }],
     limits: { maxActiveTrees: 2, maxVisibleBranchesPerTree: 10 },

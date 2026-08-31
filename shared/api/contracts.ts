@@ -23,12 +23,83 @@ import {
 
 export type PlanKey = 'free' | 'premium';
 
+export type OfferKey =
+  | 'premium_individual'
+  | 'family_1_minor'
+  | 'family_2_minors'
+  | 'family_1_minor_1_additional_responsible'
+  | 'family_2_minors_1_additional_responsible';
+
+export type BillingInterval = 'month' | 'year';
+
+export interface OfferDefinition {
+  offerKey: OfferKey;
+  planKey: 'premium';
+  minorSeats: 0 | 1 | 2;
+  additionalResponsibleSeat: 0 | 1;
+  prices: Record<BillingInterval, { amountMinor: number }>;
+}
+
+export const FAMILY_OFFER_DEFINITIONS: readonly OfferDefinition[] = Object.freeze([
+  Object.freeze({
+    offerKey: 'premium_individual',
+    planKey: 'premium',
+    minorSeats: 0,
+    additionalResponsibleSeat: 0,
+    prices: Object.freeze({
+      month: Object.freeze({ amountMinor: 9_900 }),
+      year: Object.freeze({ amountMinor: 94_900 }),
+    }),
+  }),
+  Object.freeze({
+    offerKey: 'family_1_minor',
+    planKey: 'premium',
+    minorSeats: 1,
+    additionalResponsibleSeat: 0,
+    prices: Object.freeze({
+      month: Object.freeze({ amountMinor: 14_900 }),
+      year: Object.freeze({ amountMinor: 142_900 }),
+    }),
+  }),
+  Object.freeze({
+    offerKey: 'family_2_minors',
+    planKey: 'premium',
+    minorSeats: 2,
+    additionalResponsibleSeat: 0,
+    prices: Object.freeze({
+      month: Object.freeze({ amountMinor: 18_900 }),
+      year: Object.freeze({ amountMinor: 180_900 }),
+    }),
+  }),
+  Object.freeze({
+    offerKey: 'family_1_minor_1_additional_responsible',
+    planKey: 'premium',
+    minorSeats: 1,
+    additionalResponsibleSeat: 1,
+    prices: Object.freeze({
+      month: Object.freeze({ amountMinor: 19_900 }),
+      year: Object.freeze({ amountMinor: 190_900 }),
+    }),
+  }),
+  Object.freeze({
+    offerKey: 'family_2_minors_1_additional_responsible',
+    planKey: 'premium',
+    minorSeats: 2,
+    additionalResponsibleSeat: 1,
+    prices: Object.freeze({
+      month: Object.freeze({ amountMinor: 23_900 }),
+      year: Object.freeze({ amountMinor: 228_900 }),
+    }),
+  }),
+]);
+
 export interface PlanCatalog {
-  version: '2026-08-prepayment-v1';
-  pricingVersion: 'launch-2026';
+  version: '2026-09-family-v1';
+  pricingVersion: 'family-launch-2026';
   currency: 'MXN';
   taxInclusive: true;
   paymentsEnabled: false;
+  offers: readonly OfferDefinition[];
   plans: {
     free: {
       limits: { maxActiveTrees: 2; maxVisibleBranchesPerTree: 10 };
@@ -50,11 +121,12 @@ export interface PlanCatalog {
  * In particular `paymentsEnabled` cannot be changed by a client or flag.
  */
 export const PREPAYMENT_PLAN_CATALOG: PlanCatalog = Object.freeze({
-  version: '2026-08-prepayment-v1',
-  pricingVersion: 'launch-2026',
+  version: '2026-09-family-v1',
+  pricingVersion: 'family-launch-2026',
   currency: 'MXN',
   taxInclusive: true,
   paymentsEnabled: false,
+  offers: FAMILY_OFFER_DEFINITIONS,
   plans: Object.freeze({
     free: Object.freeze({
       limits: Object.freeze({ maxActiveTrees: 2, maxVisibleBranchesPerTree: 10 }),
@@ -76,6 +148,9 @@ export interface AccessSource {
   sourceId: string;
   planKey: PlanKey;
   validUntil: number | null;
+  scope?: 'individual' | 'family_member';
+  householdId?: string;
+  seatType?: SeatType;
 }
 
 export interface AccessSummary {
@@ -102,6 +177,61 @@ export interface AccessSummary {
 }
 
 export const ACCESS_OFFLINE_LEASE_MS = 24 * 60 * 60 * 1000;
+
+export const ACCOUNT_STATES = Object.freeze([
+  'minor_supervised',
+  'adult_transition_pending',
+  'adult_self_managed',
+] as const);
+export type AccountState = (typeof ACCOUNT_STATES)[number];
+
+export const HOUSEHOLD_STATES = Object.freeze([
+  'active',
+  'disputed',
+  'legacy_over_capacity',
+  'closed',
+] as const);
+export type HouseholdState = (typeof HOUSEHOLD_STATES)[number];
+
+export const SUPERVISION_ROLES = Object.freeze([
+  'primary_responsible',
+  'additional_responsible',
+] as const);
+export type SupervisionRole = (typeof SUPERVISION_ROLES)[number];
+
+export const SEAT_TYPES = Object.freeze(['minor', 'additional_responsible'] as const);
+export type SeatType = (typeof SEAT_TYPES)[number];
+
+export const COVERAGE_STATES = Object.freeze([
+  'active',
+  'grace',
+  'scheduled_end',
+  'ended',
+] as const);
+export type CoverageState = (typeof COVERAGE_STATES)[number];
+
+export const FRIENDSHIP_CLASSES = Object.freeze(['adult_adult', 'minor_minor'] as const);
+export type FriendshipClass = (typeof FRIENDSHIP_CLASSES)[number];
+
+export const CONSENT_KINDS = Object.freeze([
+  'requester_action',
+  'requester_responsible_approval',
+  'recipient_acceptance',
+  'recipient_responsible_approval',
+] as const);
+export type ConsentKind = (typeof CONSENT_KINDS)[number];
+
+export const BILLING_STATES = Object.freeze([
+  'none',
+  'checkout_pending',
+  'active',
+  'cancel_at_period_end',
+  'past_due_grace',
+  'scheduled_change',
+  'expired',
+  'payment_review',
+] as const);
+export type BillingState = (typeof BILLING_STATES)[number];
 
 /** Missing access is always a bounded Free lease; it never guesses Premium. */
 export function createFreeAccessSummary(now: number = Date.now()): AccessSummary {
@@ -149,6 +279,228 @@ export interface PublicProfile {
   displayName: string;
   accountType: AccountType;
   socialEnabled?: boolean;
+}
+
+export const FAMILY_BILLING_CONTRACT_VERSION = 1 as const;
+
+export interface HouseholdMinorView {
+  user: PublicProfile;
+  seat: 1 | 2;
+  majorityAt: string;
+  coverageState: CoverageState | null;
+}
+
+export interface HouseholdAdditionalResponsibleView {
+  user: PublicProfile;
+  minorIds: string[];
+  coverageState: CoverageState | null;
+}
+
+export interface HouseholdView {
+  contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
+  householdId: string;
+  country: 'MX';
+  state: HouseholdState;
+  myRole: SupervisionRole | null;
+  primaryResponsible: PublicProfile;
+  additionalResponsible: HouseholdAdditionalResponsibleView | null;
+  minors: HouseholdMinorView[];
+  availableMinorSeats: 0 | 1 | 2;
+  additionalResponsibleSeatAvailable: boolean;
+  revision: number;
+}
+
+export const MINOR_FRIEND_REQUEST_STATES = Object.freeze([
+  'pending',
+  'active',
+  'rejected',
+  'revoked',
+  'expired',
+] as const);
+export type MinorFriendRequestState = (typeof MINOR_FRIEND_REQUEST_STATES)[number];
+
+export interface MinorFriendConsentView {
+  kind: ConsentKind;
+  recordedAt: number;
+}
+
+export interface MinorFriendRequestView {
+  contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
+  requestId: string;
+  friendshipClass: 'minor_minor';
+  state: MinorFriendRequestState;
+  requester: PublicProfile;
+  recipient: PublicProfile;
+  consents: MinorFriendConsentView[];
+  expiresAt: number;
+  revision: number;
+}
+
+export interface PendingBillingChangeView {
+  offerKey: OfferKey;
+  interval: BillingInterval;
+  effectiveAt: number;
+  keepCoveredMinorId: string | null;
+}
+
+export interface BillingSummary {
+  contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
+  availability: 'disabled' | 'available' | 'recovery_required';
+  householdId: string;
+  payerAccountId: string;
+  state: BillingState;
+  currentOfferKey: OfferKey | null;
+  interval: BillingInterval | null;
+  paidThrough: number | null;
+  graceUntil: number | null;
+  cancelAtPeriodEnd: boolean;
+  pendingChange: PendingBillingChangeView | null;
+  revision: number;
+}
+
+export interface BillingCommandBase {
+  householdId: string;
+  expectedHouseholdRevision: number;
+  commandId: string;
+}
+
+export interface CreateCheckoutRequest extends BillingCommandBase {
+  offerKey: OfferKey;
+  interval: BillingInterval;
+}
+
+export interface PreviewSubscriptionChangeRequest extends BillingCommandBase {
+  offerKey: OfferKey;
+  interval: BillingInterval;
+  keepCoveredMinorId?: string;
+}
+
+export interface ApplySubscriptionChangeRequest extends PreviewSubscriptionChangeRequest {}
+
+export interface CreatePortalRequest extends BillingCommandBase {}
+
+export interface FamilyCommandBase {
+  householdId: string;
+  expectedHouseholdRevision: number;
+  commandId: string;
+  policyVersion: string;
+}
+
+export interface CreateMinorRequest extends FamilyCommandBase {
+  username: string;
+  country: 'MX';
+  majorityAt: string;
+  declarationVersion: string;
+  consentVersion: string;
+}
+
+export interface CreateMinorResponse {
+  contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
+  household: HouseholdView;
+  minor: UserProfile;
+  tempPassword: string;
+}
+
+export const MINOR_LINK_REQUEST_STATES = Object.freeze([
+  'pending',
+  'approved',
+  'rejected',
+  'expired',
+] as const);
+export type MinorLinkRequestState = (typeof MINOR_LINK_REQUEST_STATES)[number];
+
+export interface MinorLinkRequestView {
+  contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
+  requestId: string;
+  householdId: string;
+  minor: PublicProfile;
+  state: MinorLinkRequestState;
+  expiresAt: number;
+  revision: number;
+}
+
+export interface CreateMinorLinkRequest extends FamilyCommandBase {
+  code: string;
+}
+
+export interface ApproveMinorLinkRequest extends FamilyCommandBase {}
+
+export const ADDITIONAL_RESPONSIBLE_INVITATION_STATES = Object.freeze([
+  'pending',
+  'accepted',
+  'revoked',
+  'expired',
+] as const);
+export type AdditionalResponsibleInvitationState =
+  (typeof ADDITIONAL_RESPONSIBLE_INVITATION_STATES)[number];
+
+export interface AdditionalResponsibleInvitationView {
+  contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
+  invitationId: string;
+  householdId: string;
+  minorIds: string[];
+  state: AdditionalResponsibleInvitationState;
+  expiresAt: number;
+  revision: number;
+}
+
+export interface CreateAdditionalResponsibleInvitationRequest extends FamilyCommandBase {
+  minorIds: string[];
+}
+
+export interface AcceptAdditionalResponsibleInvitationRequest extends FamilyCommandBase {}
+
+export interface ReplaceAdditionalResponsibleScopeRequest extends FamilyCommandBase {
+  minorIds: string[];
+}
+
+export interface RevokeAdditionalResponsibleRequest extends FamilyCommandBase {}
+
+export interface TransferPrimaryResponsibilityRequest extends FamilyCommandBase {
+  newPrimaryAccountId: string;
+}
+
+export interface CreateAdultFriendRequestRequest {
+  code: string;
+}
+
+export interface CreateMinorInviteCodeRequest {
+  minorId: string;
+}
+
+export interface CreateMinorFriendRequestRequest {
+  minorId: string;
+  code: string;
+}
+
+export interface MinorFriendActionRequest {
+  minorId: string;
+  commandId: string;
+  policyVersion: string;
+}
+
+export interface BillingRedirectView {
+  contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
+  url: string;
+  expiresAt: number;
+}
+
+export interface SubscriptionChangePreviewView {
+  contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
+  householdId: string;
+  currentOfferKey: OfferKey | null;
+  targetOfferKey: OfferKey;
+  interval: BillingInterval;
+  amountDueMinor: number;
+  effectiveAt: number;
+  requiresPayment: boolean;
+  revision: number;
+}
+
+export interface BillingActionView {
+  contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
+  summary: BillingSummary;
+  redirect: BillingRedirectView | null;
 }
 
 /**
@@ -369,6 +721,20 @@ export const SERVER_API_ERROR_CODES = Object.freeze([
   'SYNC_CLIENT_UPGRADE_REQUIRED',
   'USAGE_MIGRATION_IN_PROGRESS',
   'COMMERCIAL_CONFIGURATION_UNAVAILABLE',
+  'ADULT_MINOR_FRIENDSHIP_FORBIDDEN',
+  'ACCOUNT_TYPE_INCOMPATIBLE',
+  'RESPONSIBLE_SCOPE_REQUIRED',
+  'CONSENT_INCOMPLETE',
+  'MINOR_ALREADY_COVERED',
+  'HOUSEHOLD_CAPACITY_EXCEEDED',
+  'CURRENT_PRIMARY_APPROVAL_REQUIRED',
+  'LEGAL_REGION_UNSUPPORTED',
+  'OFFER_NOT_ALLOWED',
+  'CHECKOUT_IN_PROGRESS',
+  'SUBSCRIPTION_CONFLICT',
+  'PAYMENT_REQUIRED',
+  'REAUTHENTICATION_REQUIRED',
+  'STALE_REVISION',
 ] as const);
 
 export type ServerApiErrorCode = (typeof SERVER_API_ERROR_CODES)[number];
@@ -441,6 +807,24 @@ export interface RoadmapApi {
   removeChildFriendship(userId: string, friendshipId: string): Promise<void>;
   cancelChildRequest(userId: string, requestId: string): Promise<void>;
 
+  // family v2 (additive while legacy routes remain available)
+  getHousehold(): Promise<HouseholdView>;
+  createMinor(req: CreateMinorRequest): Promise<CreateMinorResponse>;
+  createMinorLinkRequest(req: CreateMinorLinkRequest): Promise<MinorLinkRequestView>;
+  approveMinorLinkRequest(requestId: string, req: ApproveMinorLinkRequest): Promise<HouseholdView>;
+  createAdditionalResponsibleInvitation(
+    req: CreateAdditionalResponsibleInvitationRequest,
+  ): Promise<AdditionalResponsibleInvitationView>;
+  acceptAdditionalResponsibleInvitation(
+    invitationId: string,
+    req: AcceptAdditionalResponsibleInvitationRequest,
+  ): Promise<HouseholdView>;
+  replaceAdditionalResponsibleScope(
+    req: ReplaceAdditionalResponsibleScopeRequest,
+  ): Promise<HouseholdView>;
+  revokeAdditionalResponsible(req: RevokeAdditionalResponsibleRequest): Promise<HouseholdView>;
+  transferPrimaryResponsibility(req: TransferPrimaryResponsibilityRequest): Promise<HouseholdView>;
+
   // friends (social-enabled accounts only; declines are silent by design)
   getFriends(): Promise<FriendsResponse>;
   getFriendCode(): Promise<CodeGrant>;
@@ -455,6 +839,32 @@ export interface RoadmapApi {
   declineFriendRequest(requestId: string): Promise<void>;
   cancelFriendRequest(requestId: string): Promise<void>;
   removeFriend(friendshipId: string): Promise<void>;
+
+  // social v2
+  createAdultFriendRequest(req: CreateAdultFriendRequestRequest): Promise<FriendRequestView>;
+  acceptAdultFriendRequest(requestId: string): Promise<FriendView>;
+  removeSocialFriendship(friendshipId: string): Promise<void>;
+  createMinorInviteCode(req: CreateMinorInviteCodeRequest): Promise<CodeGrant>;
+  createMinorFriendRequest(req: CreateMinorFriendRequestRequest): Promise<MinorFriendRequestView>;
+  acceptMinorFriendRequest(
+    requestId: string,
+    req: MinorFriendActionRequest,
+  ): Promise<MinorFriendRequestView>;
+  approveMinorFriendRequest(
+    requestId: string,
+    req: MinorFriendActionRequest,
+  ): Promise<MinorFriendRequestView>;
+  rejectMinorFriendRequest(requestId: string, req: MinorFriendActionRequest): Promise<void>;
+  removeMinorFriendship(friendshipId: string): Promise<void>;
+
+  // billing v1
+  getBillingSummary(): Promise<BillingSummary>;
+  createCheckout(req: CreateCheckoutRequest): Promise<BillingRedirectView>;
+  previewSubscriptionChange(
+    req: PreviewSubscriptionChangeRequest,
+  ): Promise<SubscriptionChangePreviewView>;
+  applySubscriptionChange(req: ApplySubscriptionChangeRequest): Promise<BillingActionView>;
+  createPortalSession(req: CreatePortalRequest): Promise<BillingRedirectView>;
 
   // forests & sync
   getForest(userId: string): Promise<ForestSnapshot>;
@@ -482,6 +892,16 @@ export const API_PATHS = Object.freeze({
   familyInvites: '/family/invites',
   familyInvitesAccept: '/family/invites/accept',
   familyInvite: (code: string) => `/family/invites/${code}`,
+  familyHousehold: '/family/household',
+  familyMinors: '/family/minors',
+  familyMinorLinkRequests: '/family/minor-link-requests',
+  familyMinorLinkRequestApprove: (id: string) => `/family/minor-link-requests/${id}/approve`,
+  familyAdditionalResponsibleInvitations: '/family/additional-responsible-invitations',
+  familyAdditionalResponsibleInvitationAccept: (id: string) =>
+    `/family/additional-responsible-invitations/${id}/accept`,
+  familyAdditionalResponsibleScope: '/family/additional-responsible/scope',
+  familyAdditionalResponsible: '/family/additional-responsible',
+  familyTransferPrimaryResponsibility: '/family/transfer-primary-responsibility',
   friends: '/friends',
   friendCode: '/friends/code',
   friendCodeRotate: '/friends/code/rotate',
@@ -490,6 +910,22 @@ export const API_PATHS = Object.freeze({
   friendRequestDecline: (id: string) => `/friends/requests/${id}/decline`,
   friendRequest: (id: string) => `/friends/requests/${id}`,
   friend: (id: string) => `/friends/${id}`,
+  socialAdultFriendRequests: '/social/adult-friend-requests',
+  socialAdultFriendRequestAccept: (id: string) => `/social/adult-friend-requests/${id}/accept`,
+  socialFriendship: (id: string) => `/social/friendships/${id}`,
+  socialMinorInviteCodes: '/social/minor-invite-codes',
+  socialMinorFriendRequests: '/social/minor-friend-requests',
+  socialMinorFriendRequestAccept: (id: string) =>
+    `/social/minor-friend-requests/${id}/minor-accept`,
+  socialMinorFriendRequestResponsibleApprove: (id: string) =>
+    `/social/minor-friend-requests/${id}/responsible-approve`,
+  socialMinorFriendRequestReject: (id: string) => `/social/minor-friend-requests/${id}/reject`,
+  socialMinorFriendship: (id: string) => `/social/minor-friendships/${id}`,
+  billingSummary: '/billing/summary',
+  billingCheckout: '/billing/checkout',
+  billingChangePreview: '/billing/change-preview',
+  billingChange: '/billing/change',
+  billingPortal: '/billing/portal',
   userForest: (id: string) => `/users/${id}/forest`,
   syncChanges: '/sync/changes',
   syncPush: '/sync/push',
