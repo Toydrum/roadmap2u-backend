@@ -130,7 +130,7 @@ jobs:
         working-directory: .
 
       - name: Checkout immutable backend release
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           fetch-depth: 0
@@ -148,7 +148,7 @@ jobs:
           fi
 
       - name: Use Node.js 22
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -160,7 +160,7 @@ jobs:
 
       - name: Checkout pinned frontend contract source
         if: ${{ needs.prepare.outputs.operation == 'deploy' }}
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Toydrum/RoadMap2U
           ref: ${{ steps.contract-source.outputs.commit_sha }}
@@ -235,7 +235,7 @@ jobs:
           echo "store=$ARTIFACT_STORE" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials through OIDC
-        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           role-session-name: backend-${{ needs.prepare.outputs.stage }}-${{ github.run_id }}

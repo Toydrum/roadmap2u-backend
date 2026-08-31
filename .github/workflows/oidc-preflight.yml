@@ -21,7 +21,7 @@ jobs:
     environment: ${{ inputs.stage }}
     steps:
       - name: Configure AWS credentials through OIDC
-        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           role-session-name: backend-identity-${{ inputs.stage }}-${{ github.run_id }}
@@ -46,7 +46,7 @@ jobs:
     environment: prod
     steps:
       - name: Configure the read-only DNS planning identity
-        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ vars.DNS_PLAN_ROLE_ARN }}
           role-session-name: backend-identity-prod-dns-plan-${{ github.run_id }}
@@ -71,7 +71,7 @@ jobs:
     environment: prod-dns-cutover
     steps:
       - name: Configure the DNS cutover identity
-        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ vars.DNS_CUTOVER_ROLE_ARN }}
           role-session-name: backend-identity-prod-dns-cutover-${{ github.run_id }}
