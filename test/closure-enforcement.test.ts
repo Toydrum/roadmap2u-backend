@@ -21,6 +21,9 @@ import type { Deps, LinkItem, ProfileItem, RecordItem } from '../lambda/db';
 import { K } from '../lambda/db';
 import { patchMe } from '../lambda/handlers/me';
 import { pushSync, pushSyncFor } from '../lambda/handlers/sync';
+import { FK } from '../lambda/family/keys';
+import { familyV2Fixture } from './support/family-v2-fixture';
+import { installFamilyV2Reads } from './support/family-v2-reads';
 import { handleEvent as handlePostConfirmation } from '../lambda/post-confirmation';
 
 const NOW = 1_800_000_000_000;
@@ -283,6 +286,8 @@ describe('sync closure serialization', () => {
       K.profile('rocio'),
       accountClosureKey('rocio'),
       { pk: K.user('rocio'), sk: 'USAGE_MIGRATION' },
+      { pk: K.user('rocio'), sk: 'SUBSCRIPTION#INDIVIDUAL' },
+      { pk: K.user('rocio'), sk: 'COVERAGE#FAMILY' },
     ]);
   });
 
@@ -413,7 +418,7 @@ describe('sync closure serialization', () => {
     ).rejects.toMatchObject({ code: 'CONFLICT' });
   });
 
-  it('guards caller, minor and their current guardian link in the same write transaction', async () => {
+  it('guards caller, minor and current supervision in the same write transaction', async () => {
     const link = guardianLink('rocio', 'nico');
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
@@ -422,6 +427,10 @@ describe('sync closure serialization', () => {
         : { Item: syncFixture(key) };
     });
     ddbMock.on(TransactWriteCommand).resolves({});
+    const family = familyV2Fixture({ now: NOW, primaryId: 'rocio', minorIds: ['nico'] });
+    installFamilyV2Reads(ddbMock, family, [profile('rocio'), profile('nico', {
+      accountType: 'minor', majorityAt: '2030-01-01',
+    })]);
 
     await expect(
       pushSyncFor(ctxOf(profile('rocio')), 'nico', {
@@ -431,17 +440,18 @@ describe('sync closure serialization', () => {
     ).resolves.toMatchObject({ applied: ['minor-tree'] });
 
     const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
-    expect(conditionChecks(transaction).map((guard) => guard.Key)).toEqual([
+    expect(conditionChecks(transaction).map((guard) => guard.Key)).toEqual(expect.arrayContaining([
       K.profile('nico'),
       accountClosureKey('nico'),
       { pk: K.user('nico'), sk: 'USAGE_MIGRATION' },
       K.profile('rocio'),
       accountClosureKey('rocio'),
-      K.link('nico', 'rocio'),
-    ]);
+      FK.household(family.household.householdId),
+      FK.supervision('nico', 'rocio'),
+    ]));
   });
 
-  it('returns NOT_FOUND when the guardian link disappears during the write', async () => {
+  it('returns NOT_FOUND when supervision disappears during the write', async () => {
     const link = guardianLink('rocio', 'nico');
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
@@ -454,9 +464,15 @@ describe('sync closure serialization', () => {
       }
       return { Item: syncFixture(key) };
     });
-    ddbMock
-      .on(TransactWriteCommand)
-      .rejects(transactionCanceled(['None', 'None', 'None', 'None', 'None', 'ConditionalCheckFailed']));
+    let current = true;
+    const family = familyV2Fixture({ now: NOW, primaryId: 'rocio', minorIds: ['nico'] });
+    installFamilyV2Reads(ddbMock, family, [profile('rocio'), profile('nico', {
+      accountType: 'minor', majorityAt: '2030-01-01',
+    })], () => current);
+    ddbMock.on(TransactWriteCommand).callsFake(() => {
+      current = false;
+      throw transactionCanceled(['ConditionalCheckFailed']);
+    });
 
     await expect(
       pushSyncFor(ctxOf(profile('rocio')), 'nico', {
@@ -464,5 +480,6 @@ describe('sync closure serialization', () => {
         records: [{ store: 'trees', record: tree('minor-race') }],
       }),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 });

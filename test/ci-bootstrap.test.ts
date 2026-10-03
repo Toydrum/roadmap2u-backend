@@ -1,5 +1,7 @@
 import { App, BootstraplessSynthesizer } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import * as infrastructure from '../lib/roadmap-stack';
 
@@ -30,7 +32,7 @@ describe('GitHub OIDC bootstrap', () => {
   it('reuses the existing GitHub provider and trusts immutable repo identities', () => {
     const template = bootstrapTemplate();
     template.resourceCountIs('AWS::IAM::OIDCProvider', 0);
-    template.resourceCountIs('AWS::IAM::Role', 23);
+    template.resourceCountIs('AWS::IAM::Role', 26);
 
     const rendered = JSON.stringify(template.toJSON());
     for (const stage of ['dev', 'test', 'prod']) {
@@ -543,19 +545,37 @@ describe('GitHub OIDC bootstrap', () => {
           const primaryTableArn = `table/roadmap-${stage}`;
           const safeProjection = [
             'accountType',
+            'accountId',
+            'adultId',
+            'assignedAt',
+            'country',
             'createdAt',
             'createdMinorIds',
+            'entityType',
             'familyFenceVersion',
             'gsi1pk',
             'gsi1sk',
+            'gsi2pk',
+            'gsi2sk',
             'guardianId',
+            'householdId',
             'kind',
             'linkId',
+            'majorityAt',
             'minorId',
             'pk',
+            'primaryResponsibleId',
+            'revision',
+            'role',
+            'seatNumber',
+            'seatType',
             'sk',
+            'state',
             'status',
+            'updatedAt',
             'userId',
+            'validFrom',
+            'validUntil',
           ];
           const scan = statements.find(
             (statement: any) => statement.Sid === 'ScanOnlyFamilyFenceProjection',
@@ -665,6 +685,67 @@ describe('GitHub OIDC bootstrap', () => {
 
       expect(rendered.Outputs).toHaveProperty(`${stage}CommercialMigrationRoleArn`);
       expect(rendered.Outputs).toHaveProperty(`${stage}CommercialFlagOperatorRoleArn`);
+    }
+  });
+
+  it('authorizes the actual additive family migration puts with stage and attribute limits', async () => {
+    const library = await import(pathToFileURL(
+      join(process.cwd(), 'scripts/lib/family-model-migration.mjs'),
+    ).href);
+    const profile = (userId: string, accountType: 'adult' | 'minor') => ({
+      pk: `USER#${userId}`, sk: 'PROFILE', userId, accountType,
+      status: 'active', createdAt: 1,
+    });
+    const link = (guardianId: string, minorId: string, kind: 'created' | 'invited') => ({
+      pk: `USER#${minorId}`, sk: `GUARDIAN#${guardianId}`,
+      gsi1pk: `USER#${guardianId}`, gsi1sk: `MINOR#${minorId}`,
+      linkId: `${guardianId}~${minorId}`, guardianId, minorId, kind, createdAt: 2,
+    });
+    const inventory = library.classifyLegacyFamilyModel([
+      profile('primary', 'adult'), profile('additional', 'adult'),
+      profile('minor-one', 'minor'), profile('minor-two', 'minor'),
+      link('primary', 'minor-one', 'created'), link('primary', 'minor-two', 'created'),
+      link('additional', 'minor-one', 'invited'), link('additional', 'minor-two', 'invited'),
+    ]);
+    const plan = inventory.plans.find((candidate: any) =>
+      candidate.primaryResponsibleId === 'primary');
+    expect(plan.disposition).toBe('candidate');
+    const rendered = bootstrapTemplate().toJSON();
+    for (const stage of ['dev', 'test', 'prod']) {
+      const policy = Object.values(rendered.Resources).find((resource: any) =>
+        resource.Type === 'AWS::IAM::Policy' &&
+        resource.Properties.PolicyName === `CommercialMigrationPolicy-${stage}`) as any;
+      const puts = policy.Properties.PolicyDocument.Statement.find((statement: any) =>
+        statement.Sid === 'TransactOnlyFamilyModelPuts');
+      expect(puts, `${stage} must authorize canonical family backfill puts`).toBeDefined();
+      expect(puts.Action).toBe('dynamodb:PutItem');
+      expect(JSON.stringify(puts.Resource)).toContain(`table/roadmap-${stage}`);
+      expect(JSON.stringify(puts.Resource)).not.toContain('roadmap-access-audit');
+      expect(puts.Condition.StringEquals).toEqual({
+        'dynamodb:EnclosingOperation': 'TransactWriteItems',
+      });
+      expect(puts.Condition['ForAllValues:StringLike']).toEqual({
+        'dynamodb:LeadingKeys': ['HOUSEHOLD#*', 'USER#*'],
+      });
+      expect(puts.Condition.Null).toEqual({ 'dynamodb:Attributes': 'false' });
+      const attributes = puts.Condition['ForAllValues:StringEquals']['dynamodb:Attributes'];
+      for (const excluded of ['accountType', 'userId', 'displayName', 'email', 'record',
+        'majorityAt', 'source', 'paidThrough', 'effectivePlanKey']) {
+        expect(attributes).not.toContain(excluded);
+      }
+      const transaction = library.buildFamilyModelBackfillTransaction({
+        tableName: `roadmap-${stage}`, auditTableName: `roadmap-access-audit-${stage}`,
+        stage, plan, planHash: inventory.planHash, migrationStartedAt: 3,
+      });
+      const canonicalPuts = transaction.TransactItems.filter((operation: any) =>
+        operation.Put?.TableName === `roadmap-${stage}`);
+      expect(canonicalPuts.length).toBeGreaterThan(4);
+      for (const operation of canonicalPuts) {
+        expect(operation.Put.Item.pk).toMatch(/^(HOUSEHOLD|USER)#/);
+        expect(Object.keys(operation.Put.Item).every((key) => attributes.includes(key))).toBe(true);
+        expect(operation.Put.ConditionExpression).toBe(
+          'attribute_not_exists(pk) AND attribute_not_exists(sk)');
+      }
     }
   });
 

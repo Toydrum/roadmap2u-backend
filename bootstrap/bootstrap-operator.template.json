@@ -228,6 +228,19 @@
                   ]
                 },
                 {
+                  "Sid": "InspectAndCleanMissingFamilyPilotRoles",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:GetRole",
+                    "iam:DeleteRole"
+                  ],
+                  "Resource": [
+                    "arn:aws:iam::765932874577:role/roadmap2u-dev-family-pilot-operator",
+                    "arn:aws:iam::765932874577:role/roadmap2u-test-family-pilot-operator",
+                    "arn:aws:iam::765932874577:role/roadmap2u-prod-family-pilot-operator"
+                  ]
+                },
+                {
                   "Sid": "AttachOnlyRoadMap2UControlPlanePolicies",
                   "Effect": "Allow",
                   "Action": [

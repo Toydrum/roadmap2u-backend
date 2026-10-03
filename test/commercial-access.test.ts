@@ -20,13 +20,65 @@ import {
 } from '../lambda/commercial/access-resolver';
 
 describe('prepayment commercial catalog', () => {
-  it('publishes the exact Free and Premium launch offer without enabling payments', () => {
+  it('publishes the exact individual and family offers without enabling payments', () => {
     expect(PREPAYMENT_CATALOG).toEqual({
-      version: '2026-08-prepayment-v1',
-      pricingVersion: 'launch-2026',
+      version: '2026-09-family-v1',
+      pricingVersion: 'family-launch-2026',
       currency: 'MXN',
       taxInclusive: true,
       paymentsEnabled: false,
+      offers: [
+        {
+          offerKey: 'premium_individual',
+          planKey: 'premium',
+          minorSeats: 0,
+          additionalResponsibleSeat: 0,
+          prices: {
+            month: { amountMinor: 9_900 },
+            year: { amountMinor: 94_900 },
+          },
+        },
+        {
+          offerKey: 'family_1_minor',
+          planKey: 'premium',
+          minorSeats: 1,
+          additionalResponsibleSeat: 0,
+          prices: {
+            month: { amountMinor: 14_900 },
+            year: { amountMinor: 142_900 },
+          },
+        },
+        {
+          offerKey: 'family_2_minors',
+          planKey: 'premium',
+          minorSeats: 2,
+          additionalResponsibleSeat: 0,
+          prices: {
+            month: { amountMinor: 18_900 },
+            year: { amountMinor: 180_900 },
+          },
+        },
+        {
+          offerKey: 'family_1_minor_1_additional_responsible',
+          planKey: 'premium',
+          minorSeats: 1,
+          additionalResponsibleSeat: 1,
+          prices: {
+            month: { amountMinor: 19_900 },
+            year: { amountMinor: 190_900 },
+          },
+        },
+        {
+          offerKey: 'family_2_minors_1_additional_responsible',
+          planKey: 'premium',
+          minorSeats: 2,
+          additionalResponsibleSeat: 1,
+          prices: {
+            month: { amountMinor: 23_900 },
+            year: { amountMinor: 228_900 },
+          },
+        },
+      ],
       plans: {
         free: {
           limits: { maxActiveTrees: 2, maxVisibleBranchesPerTree: 10 },
@@ -51,7 +103,7 @@ describe('prepayment commercial catalog', () => {
   it('allowlists one Premium offer whose cadence never changes capabilities', () => {
     expect(ADMIN_GRANT_OFFERS).toEqual({
       premium_demo: {
-        catalogVersion: '2026-08-prepayment-v1',
+        catalogVersion: '2026-09-family-v1',
         planKey: 'premium',
         minDurationSeconds: 86_400,
         maxDurationSeconds: 157_680_000,
@@ -60,6 +112,42 @@ describe('prepayment commercial catalog', () => {
     });
     expect(ADMIN_GRANT_OFFERS.premium_demo).not.toHaveProperty('billingCadence');
     expect(ADMIN_GRANT_OFFERS.premium_demo).not.toHaveProperty('price');
+  });
+
+  it.each([
+    'premium_individual',
+    'family_1_minor',
+    'family_2_minors',
+    'family_1_minor_1_additional_responsible',
+    'family_2_minors_1_additional_responsible',
+  ])('%s keeps seats and capabilities independent of its billing cadence', (offerKey) => {
+    const matches = PREPAYMENT_CATALOG.offers.filter((offer) => offer.offerKey === offerKey);
+    expect(matches).toHaveLength(1);
+    const offer = matches[0]!;
+    expect(Object.keys(offer).sort()).toEqual([
+      'additionalResponsibleSeat', 'minorSeats', 'offerKey', 'planKey', 'prices',
+    ]);
+    expect(offer.planKey).toBe('premium');
+    expect(Object.keys(offer.prices).sort()).toEqual(['month', 'year']);
+    for (const cadence of ['month', 'year'] as const) {
+      // A cadence supplies only the amount; it cannot override the offer's seats
+      // or plan capabilities. Family access still requires a current source.
+      expect(Object.keys(offer.prices[cadence])).toEqual(['amountMinor']);
+      expect(Number.isSafeInteger(offer.prices[cadence].amountMinor)).toBe(true);
+      expect(offer.prices[cadence].amountMinor).toBeGreaterThan(0);
+    }
+    expect(PREPAYMENT_CATALOG.plans[offer.planKey].capabilities).toEqual({
+      cloudSync: true, social: true, family: false,
+    });
+  });
+
+  it('keeps the shared public catalog deeply immutable', () => {
+    function assertFrozen(value: unknown): void {
+      if (value === null || typeof value !== 'object') return;
+      expect(Object.isFrozen(value)).toBe(true);
+      for (const child of Object.values(value)) assertFrozen(child);
+    }
+    assertFrozen(PREPAYMENT_CATALOG);
   });
 });
 
@@ -434,6 +522,7 @@ describe('AccessResolver materialization', () => {
     });
     expect(harness.proposals).toEqual([
       {
+        paidSources: {},
         Put: {
           TableName: 'roadmap-dev',
           Item: result.access,

@@ -58,6 +58,11 @@ export interface ProfileItem {
    * backfill; new adults are born at version 1. Unknown versions fail closed.
    */
   familyFenceVersion?: 1;
+  /** ISO date when a supervised account reaches 18; present on family-v2 minors. */
+  majorityAt?: string;
+  /** Due-majority index for the automatic household transition. */
+  gsi2pk?: string;
+  gsi2sk?: string;
   /** Created-minor ids owned by this guardian. An absent set is the empty set. */
   createdMinorIds?: Set<string>;
   email?: string;
@@ -128,13 +133,6 @@ export interface RecordItem {
    *  expression, and DynamoDB can only compare top-level attributes. */
   updatedAt: number;
   syncedAt: number;
-}
-
-export interface RateItem {
-  pk: string;
-  sk: string;
-  count: number;
-  ttl: number;
 }
 
 // ── Key builders ────────────────────────────────────────────────────────────
@@ -297,30 +295,6 @@ export async function batchWriteAll(deps: Deps, requests: BatchWriteRequest[]): 
       }
     }
   }
-}
-
-/** Code-guessing brake, shared by EVERY code redemption (friend requests +
- *  family invites — 0.0.115 S1 closed the family gap): 5 bad redemptions per
- *  rolling hour → RATE_LIMITED. Read-first, bump-on-failure — successful
- *  redemptions never count. One shared bucket per user: a guesser can't get
- *  5 friend guesses AND 5 family guesses. */
-export async function readRateCount(deps: Deps, userId: string): Promise<number> {
-  const bucket = Math.floor(deps.now() / 3_600_000);
-  const item = await getItem<RateItem>(deps, K.rate(userId, bucket));
-  return item?.count ?? 0;
-}
-
-export async function bumpBadAttempt(deps: Deps, userId: string): Promise<void> {
-  const bucket = Math.floor(deps.now() / 3_600_000);
-  await deps.ddb.send(
-    new UpdateCommand({
-      TableName: deps.table,
-      Key: K.rate(userId, bucket),
-      UpdateExpression: 'ADD #c :one SET #ttl = :ttl',
-      ExpressionAttributeNames: { '#c': 'count', '#ttl': 'ttl' },
-      ExpressionAttributeValues: { ':one': 1, ':ttl': Math.ceil(deps.now() / 1000) + 7200 },
-    }),
-  );
 }
 
 export { BatchWriteCommand, DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand };

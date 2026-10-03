@@ -30,6 +30,8 @@ const OBSERVED_SERVICES = [
   'access-reader',
   'access-code-redeemer',
   'sponsored-access-broker',
+  'family-pilot-broker',
+  'family-majority-reconciler',
   'account-closure-request',
 ] as const;
 export type ObservedService = (typeof OBSERVED_SERVICES)[number];

@@ -22,6 +22,9 @@ import {
 import { accountClosureKey } from '../lambda/account-closure';
 import { deriveAccessItem } from '../lambda/commercial/access-resolver';
 import { pushSync, pushSyncFor } from '../lambda/handlers/sync';
+import { FK } from '../lambda/family/keys';
+import { familyV2Fixture } from './support/family-v2-fixture';
+import { installFamilyV2Reads } from './support/family-v2-reads';
 
 const NOW = 1_800_000_000_000;
 const OWNER = 'rocio';
@@ -60,6 +63,18 @@ function profile(): ProfileItem {
 
 function ctx(): Ctx {
   return { callerId: OWNER, caller: profile(), deps: deps() };
+}
+
+function stubSupervision(minorId: string, current: () => boolean = () => true, additional = false) {
+  const family = familyV2Fixture({
+    now: NOW, primaryId: additional ? 'primary-other' : OWNER, minorIds: [minorId],
+    ...(additional ? { additionalResponsibleSeat: 1 as const, additionalId: OWNER } : {}),
+  });
+  installFamilyV2Reads(ddbMock, family, [profile(), {
+    ...profile(), ...K.profile(minorId), userId: minorId, username: minorId,
+    accountType: 'minor', majorityAt: '2030-01-01',
+  }], current);
+  return family;
 }
 
 function tree(id: string): Tree {
@@ -901,7 +916,7 @@ describe('sync mutation groups v2', () => {
     });
   });
 
-  it('keeps the maximum self group at 46 unique transaction keys', async () => {
+  it('keeps the maximum self group at 48 unique transaction keys including paid sources', async () => {
     const stored: RecordItem[] = [];
     const records = Array.from({ length: 20 }, (_, index) => {
       const treeId = `max-tree-${index}`;
@@ -944,13 +959,13 @@ describe('sync mutation groups v2', () => {
     });
 
     const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
-    expect(items).toHaveLength(46);
+    expect(items).toHaveLength(48);
     const keys = items.map((item) => {
       const operation = item.Put ?? item.Update ?? item.ConditionCheck;
       const key = operation && ('Key' in operation ? operation.Key : operation.Item);
       return `${String(key?.['pk'])}\u0000${String(key?.['sk'])}`;
     });
-    expect(new Set(keys).size).toBe(46);
+    expect(new Set(keys).size).toBe(48);
     expect(
       items.filter((item) =>
         String(item.Update?.Key?.['sk']).startsWith('USAGE#TREE#'),
@@ -1292,7 +1307,7 @@ describe('sync mutation groups v2', () => {
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
-  it('rechecks the guardian link before accepting a concurrent identical marker', async () => {
+  it('rechecks current supervision before accepting a concurrent identical marker', async () => {
     const minorId = 'nico-concurrent-marker';
     const link: LinkItem = {
       ...K.link(minorId, OWNER),
@@ -1341,6 +1356,7 @@ describe('sync mutation groups v2', () => {
       linkCurrent = false;
       throw transactionCanceled(['ConditionalCheckFailed']);
     });
+    stubSupervision(minorId, () => linkCurrent);
 
     await expect(
       pushSyncFor(ctx(), minorId, {
@@ -1841,7 +1857,7 @@ describe('sync mutation groups v2', () => {
     expect(readKeys).not.toContainEqual({ pk: K.user(OWNER), sk: 'USAGE_MIGRATION' });
   });
 
-  it('guards caller, minor and the exact guardian link in the v2 transaction', async () => {
+  it('guards caller, minor and exact Household v2 supervision in the transaction', async () => {
     const minorId = 'nico';
     const link: LinkItem = {
       ...K.link(minorId, OWNER),
@@ -1875,6 +1891,7 @@ describe('sync mutation groups v2', () => {
     });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     ddbMock.on(TransactWriteCommand).resolves({});
+    const family = stubSupervision(minorId);
 
     await expect(
       pushSyncFor(ctx(), minorId, {
@@ -1894,17 +1911,20 @@ describe('sync mutation groups v2', () => {
     const checks = transaction.TransactItems?.flatMap((item) =>
       item.ConditionCheck ? [item.ConditionCheck] : [],
     ) ?? [];
-    expect(checks.map((check) => check.Key)).toEqual([
+    expect(checks.map((check) => check.Key)).toEqual(expect.arrayContaining([
       K.profile(minorId),
       accountClosureKey(minorId),
       { pk: K.user(minorId), sk: 'USAGE_MIGRATION' },
       K.profile(OWNER),
       accountClosureKey(OWNER),
-      K.link(minorId, OWNER),
-    ]);
-    expect(checks.at(-1)).toMatchObject({
-      ConditionExpression: expect.stringContaining('linkId = :linkId'),
-      ExpressionAttributeValues: expect.objectContaining({ ':linkId': link.linkId }),
+      FK.household(family.household.householdId),
+      FK.supervision(minorId, OWNER),
+      FK.familyCoverage(OWNER),
+      FK.familyCoverage(minorId),
+    ]));
+    expect(checks.find((check) => check.Key?.sk === `SUPERVISION#${OWNER}`)).toMatchObject({
+      ConditionExpression: expect.stringContaining('#scope_linkId = :scope_linkId'),
+      ExpressionAttributeValues: expect.objectContaining({ ':scope_linkId': family.supervisionLinks[0].linkId }),
     });
     const keys = transaction.TransactItems?.map((item) => {
       const operation = item.Put ?? item.Update ?? item.ConditionCheck;
@@ -1914,7 +1934,7 @@ describe('sync mutation groups v2', () => {
     expect(new Set(keys).size).toBe(keys?.length);
   });
 
-  it('returns no stale minor winner after the guardian link disappears', async () => {
+  it('returns no stale minor winner after supervision disappears', async () => {
     const minorId = 'nico-stale';
     const link: LinkItem = {
       ...K.link(minorId, OWNER),
@@ -1933,6 +1953,7 @@ describe('sync mutation groups v2', () => {
       updatedAt: incoming.updatedAt + 1,
     };
     const stored = recordItem(winner, minorId);
+    let supervisionCurrent = true;
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
       if (key.pk === link.pk && key.sk === link.sk) {
@@ -1950,9 +1971,13 @@ describe('sync mutation groups v2', () => {
           },
         };
       }
-      if (key.pk === stored.pk && key.sk === stored.sk) return { Item: stored };
+      if (key.pk === stored.pk && key.sk === stored.sk) {
+        supervisionCurrent = false;
+        return { Item: stored };
+      }
       return {};
     });
+    stubSupervision(minorId, () => supervisionCurrent);
 
     await expect(
       pushSyncFor(ctx(), minorId, {
@@ -1970,7 +1995,7 @@ describe('sync mutation groups v2', () => {
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
-  it('does not accept an idempotent guardian marker after the link disappears', async () => {
+  it('does not accept an idempotent guardian marker after supervision disappears', async () => {
     const minorId = 'nico-marker-race';
     const link: LinkItem = {
       ...K.link(minorId, OWNER),
@@ -2015,6 +2040,7 @@ describe('sync mutation groups v2', () => {
     });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     ddbMock.on(TransactWriteCommand).resolves({});
+    stubSupervision(minorId);
     await pushSyncFor(ctx(), minorId, payload as never);
     const marker = ddbMock
       .commandCalls(TransactWriteCommand)[0]
@@ -2022,12 +2048,16 @@ describe('sync mutation groups v2', () => {
         (item) => item.Put?.Item?.['sk'] === 'MUTATION#mg-guardian-marker-race',
       )?.Put?.Item as Record<string, unknown>;
 
+    let supervisionCurrent = true;
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
       if (key.pk === link.pk && key.sk === link.sk) {
         return input.ConsistentRead ? {} : { Item: link };
       }
-      if (key.pk === marker['pk'] && key.sk === marker['sk']) return { Item: marker };
+      if (key.pk === marker['pk'] && key.sk === marker['sk']) {
+        supervisionCurrent = false;
+        return { Item: marker };
+      }
       if (key.sk === 'PROFILE') {
         const userId = key.pk.replace('USER#', '');
         return {
@@ -2042,6 +2072,7 @@ describe('sync mutation groups v2', () => {
       }
       return {};
     });
+    stubSupervision(minorId, () => supervisionCurrent);
 
     await expect(pushSyncFor(ctx(), minorId, payload as never)).rejects.toMatchObject({
       code: 'NOT_FOUND',
@@ -2049,7 +2080,7 @@ describe('sync mutation groups v2', () => {
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
-  it('keeps the maximum guardian group at 49 unique transaction keys', async () => {
+  it.each([false, true])('keeps maximum supervised groups bounded with additional=%s', async (additional) => {
     const minorId = 'nico-max';
     const link: LinkItem = {
       ...K.link(minorId, OWNER),
@@ -2107,6 +2138,7 @@ describe('sync mutation groups v2', () => {
     });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     ddbMock.on(TransactWriteCommand).resolves({});
+    stubSupervision(minorId, () => true, additional);
 
     await pushSyncFor(ctx(), minorId, {
       schemaVersion: 13,
@@ -2115,13 +2147,14 @@ describe('sync mutation groups v2', () => {
     });
 
     const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
-    expect(items).toHaveLength(49);
+    const expectedKeys = additional ? 55 : 54;
+    expect(items).toHaveLength(expectedKeys);
     const keys = items.map((item) => {
       const operation = item.Put ?? item.Update ?? item.ConditionCheck;
       const key = operation && ('Key' in operation ? operation.Key : operation.Item);
       return `${String(key?.['pk'])}\u0000${String(key?.['sk'])}`;
     });
-    expect(new Set(keys).size).toBe(49);
+    expect(new Set(keys).size).toBe(expectedKeys);
   });
 });
 

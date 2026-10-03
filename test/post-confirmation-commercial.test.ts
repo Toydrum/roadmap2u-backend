@@ -15,6 +15,10 @@ import { deriveAccessItem } from '../lambda/commercial/access-resolver';
 import { accessKey } from '../lambda/commercial/model';
 import { accountClosureKey } from '../lambda/account-closure';
 import { handleEvent as handlePostConfirmation } from '../lambda/post-confirmation';
+import {
+  createEmptySeatAssignments,
+  createHousehold,
+} from '../lambda/family/model';
 
 const NOW = 1_800_000_000_000;
 const FIRST_PROVISIONED_AT = NOW - 5_000;
@@ -57,12 +61,25 @@ function canonicalProfile(createdAt: number) {
   };
 }
 
+function canonicalFamily(createdAt: number) {
+  const household = createHousehold({ primaryResponsibleId: SUB, now: createdAt });
+  return {
+    household,
+    seats: createEmptySeatAssignments(household.householdId, createdAt),
+  };
+}
+
 function completeCancellation(overrides?: {
   profile?: Record<string, unknown>;
   username?: Record<string, unknown>;
   access?: Record<string, unknown>;
   usage?: Record<string, unknown>;
+  household?: Record<string, unknown>;
+  minorSeat1?: Record<string, unknown>;
+  minorSeat2?: Record<string, unknown>;
+  additionalSeat?: Record<string, unknown>;
 }) {
+  const family = canonicalFamily(FIRST_PROVISIONED_AT);
   return Object.assign(new Error('commercial signup state already exists'), {
     name: 'TransactionCanceledException',
     CancellationReasons: [
@@ -86,6 +103,22 @@ function completeCancellation(overrides?: {
           state: 'active',
           activeTrees: 0,
         },
+      },
+      {
+        Code: 'ConditionalCheckFailed',
+        Item: overrides?.household ?? family.household,
+      },
+      {
+        Code: 'ConditionalCheckFailed',
+        Item: overrides?.minorSeat1 ?? family.seats[0],
+      },
+      {
+        Code: 'ConditionalCheckFailed',
+        Item: overrides?.minorSeat2 ?? family.seats[1],
+      },
+      {
+        Code: 'ConditionalCheckFailed',
+        Item: overrides?.additionalSeat ?? family.seats[2],
       },
       { Code: 'None' },
     ],
@@ -114,7 +147,7 @@ beforeEach(() => {
 });
 
 describe('post-confirmation commercial state', () => {
-  it('creates PROFILE, username, canonical Free ACCESS and zero USAGE atomically before Cognito', async () => {
+  it('creates the adult account and deterministic empty Household atomically before Cognito', async () => {
     const order: string[] = [];
     ddbMock.on(TransactWriteCommand).callsFake(() => {
       order.push('dynamodb');
@@ -131,7 +164,8 @@ describe('post-confirmation commercial state', () => {
     const puts = (transaction.TransactItems ?? []).flatMap((item) =>
       item.Put ? [item.Put] : [],
     );
-    expect(puts).toHaveLength(4);
+    const family = canonicalFamily(NOW);
+    expect(puts).toHaveLength(8);
     expect(puts.map((put) => put.Item)).toEqual([
       {
         ...K.profile(SUB),
@@ -148,13 +182,26 @@ describe('post-confirmation commercial state', () => {
       { ...K.uniqUsername(USERNAME), userId: SUB },
       deriveAccessItem(SUB, NOW, undefined, []),
       { pk: K.user(SUB), sk: 'USAGE', state: 'active', activeTrees: 0 },
+      family.household,
+      ...family.seats,
     ]);
     expect(puts.map((put) => put.Item?.['sk'])).toEqual([
       'PROFILE',
       'UNIQ',
       accessKey(SUB).sk,
       'USAGE',
+      'META',
+      'SEAT#MINOR#1',
+      'SEAT#MINOR#2',
+      'SEAT#ADDITIONAL',
     ]);
+    expect(family.household).toMatchObject({
+      entityType: 'Household',
+      primaryResponsibleId: SUB,
+      revision: 1,
+    });
+    expect(transaction.TransactItems).toHaveLength(9);
+    expect(transaction.TransactItems!.length).toBeLessThanOrEqual(100);
     expect(
       puts.every(
         (put) =>
@@ -181,12 +228,17 @@ describe('post-confirmation commercial state', () => {
   });
 
   it('accepts the same complete retry when DynamoDB exposes raw AttributeValue items', async () => {
+    const family = canonicalFamily(FIRST_PROVISIONED_AT);
     ddbMock.on(TransactWriteCommand).rejects(
       completeCancellation({
         profile: rawItem(canonicalProfile(FIRST_PROVISIONED_AT)),
         username: rawItem({ ...K.uniqUsername(USERNAME), userId: SUB }),
         access: rawItem(deriveAccessItem(SUB, FIRST_PROVISIONED_AT, undefined, [])),
         usage: rawItem({ pk: K.user(SUB), sk: 'USAGE', state: 'active', activeTrees: 0 }),
+        household: rawItem(family.household),
+        minorSeat1: rawItem(family.seats[0]),
+        minorSeat2: rawItem(family.seats[1]),
+        additionalSeat: rawItem(family.seats[2]),
       }),
     );
     cognitoMock.on(AdminUpdateUserAttributesCommand).resolves({});
@@ -248,6 +300,23 @@ describe('post-confirmation commercial state', () => {
         completeCancellation({
           usage: { pk: K.user(SUB), sk: 'USAGE', state: 'active', activeTrees: 1 },
         }),
+    ],
+    [
+      'foreign Household owner',
+      () => {
+        const family = canonicalFamily(FIRST_PROVISIONED_AT);
+        return completeCancellation({
+          household: { ...family.household, primaryResponsibleId: 'other-adult' },
+        });
+      },
+    ],
+    [
+      'partially provisioned family seats',
+      () => {
+        const error = completeCancellation();
+        error.CancellationReasons[6] = { Code: 'None' };
+        return error;
+      },
     ],
   ])('rejects %s and never stamps Cognito', async (_label, cancellation) => {
     const error = cancellation();

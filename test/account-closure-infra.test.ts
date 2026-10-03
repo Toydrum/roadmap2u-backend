@@ -117,8 +117,11 @@ describe('account closure infrastructure', () => {
       FunctionResponseTypes: ['ReportBatchItemFailures'],
     });
     const rules = resources(template, 'AWS::Events::Rule');
-    expect(rules).toHaveLength(1);
-    expect(rules[0][1].Properties).toMatchObject({
+    expect(rules).toHaveLength(2);
+    const closureRule = rules.find(([, rule]) =>
+      JSON.stringify(rule.Properties.Targets).includes(reconcilerId),
+    );
+    expect(closureRule?.[1].Properties).toMatchObject({
       ScheduleExpression: 'rate(5 minutes)',
       State: 'ENABLED',
       Targets: [expect.objectContaining({ Arn: { 'Fn::GetAtt': [reconcilerId, 'Arn'] } })],

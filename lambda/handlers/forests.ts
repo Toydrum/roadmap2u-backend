@@ -2,17 +2,21 @@
 import { Tree, TreeNode } from '@app/db/schema';
 import {
   Ctx,
-  profileOf,
-  relationshipTo,
+  resolveRelationship,
   requireWritableOwner,
   toPublic,
 } from '../authz';
 import { resolveSocialCapability } from '../commercial/social-policy';
-import { FriendItem, GetCommand, K, RecordItem, queryPrefix } from '../db';
+import { K, RecordItem, queryPrefix } from '../db';
 
-async function requireVisibleFriendOwner(ctx: Ctx, ownerId: string) {
+async function requireVisibleOwner(ctx: Ctx, ownerId: string) {
   try {
-    return await requireWritableOwner(ctx, ownerId);
+    const owner = await requireWritableOwner(ctx, ownerId);
+    const expected = K.profile(ownerId);
+    if (owner.pk !== expected.pk || owner.sk !== expected.sk || owner.userId !== ownerId) {
+      throw new ApiError('NOT_FOUND');
+    }
+    return owner;
   } catch (error) {
     if (error instanceof ApiError && error.code === 'CONFLICT') {
       throw new ApiError('NOT_FOUND');
@@ -22,41 +26,43 @@ async function requireVisibleFriendOwner(ctx: Ctx, ownerId: string) {
 }
 
 /**
- * Forest snapshots per the permissions matrix: guardians get FULL nodes
- * (co-gardening needs real notes/dates); friends and minor→guardian get the
- * STRIPPED view. Everyone else gets 404 — never an existence oracle.
+ * Forest snapshots per the permissions matrix: current primary/additional
+ * supervision gets FULL nodes; compatible direct friendships get STRIPPED.
+ * Adult↔minor friendship-shaped access and every other relationship get 404.
  * Check-ins/sessions are NEVER served regardless of relationship.
  */
 export async function getForest(ctx: Ctx, userId: string): Promise<ForestSnapshot> {
-  const relationship = await relationshipTo(ctx, userId);
+  const relationship = await resolveRelationship(ctx, userId);
   if (!relationship) throw new ApiError('NOT_FOUND');
-  let owner = await profileOf(ctx.deps, userId);
-  if (!owner) throw new ApiError('NOT_FOUND');
+  let owner = relationship === 'self' ? ctx.caller : await requireVisibleOwner(ctx, userId);
 
-  if (relationship === 'friend') {
+  const friendshipVisit = relationship === 'adult_friend' || relationship === 'minor_friend';
+  if (friendshipVisit) {
     await resolveSocialCapability(ctx, 'visit', [ctx.callerId]);
-    const [viewer, currentOwner, friendship] = await Promise.all([
-      requireWritableOwner(ctx, ctx.callerId),
-      requireVisibleFriendOwner(ctx, userId),
-      ctx.deps.ddb.send(
-        new GetCommand({
-          TableName: ctx.deps.table,
-          Key: K.friend(ctx.callerId, userId),
-          ConsistentRead: true,
-        }),
-      ),
+    const [viewer, currentOwner, currentRelationship] = await Promise.all([
+      requireVisibleOwner(ctx, ctx.callerId),
+      requireVisibleOwner(ctx, userId),
+      resolveRelationship(ctx, userId),
     ]);
     if (
       !viewer.socialEnabled ||
       !currentOwner.socialEnabled ||
-      !(friendship.Item as FriendItem | undefined)
+      currentRelationship !== relationship
     ) {
       throw new ApiError('NOT_FOUND');
     }
     owner = currentOwner;
+  } else if (relationship !== 'self') {
+    const currentRelationship = await resolveRelationship(ctx, userId);
+    if (currentRelationship !== relationship) throw new ApiError('NOT_FOUND');
   }
 
-  const detail = relationship === 'self' || relationship === 'guardian' ? 'full' : 'stripped';
+  const detail =
+    relationship === 'self' ||
+    relationship === 'primary_supervision' ||
+    relationship === 'additional_supervision'
+      ? 'full'
+      : 'stripped';
 
   const [treeItems, nodeItems] = await Promise.all([
     queryPrefix<RecordItem>(ctx.deps, K.user(userId), 'REC#trees#'),
@@ -75,7 +81,10 @@ export async function getForest(ctx: Ctx, userId: string): Promise<ForestSnapsho
     );
 
   return {
-    owner: toPublic(owner, relationship === 'guardian'),
+    owner: toPublic(
+      owner,
+      relationship === 'primary_supervision' || relationship === 'additional_supervision',
+    ),
     detail,
     trees,
     nodes,

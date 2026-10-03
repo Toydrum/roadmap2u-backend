@@ -209,7 +209,7 @@ describe('lifecycle guards for no-op mutations', () => {
 
     await expect(
       pushSyncFor(ctxOf(profile('rocio')), 'nico', { schemaVersion: 13, records: [] }),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 });

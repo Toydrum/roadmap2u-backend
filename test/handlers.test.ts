@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
@@ -19,7 +20,9 @@ import { Harvest, Preserve, SCHEMA_VERSION, Tree, TreeNode, newSyncBase } from '
 import { Ctx } from '../lambda/authz';
 import { deriveAccessItem } from '../lambda/commercial/access-resolver';
 import { Deps, K, LinkItem, ProfileItem, RecordItem } from '../lambda/db';
+import { FK } from '../lambda/family/keys';
 import { getForest } from '../lambda/handlers/forests';
+import { createActiveAdultFriendship, type FriendshipItem } from '../lambda/social/model';
 import { pushSync } from '../lambda/handlers/sync';
 import {
   acceptFamilyInvite,
@@ -39,6 +42,7 @@ import {
 } from '../lambda/handlers/friends';
 import { handleEvent as handlePostConfirmation } from '../lambda/post-confirmation';
 import { errorResponse } from '../lambda/http';
+import { familyV2Fixture, type FamilyV2Fixture } from './support/family-v2-fixture';
 
 const NOW = 1_800_000_000_000;
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -68,7 +72,7 @@ function profile(userId: string, over: Partial<ProfileItem> = {}): ProfileItem {
 }
 
 function ctxOf(caller: ProfileItem): Ctx {
-  return { callerId: caller.userId, caller, deps: deps() };
+  return { callerId: caller.userId, caller, authenticatedAt: NOW - 60_000, deps: deps() };
 }
 
 function link(guardianId: string, minorId: string, kind: LinkItem['kind']): LinkItem {
@@ -180,7 +184,10 @@ beforeEach(() => {
 
 // ── Forest authorization + stripping ─────────────────────────────────────────
 
-function stubForest(owner: ProfileItem, relationLinks: LinkItem[], friends: boolean): void {
+function stubForest(
+  owner: ProfileItem,
+  options: { family?: FamilyV2Fixture; friendship?: FriendshipItem } = {},
+): void {
   ddbMock.on(GetCommand).callsFake((input) => {
     const { pk, sk } = input.Key as { pk: string; sk: string };
     if (pk === 'COMMERCIAL#CONFIG' && sk === 'FLAGS') return { Item: syncFlags() };
@@ -191,32 +198,51 @@ function stubForest(owner: ProfileItem, relationLinks: LinkItem[], friends: bool
     if (sk === 'PROFILE') {
       return { Item: pk === K.user(owner.userId) ? owner : profile(pk.slice('USER#'.length)) };
     }
-    const linkHit = relationLinks.find((l) => l.pk === pk && l.sk === sk);
-    if (linkHit) return { Item: linkHit };
-    if (sk.startsWith('FRIEND#') && friends) {
-      return { Item: { pk, sk, friendshipId: 'x~y', userA: 'x', userB: 'y', createdAt: NOW } };
+    if (options.friendship?.pk === pk && options.friendship.sk === sk) {
+      return { Item: options.friendship };
     }
+    const coverage = options.family?.coverages.find((item) => item.pk === pk && item.sk === sk);
+    if (coverage) return { Item: coverage };
     return { Item: undefined };
   });
   ddbMock.on(QueryCommand).callsFake((input) => {
+    const pk = (input.ExpressionAttributeValues as Record<string, string>)?.[':pk'];
     const prefix = (input.ExpressionAttributeValues as Record<string, string>)?.[':prefix'];
     if (prefix === 'REC#trees#') return { Items: [recordItem(owner.userId, 'trees', tree('t1'))] };
     if (prefix === 'REC#nodes#') return { Items: [recordItem(owner.userId, 'nodes', node('n1', 't1'))] };
+    if (options.family && pk === FK.household(options.family.household.householdId).pk) {
+      return { Items: [options.family.household, ...options.family.seats] };
+    }
+    if (prefix === 'SUPERVISION#') {
+      return {
+        Items: (options.family?.supervisionLinks ?? []).filter(
+          (current) => current.pk === pk && current.sk.startsWith(prefix),
+        ),
+      };
+    }
     return { Items: [] };
+  });
+  ddbMock.on(BatchGetCommand).resolves({
+    Responses: { roadmap: options.family?.coverages ?? [] },
   });
 }
 
 describe('getForest — permissions matrix', () => {
   it('stranger gets 404, never an existence hint', async () => {
     const nico = profile('nico', { accountType: 'minor', socialEnabled: false });
-    stubForest(nico, [], false);
+    stubForest(nico);
     const stranger = ctxOf(profile('stranger'));
     await expect(getForest(stranger, 'nico')).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
-  it('guardian gets FULL nodes (co-gardening)', async () => {
-    const nico = profile('nico', { accountType: 'minor', socialEnabled: false });
-    stubForest(nico, [link('rocio', 'nico', 'created')], false);
+  it('primary responsible gets FULL nodes for the seated minor', async () => {
+    const nico = profile('nico', {
+      accountType: 'minor',
+      socialEnabled: false,
+      majorityAt: '2030-01-01',
+    });
+    const family = familyV2Fixture({ now: NOW, primaryId: 'rocio', minorIds: ['nico'] });
+    stubForest(nico, { family });
     const rocio = ctxOf(profile('rocio'));
     const snapshot = await getForest(rocio, 'nico');
     expect(snapshot.detail).toBe('full');
@@ -227,8 +253,13 @@ describe('getForest — permissions matrix', () => {
 
   it('friend gets the STRIPPED view', async () => {
     const ambar = profile('ambar');
-    stubForest(ambar, [], true);
-    const val = ctxOf(profile('val', { accountType: 'minor', socialEnabled: true }));
+    const friendship = createActiveAdultFriendship({
+      leftAccountId: 'val',
+      rightAccountId: ambar.userId,
+      now: NOW - 1_000,
+    });
+    stubForest(ambar, { friendship });
+    const val = ctxOf(profile('val', { socialEnabled: true }));
     const snapshot = await getForest(val, 'ambar');
     expect(snapshot.detail).toBe('stripped');
     const first = snapshot.nodes[0] as TreeNode;
@@ -245,8 +276,13 @@ describe('getForest — permissions matrix', () => {
 
   it('friend visits are blocked when social is off on either side', async () => {
     const ambar = profile('ambar', { socialEnabled: false });
-    stubForest(ambar, [], true);
-    const val = ctxOf(profile('val', { accountType: 'minor', socialEnabled: true }));
+    const friendship = createActiveAdultFriendship({
+      leftAccountId: 'val',
+      rightAccountId: ambar.userId,
+      now: NOW - 1_000,
+    });
+    stubForest(ambar, { friendship });
+    const val = ctxOf(profile('val', { socialEnabled: true }));
     await expect(getForest(val, 'ambar')).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });
@@ -388,13 +424,31 @@ describe('pushSync — rev LWW', () => {
 
 describe('family', () => {
   it('createChild maps UsernameExistsException to USERNAME_TAKEN', async () => {
+    const home = familyV2Fixture({ now: NOW, primaryId: 'rocio' });
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
-      return key.pk === K.profile('rocio').pk && key.sk === 'PROFILE'
-        ? { Item: profile('rocio', { status: 'active' }) }
-        : {};
+      if (key.pk === K.profile('rocio').pk && key.sk === 'PROFILE') {
+        return { Item: profile('rocio', { status: 'active' }) };
+      }
+      const coverage = home.coverages.find((item) => item.pk === key.pk && item.sk === key.sk);
+      if (coverage) return { Item: coverage };
+      if (
+        key.pk === FK.familyEntitlement(home.household.householdId).pk &&
+        key.sk === FK.familyEntitlement(home.household.householdId).sk
+      ) {
+        return { Item: home.entitlement };
+      }
+      return {};
     });
-    ddbMock.on(QueryCommand).resolves({ Items: [] }); // no minors yet
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      const pk = (input.ExpressionAttributeValues as Record<string, string>)?.[':pk'];
+      return pk === FK.household(home.household.householdId).pk
+        ? { Items: [home.household, ...home.seats] }
+        : { Items: [] };
+    });
+    ddbMock.on(BatchGetCommand).resolves({
+      Responses: { roadmap: home.coverages },
+    });
     const taken = new Error('exists');
     taken.name = 'UsernameExistsException';
     cognitoMock.on(AdminCreateUserCommand).rejects(taken);
@@ -463,7 +517,7 @@ describe('family', () => {
       if (key.pk === redeemerLinkKey.pk && key.sk === redeemerLinkKey.sk) return {};
       return {};
     });
-    ddbMock.on(QueryCommand).resolves({ Items: [link('rocio', 'nico', 'created')] });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
 
@@ -489,10 +543,15 @@ describe('family', () => {
   });
 
   it('the family attempt after 5 bad redemptions is RATE_LIMITED', async () => {
-    const rateKey = K.rate('rocio', Math.floor(NOW / 3_600_000));
-    ddbMock
-      .on(GetCommand, { TableName: 'roadmap', Key: { pk: rateKey.pk, sk: rateKey.sk } })
-      .resolves({ Item: { ...rateKey, count: 5, ttl: 0 } });
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      return key.pk === K.profile('rocio').pk && key.sk === 'PROFILE'
+        ? { Item: profile('rocio') }
+        : {};
+    });
+    ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('rate limit reached'), {
+      name: 'TransactionCanceledException',
+    }));
     await expect(
       acceptFamilyInvite(ctxOf(profile('rocio')), { code: 'WRONGONE' }),
     ).rejects.toMatchObject({ code: 'RATE_LIMITED' });
@@ -502,23 +561,25 @@ describe('family', () => {
 // ── Friend codes ─────────────────────────────────────────────────────────────
 
 describe('friend requests', () => {
-  // The brake is read-first, bump-on-BAD-attempt (contract law: successful
-  // redemptions never count).
+  // Every bearer-code lookup atomically reserves one of five hourly attempts.
   const RATE_KEY = K.rate('val', Math.floor(NOW / 3_600_000));
-  function stubRate(count: number): void {
-    ddbMock
-      .on(GetCommand, { TableName: 'roadmap', Key: { pk: RATE_KEY.pk, sk: RATE_KEY.sk } })
-      .resolves({ Item: { ...RATE_KEY, count, ttl: 0 } });
-  }
+
+  it.each([null, undefined, [], 42, 'code', { code: 42 }, { code: null }])(
+    'the legacy adapter rejects malformed body %j without writes',
+    async (body) => {
+      await expect(createFriendRequest(ctxOf(profile('val')), body as never))
+        .rejects.toMatchObject({ code: 'VALIDATION' });
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    },
+  );
 
   it('expired codes answer CODE_EXPIRED and count as a bad attempt', async () => {
     ddbMock
       .on(GetCommand)
       .resolves({ Item: { code: 'MBRD2468', kind: 'friend', userId: 'ambar', expiresAt: NOW - 1, ttl: 0 } });
-    stubRate(1);
     ddbMock.on(UpdateCommand).resolves({});
     await expect(
-      createFriendRequest(ctxOf(profile('val', { accountType: 'minor', socialEnabled: true })), {
+      createFriendRequest(ctxOf(profile('val', { accountType: 'adult', socialEnabled: true })), {
         code: 'MBRD2468',
       }),
     ).rejects.toMatchObject({ code: 'CODE_EXPIRED' });
@@ -529,7 +590,15 @@ describe('friend requests', () => {
   });
 
   it('the attempt after 5 bad redemptions in an hour is RATE_LIMITED', async () => {
-    stubRate(5);
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      return key.pk === K.profile('val').pk && key.sk === 'PROFILE'
+        ? { Item: profile('val', { socialEnabled: true }) }
+        : {};
+    });
+    ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('rate limit reached'), {
+      name: 'TransactionCanceledException',
+    }));
     await expect(
       createFriendRequest(ctxOf(profile('val', { socialEnabled: true })), { code: 'WRONGONE' }),
     ).rejects.toMatchObject({ code: 'RATE_LIMITED' });
@@ -734,7 +803,21 @@ describe('ApiError', () => {
     ['SYNC_CLIENT_UPGRADE_REQUIRED', 426],
     ['USAGE_MIGRATION_IN_PROGRESS', 409],
     ['COMMERCIAL_CONFIGURATION_UNAVAILABLE', 503],
-  ] as const)('maps commercial error %s to HTTP %i', (code, status) => {
+    ['ADULT_MINOR_FRIENDSHIP_FORBIDDEN', 400],
+    ['ACCOUNT_TYPE_INCOMPATIBLE', 409],
+    ['RESPONSIBLE_SCOPE_REQUIRED', 403],
+    ['CONSENT_INCOMPLETE', 409],
+    ['MINOR_ALREADY_COVERED', 409],
+    ['HOUSEHOLD_CAPACITY_EXCEEDED', 409],
+    ['CURRENT_PRIMARY_APPROVAL_REQUIRED', 403],
+    ['LEGAL_REGION_UNSUPPORTED', 422],
+    ['OFFER_NOT_ALLOWED', 400],
+    ['CHECKOUT_IN_PROGRESS', 409],
+    ['SUBSCRIPTION_CONFLICT', 409],
+    ['PAYMENT_REQUIRED', 402],
+    ['REAUTHENTICATION_REQUIRED', 401],
+    ['STALE_REVISION', 409],
+  ] as const)('maps server error %s to HTTP %i', (code, status) => {
     expect(errorResponse(new ApiError(code)).statusCode).toBe(status);
   });
 });

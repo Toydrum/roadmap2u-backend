@@ -3,6 +3,7 @@ import { ApiError } from '@app/api/contracts';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import {
+  ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION,
   ACCOUNT_CLOSURE_OPEN_GSI_PK,
   accountClosureKey,
   closureOpenSortKey,
@@ -12,7 +13,16 @@ import {
   type AccountClosureState,
 } from './account-closure';
 import { AuditWriter } from './commercial/audit';
-import { K, type Deps, type LinkItem, type ProfileItem } from './db';
+import { K, type Deps, type ProfileItem } from './db';
+import {
+  adultFamilyClosureBlockReason,
+  adultFamilyClosureConditionChecks,
+  discoverAdultFamilyClosure,
+} from './family/account-closure';
+import {
+  primaryMinorAuthorityChecks,
+  requirePrimaryMinorAuthority,
+} from './family/minor-authority';
 
 interface ProfileWithStatus extends ProfileItem {
   status?: 'active' | 'closing';
@@ -90,6 +100,18 @@ export async function requestAccountClosure(
   ) {
     throw new ApiError('CONFLICT', 'account is not writable');
   }
+  const family = await discoverAdultFamilyClosure(deps, sub);
+  const familyBlock = adultFamilyClosureBlockReason(family);
+  if (familyBlock) {
+    throw new ApiError(
+      'CONFLICT',
+      familyBlock === 'active_primary_minors'
+        ? 'primary family authority must be transferred before closure'
+        : familyBlock === 'active_additional_responsibility'
+          ? 'additional family authority must be revoked before closure'
+          : 'family ownership must be reconciled before closure',
+    );
+  }
 
   const now = deps.now();
   const closureId = deps.nextClosureId();
@@ -108,7 +130,8 @@ export async function requestAccountClosure(
     nextAttemptAt: now,
     gsi1pk: ACCOUNT_CLOSURE_OPEN_GSI_PK,
     gsi1sk: closureOpenSortKey(now, sub),
-    checkpoint: { phase: 'inboundGuardianLinks' },
+    checkpoint: { phase: 'familyMembership' },
+    familyCleanupVersion: ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION,
   };
   const profileCondition = [
     'attribute_exists(pk)',
@@ -148,6 +171,7 @@ export async function requestAccountClosure(
               },
             },
           },
+          ...adultFamilyClosureConditionChecks(deps.table, family),
           deps.auditWriter.transactPut({
             targetKind: 'USER',
             targetId: sub,
@@ -178,6 +202,18 @@ export async function requestAccountClosure(
         currentProfile.createdMinorIds !== undefined
       ) {
         throw new ApiError('CONFLICT', 'family ownership must be reconciled before closure');
+      }
+      const currentFamily = await discoverAdultFamilyClosure(deps, sub);
+      const currentFamilyBlock = adultFamilyClosureBlockReason(currentFamily);
+      if (currentFamilyBlock) {
+        throw new ApiError(
+          'CONFLICT',
+          currentFamilyBlock === 'active_primary_minors'
+            ? 'primary family authority must be transferred before closure'
+            : currentFamilyBlock === 'active_additional_responsibility'
+              ? 'additional family authority must be revoked before closure'
+              : 'family ownership must be reconciled before closure',
+        );
       }
       throw error;
     }
@@ -251,28 +287,25 @@ export async function requestGuardianMinorClosure(
     return { closureId: existing.closureId, state: existing.state };
   }
 
-  const [guardian, minor, guardianClosure, link] = await Promise.all([
+  const [guardian, minor, guardianClosure] = await Promise.all([
     readConsistent<ProfileWithStatus>(deps, K.profile(guardianSub)),
     readConsistent<ProfileWithStatus>(deps, K.profile(minorSub)),
     readConsistent<AccountClosureItem>(deps, accountClosureKey(guardianSub)),
-    readConsistent<LinkItem>(deps, K.link(minorSub, guardianSub)),
   ]);
   if (!isWritableProfile(guardian) || guardian.accountType !== 'adult' || guardianClosure) {
     throw new ApiError('CONFLICT', 'guardian account is not writable');
   }
-  if (!guardianFenceAllowsMinor(guardian, minorSub)) {
-    throw new ApiError('CONFLICT', 'guardian family ownership is not authoritative');
-  }
   if (!isWritableProfile(minor) || minor.accountType !== 'minor') {
     throw new ApiError('NOT_FOUND');
   }
-  if (
-    !link ||
-    link.kind !== 'created' ||
-    link.guardianId !== guardianSub ||
-    link.minorId !== minorSub
-  ) {
-    throw new ApiError('NOT_FOUND');
+  const authority = await requirePrimaryMinorAuthority(
+    deps,
+    guardian,
+    minorSub,
+    'delete_minor',
+  );
+  if (authority.model === 'legacy' && !guardianFenceAllowsMinor(guardian, minorSub)) {
+    throw new ApiError('CONFLICT', 'guardian family ownership is not authoritative');
   }
 
   const now = deps.now();
@@ -292,7 +325,8 @@ export async function requestGuardianMinorClosure(
     nextAttemptAt: now,
     gsi1pk: ACCOUNT_CLOSURE_OPEN_GSI_PK,
     gsi1sk: closureOpenSortKey(now, minorSub),
-    checkpoint: { phase: 'inboundGuardianLinks' },
+    checkpoint: { phase: 'familyMembership' },
+    familyCleanupVersion: ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION,
   };
   const requestId = `${closureId}-requested`;
 
@@ -343,8 +377,12 @@ export async function requestGuardianMinorClosure(
                 '(attribute_not_exists(#status) OR #status = :active)',
                 'userId = :guardianSub',
                 'username = :guardianUsername',
-                '(attribute_not_exists(familyFenceVersion) OR familyFenceVersion = :familyFenceVersion)',
-                '(attribute_not_exists(familyFenceVersion) OR contains(createdMinorIds, :minorSub))',
+                ...(authority.model === 'legacy'
+                  ? [
+                      '(attribute_not_exists(familyFenceVersion) OR familyFenceVersion = :familyFenceVersion)',
+                      '(attribute_not_exists(familyFenceVersion) OR contains(createdMinorIds, :minorSub))',
+                    ]
+                  : []),
               ].join(' AND '),
               ExpressionAttributeNames: { '#status': 'status' },
               ExpressionAttributeValues: {
@@ -352,8 +390,9 @@ export async function requestGuardianMinorClosure(
                 ':active': 'active',
                 ':guardianSub': guardianSub,
                 ':guardianUsername': guardian.username,
-                ':familyFenceVersion': 1,
-                ':minorSub': minorSub,
+                ...(authority.model === 'legacy'
+                  ? { ':familyFenceVersion': 1, ':minorSub': minorSub }
+                  : {}),
               },
             },
           },
@@ -364,32 +403,36 @@ export async function requestGuardianMinorClosure(
               ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
             },
           },
-          {
-            ConditionCheck: {
-              TableName: deps.table,
-              Key: K.link(minorSub, guardianSub),
-              ConditionExpression: [
-                'attribute_exists(pk)',
-                '#kind = :created',
-                'guardianId = :guardianId',
-                'minorId = :minorId',
-                'linkId = :linkId',
-                'createdAt = :createdAt',
-                'gsi1pk = :gsi1pk',
-                'gsi1sk = :gsi1sk',
-              ].join(' AND '),
-              ExpressionAttributeNames: { '#kind': 'kind' },
-              ExpressionAttributeValues: {
-                ':created': 'created',
-                ':guardianId': guardianSub,
-                ':minorId': minorSub,
-                ':linkId': link.linkId,
-                ':createdAt': link.createdAt,
-                ':gsi1pk': link.gsi1pk,
-                ':gsi1sk': link.gsi1sk,
-              },
-            },
-          },
+          ...(authority.model === 'legacy'
+            ? [
+                {
+                  ConditionCheck: {
+                    TableName: deps.table,
+                    Key: K.link(minorSub, guardianSub),
+                    ConditionExpression: [
+                      'attribute_exists(pk)',
+                      '#kind = :created',
+                      'guardianId = :guardianId',
+                      'minorId = :minorId',
+                      'linkId = :linkId',
+                      'createdAt = :createdAt',
+                      'gsi1pk = :gsi1pk',
+                      'gsi1sk = :gsi1sk',
+                    ].join(' AND '),
+                    ExpressionAttributeNames: { '#kind': 'kind' },
+                    ExpressionAttributeValues: {
+                      ':created': 'created',
+                      ':guardianId': guardianSub,
+                      ':minorId': minorSub,
+                      ':linkId': authority.link.linkId,
+                      ':createdAt': authority.link.createdAt,
+                      ':gsi1pk': authority.link.gsi1pk,
+                      ':gsi1sk': authority.link.gsi1sk,
+                    },
+                  },
+                },
+              ]
+            : primaryMinorAuthorityChecks(deps.table, authority)),
           deps.auditWriter.transactPut({
             targetKind: 'USER',
             targetId: minorSub,

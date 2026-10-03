@@ -23,7 +23,14 @@ const RAW_FLAGS = Object.freeze({
   reason: 'exercise the staged rollout',
 });
 
+const FAMILY_DEFAULTS = {
+  familyCreationEnabled: false, minorLinkingEnabled: false, minorSocialEnabled: false,
+  familyCatalogEnabled: false, checkoutEnabled: false, subscriptionChangesEnabled: false,
+  billingEnforcementMode: 'off',
+} as const;
+
 const FLAGS = Object.freeze({
+  ...FAMILY_DEFAULTS,
   revision: 7,
   quotaMode: 'observe',
   capabilityMode: 'enforce',
@@ -56,6 +63,33 @@ function createResolver(readItem: () => Promise<unknown>, initialNow = 0) {
 }
 
 describe('commercial configuration flags — exact parser', () => {
+  it('accepts all seven new controls while payments remain disabled', async () => {
+    const item = { ...RAW_FLAGS, ...FAMILY_DEFAULTS, familyCatalogEnabled: true,
+      familyCreationEnabled: true, minorLinkingEnabled: true, minorSocialEnabled: true,
+      checkoutEnabled: true, subscriptionChangesEnabled: true, billingEnforcementMode: 'observe' };
+    const { resolver } = createResolver(async () => item);
+    await expect(resolver.resolve()).resolves.toMatchObject({ status: 'available', flags: {
+      familyCatalogEnabled: true, familyCreationEnabled: true, minorLinkingEnabled: true,
+      minorSocialEnabled: true, checkoutEnabled: true, subscriptionChangesEnabled: true,
+      billingEnforcementMode: 'observe', premiumPaymentsEnabled: false,
+    } });
+  });
+
+  it.each(Object.keys(FAMILY_DEFAULTS))('rejects an invalid new control: %s', async (key) => {
+    const { resolver } = createResolver(async () => ({ ...RAW_FLAGS, ...FAMILY_DEFAULTS, [key]: 'invalid' }));
+    await expect(resolver.resolve()).resolves.toMatchObject({ status: 'unavailable', reason: 'invalid' });
+  });
+
+  it.each(Object.keys(FAMILY_DEFAULTS))('detects revision reuse when %s changes', async (key) => {
+    let item: Record<string, unknown> = { ...RAW_FLAGS, ...FAMILY_DEFAULTS };
+    const { resolver, setNow, metrics } = createResolver(async () => item);
+    expect((await resolver.resolve()).status).toBe('available');
+    item = { ...item, [key]: key === 'billingEnforcementMode' ? 'enforce' : true };
+    setNow(30_000);
+    await expect(resolver.resolve()).resolves.toMatchObject({ freshness: 'stale', flags: FAMILY_DEFAULTS });
+    expect(metrics).toContain('ConfigurationDrift');
+  });
+
   it('loads the exact DynamoDB item as a fresh immutable snapshot', async () => {
     const { resolver } = createResolver(async () => RAW_FLAGS, 123);
 

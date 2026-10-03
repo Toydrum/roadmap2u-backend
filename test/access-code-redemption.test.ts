@@ -1,6 +1,7 @@
 import { ApiError } from '@app/api/contracts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { deriveAccessItem } from '../lambda/commercial/access-resolver';
+import { createCoverageAssignment } from '../lambda/family/model';
 import {
   ACCESS_CODE_VERSION,
   buildIssuedAccessCode,
@@ -16,7 +17,7 @@ import {
   type RedemptionAccountSnapshot,
   type RedemptionCommitProposal,
 } from '../lambda/commercial/access-code-redemption';
-import type { CommercialConfigResult, CommercialFlags } from '../lambda/commercial/flags';
+import { FAMILY_BILLING_FLAG_DEFAULTS, type CommercialConfigResult, type CommercialFlags } from '../lambda/commercial/flags';
 import type { AccessItem, GrantItem } from '../lambda/commercial/model';
 import type { ProfileItem } from '../lambda/db';
 
@@ -35,6 +36,7 @@ function flags(overrides: Partial<CommercialFlags> = {}): CommercialConfigResult
     freshness: 'fresh',
     loadedAt: NOW,
     flags: {
+      ...FAMILY_BILLING_FLAG_DEFAULTS,
       revision: 1,
       quotaMode: 'enforce',
       capabilityMode: 'enforce',
@@ -133,6 +135,15 @@ function expectApiError(error: unknown, code: string): void {
 
 describe('AccessCodeRedeemer', () => {
   beforeEach(() => vi.restoreAllMocks());
+
+  it('preserves paid family access when adding a sponsored grant', async () => {
+    const coverage = createCoverageAssignment({ householdId: 'household-a', accountId: OWNER, seatType: 'primary_responsible', paidThrough: NOW + 60_000, now: NOW - 1_000 });
+    const { redeemer, proposals } = makeDeps({ readAccountSnapshot: async () => account({ coverage }) });
+    const result = await redeem(redeemer);
+    expect(result.capabilities.family).toBe(true);
+    expect(result.activeSources).toHaveLength(2);
+    expect(proposals[0]).toMatchObject({ paidSources: { coverage } });
+  });
 
   it('accepts the padded request ids emitted by API Gateway', async () => {
     const { proposals, redeemer } = makeDeps();

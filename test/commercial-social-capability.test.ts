@@ -11,9 +11,14 @@ import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-
 import type { Ctx } from '../lambda/authz';
 import { accountClosureKey } from '../lambda/account-closure';
 import type { AccessItem, GrantItem } from '../lambda/commercial/model';
-import type { CodeItem, Deps, FriendItem, FriendRequestItem, ProfileItem } from '../lambda/db';
+import { deriveAccessItem } from '../lambda/commercial/access-resolver';
+import { FAMILY_BILLING_FLAG_DEFAULTS, type CommercialMode } from '../lambda/commercial/flags';
+import { resolveSocialCapability } from '../lambda/commercial/social-policy';
+import { createCoverageAssignment } from '../lambda/family/model';
+import type { CodeItem, Deps, FriendRequestItem, ProfileItem } from '../lambda/db';
 import { K } from '../lambda/db';
 import { getForest } from '../lambda/handlers/forests';
+import { createActiveAdultFriendship, type FriendshipItem } from '../lambda/social/model';
 import {
   acceptFriendRequest,
   cancelFriendRequest,
@@ -62,7 +67,7 @@ function access(ownerSub: string, social: boolean): AccessItem {
     sk: 'ACCESS',
     ownerSub,
     effectivePlanKey: social ? 'premium' : 'free',
-    catalogVersion: '2026-08-prepayment-v1',
+    catalogVersion: '2026-09-family-v1',
     status: 'active',
     activeSources: social
       ? [{ kind: 'sponsored', sourceId: 'premium-test', planKey: 'premium', validUntil: null }]
@@ -86,7 +91,7 @@ function premiumGrant(ownerSub: string): GrantItem {
     grantId: 'premium-test',
     sourceKind: 'sponsored',
     status: 'active',
-    catalogVersion: '2026-08-prepayment-v1',
+    catalogVersion: '2026-09-family-v1',
     planKey: 'premium',
     limits: { maxActiveTrees: null, maxVisibleBranchesPerTree: null },
     capabilities: { cloudSync: true, social: true, family: false },
@@ -99,8 +104,10 @@ function premiumGrant(ownerSub: string): GrantItem {
   };
 }
 
-function flags(capabilityMode: 'off' | 'observe' | 'enforce') {
+function flags(capabilityMode: CommercialMode, billingEnforcementMode: CommercialMode = 'off') {
   return {
+    ...FAMILY_BILLING_FLAG_DEFAULTS,
+    billingEnforcementMode,
     pk: 'COMMERCIAL#CONFIG',
     sk: 'FLAGS',
     revision: 1,
@@ -141,15 +148,12 @@ function friendRequest(fromId: string, toId: string): FriendRequestItem {
   };
 }
 
-function friendship(a: string, b: string): FriendItem {
-  const friendshipId = a < b ? `${a}~${b}` : `${b}~${a}`;
-  return {
-    ...K.friend(a, b),
-    friendshipId,
-    userA: friendshipId.split('~')[0]!,
-    userB: friendshipId.split('~')[1]!,
-    createdAt: NOW - 1_000,
-  };
+function friendship(a: string, b: string): FriendshipItem {
+  return createActiveAdultFriendship({
+    leftAccountId: a,
+    rightAccountId: b,
+    now: NOW - 1_000,
+  });
 }
 
 function transactionCanceled(): Error {
@@ -167,6 +171,64 @@ afterEach(() => {
 });
 
 describe('commercial social capability', () => {
+  it.each(['create', 'accept', 'visit'] as const)(
+    'billing enforce blocks %s after family coverage ends without deleting relationships',
+    async (action) => {
+      const caller = profile('minor-a', { accountType: 'minor' });
+      const coverage = createCoverageAssignment({
+        householdId: 'household-a', accountId: caller.userId, seatType: 'minor',
+        paidThrough: NOW, now: NOW - 1_000,
+      });
+      const resolved = deriveAccessItem(caller.userId, NOW, undefined, [], { coverage });
+      const items = [flags('off', 'enforce'), coverage, resolved];
+      ddbMock.on(GetCommand).callsFake(({ Key }) => ({
+        Item: items.find((item) => item.pk === Key.pk && item.sk === Key.sk),
+      }));
+      ddbMock.on(QueryCommand).resolves({ Items: [] });
+      const emit = vi.fn();
+      await expect(resolveSocialCapability(ctxOf(caller), action, [caller.userId], emit))
+        .rejects.toMatchObject({ code: 'CAPABILITY_REQUIRED' });
+      expect(emit).toHaveBeenCalledWith({ kind: 'social', action, mode: 'enforce', wouldDeny: true });
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    },
+  );
+
+  it.each(['off', 'observe', 'enforce'] as const)(
+    'billing %s evaluates the exact account, including alternate sources',
+    async (mode) => {
+      for (const source of ['none', 'minor', 'primary_responsible', 'additional_responsible', 'individual', 'sponsored'] as const) {
+        const caller = profile('account-a');
+        const coverage = createCoverageAssignment({
+          householdId: 'household-a', accountId: caller.userId,
+          seatType: source === 'primary_responsible' || source === 'additional_responsible' ? source : 'minor',
+          paidThrough: ['none', 'individual', 'sponsored'].includes(source) ? NOW : NOW + 60_000,
+          now: NOW - 1_000,
+        });
+        const subscription = source === 'individual' ? {
+          pk: K.user(caller.userId), sk: 'SUBSCRIPTION#INDIVIDUAL' as const,
+          entityType: 'SubscriptionSource' as const, ownerSub: caller.userId,
+          sourceId: 'paid-a', state: 'active' as const, paidThrough: NOW + 60_000,
+          graceUntil: null, revision: 1, updatedAt: NOW - 1,
+        } : undefined;
+        const grants = source === 'sponsored' ? [premiumGrant(caller.userId)] : [];
+        const resolved = deriveAccessItem(caller.userId, NOW, undefined, grants, { coverage, subscription });
+        const items = [flags('off', mode), coverage, resolved, ...(subscription ? [subscription] : [])];
+        ddbMock.on(GetCommand).callsFake(({ Key }) => ({
+          Item: items.find((item) => item.pk === Key.pk && item.sk === Key.sk),
+        }));
+        ddbMock.on(QueryCommand).resolves({ Items: grants });
+        const emit = vi.fn();
+        const resolution = resolveSocialCapability(ctxOf(caller), 'accept', [caller.userId], emit);
+        if (mode === 'enforce' && source === 'none') {
+          await expect(resolution).rejects.toMatchObject({ code: 'CAPABILITY_REQUIRED' });
+        } else {
+          expect((await resolution).accesses.get(caller.userId)?.capabilities.social).toBe(source !== 'none');
+        }
+        expect(emit).toHaveBeenCalledWith({ kind: 'social', action: 'accept', mode, wouldDeny: source === 'none' });
+      }
+    },
+  );
+
   it('fails closed when FLAGS are unavailable before minting a friend code', async () => {
     ddbMock.on(GetCommand).resolves({});
     ddbMock.on(TransactWriteCommand).resolves({});
@@ -322,7 +384,7 @@ describe('commercial social capability', () => {
     await expect(createFriendRequest(ctxOf(caller), { code })).rejects.toMatchObject({
       code: 'CAPABILITY_REQUIRED',
     });
-    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
   it('allows and observes a would-be denial in capability observe mode', async () => {
@@ -373,7 +435,7 @@ describe('commercial social capability', () => {
 
     await createFriendRequest(ctxOf(caller), { code });
 
-    const transaction = ddbMock.commandCalls(TransactWriteCommand)[0]?.args[0].input;
+    const transaction = ddbMock.commandCalls(TransactWriteCommand)[1]?.args[0].input;
     const checks = (transaction.TransactItems ?? []).flatMap((item) =>
       item.ConditionCheck ? [item.ConditionCheck] : [],
     );
@@ -446,12 +508,15 @@ describe('commercial social capability', () => {
       return {};
     });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
-    ddbMock.on(TransactWriteCommand).rejectsOnce(transactionCanceled()).resolves({});
+    ddbMock.on(TransactWriteCommand)
+      .resolvesOnce({})
+      .rejectsOnce(transactionCanceled())
+      .resolves({});
 
     await expect(createFriendRequest(ctxOf(caller), { code })).rejects.toMatchObject({
       code: 'FORBIDDEN',
     });
-    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(2);
   });
 
   it('re-resolves ACCESS once after a revision conflict', async () => {
@@ -471,20 +536,23 @@ describe('commercial social capability', () => {
         return {
           Item: {
             ...access(ownerSub, false),
-            revision: ddbMock.commandCalls(TransactWriteCommand).length === 0 ? 1 : 2,
+            revision: ddbMock.commandCalls(TransactWriteCommand).length <= 1 ? 1 : 2,
           },
         };
       }
       return {};
     });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
-    ddbMock.on(TransactWriteCommand).rejectsOnce(transactionCanceled()).resolves({});
+    ddbMock.on(TransactWriteCommand)
+      .resolvesOnce({})
+      .rejectsOnce(transactionCanceled())
+      .resolves({});
 
     await createFriendRequest(ctxOf(caller), { code });
 
     const transactions = ddbMock.commandCalls(TransactWriteCommand);
-    expect(transactions).toHaveLength(2);
-    const revisions = transactions.map((call) =>
+    expect(transactions).toHaveLength(3);
+    const revisions = transactions.slice(1).map((call) =>
       (call.args[0].input.TransactItems ?? [])
         .filter((item) => item.ConditionCheck?.Key?.['sk'] === 'ACCESS')
         .map((item) => item.ConditionCheck?.ExpressionAttributeValues?.[':accessRevision']),

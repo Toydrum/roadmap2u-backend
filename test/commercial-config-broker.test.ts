@@ -20,6 +20,11 @@ const FLAG_ACTOR =
 const NOW = Date.parse('2026-08-19T18:30:00.000Z');
 const CUTOVER_AT = '2026-08-20T01:00:00.000Z';
 const MANIFEST_HASH = 'a'.repeat(64);
+const FAMILY_DEFAULTS = {
+  familyCreationEnabled: false, minorLinkingEnabled: false, minorSocialEnabled: false,
+  familyCatalogEnabled: false, checkoutEnabled: false, subscriptionChangesEnabled: false,
+  billingEnforcementMode: 'off',
+} as const;
 
 const bootstrapBody = Object.freeze({
   command: 'bootstrap-flags',
@@ -131,7 +136,7 @@ describe('CommercialConfigBroker authorization and exact request parsing', () =>
     ['an empty set', { ...setBody, changes: {} }],
     [
       'an unknown set field',
-      { ...setBody, changes: { ...setBody.changes, checkoutEnabled: true } },
+      { ...setBody, changes: { ...setBody.changes, unknownFlag: true } },
     ],
     [
       'premiumPaymentsEnabled=false nested in changes',
@@ -230,6 +235,39 @@ describe('CommercialConfigBroker authorization and exact request parsing', () =>
 describe('CommercialConfigBroker flag mutations', () => {
   beforeEach(() => ddbMock.reset());
 
+  it.each(Object.keys(FAMILY_DEFAULTS))('changes %s with CAS, initializes missing defaults and audits the requested field', async (field) => {
+    ddbMock.on(TransactWriteCommand).resolves({});
+    const value = field === 'billingEnforcementMode' ? 'observe'
+      : field === 'checkoutEnabled' || field === 'subscriptionChangesEnabled' ? false : true;
+    const response = await createBroker()(event({ ...setBody, changes: { [field]: value } }, FLAG_ACTOR));
+    expect(response.statusCode).toBe(200);
+    const items = ddbMock.commandCalls(TransactWriteCommand)[0]!.args[0].input.TransactItems!;
+    const update = items[0]!.Update!;
+    expect(update.ConditionExpression).toContain('#revision = :expectedRevision');
+    expect(update.ConditionExpression).toContain('#premiumPaymentsEnabled = :paymentsDisabled');
+    expect(update.ExpressionAttributeValues).toMatchObject({ [`:${field}`]: value, ':paymentsDisabled': false });
+    expect(update.UpdateExpression).toContain(`#${field} = :${field}`);
+    for (const other of Object.keys(FAMILY_DEFAULTS).filter((name) => name !== field)) {
+      expect(update.UpdateExpression).toContain(`#${other} = if_not_exists(#${other}, :default_${other})`);
+    }
+    expect(items[1]!.Put!.Item!.details.changedFields).toEqual([field]);
+  });
+
+  it.each(Object.keys(FAMILY_DEFAULTS))('rejects invalid values for %s without writes', async (field) => {
+    const response = await createBroker()(event({ ...setBody, changes: { [field]: 'invalid' } }, FLAG_ACTOR));
+    expect(response.statusCode).toBe(400);
+    expect(ddbMock.calls()).toHaveLength(0);
+  });
+
+  it.each(['checkoutEnabled', 'subscriptionChangesEnabled'])(
+    'refuses to enable %s before paid offers launch', async (field) => {
+      const response = await createBroker()(event({ ...setBody,
+        changes: { [field]: true } }, FLAG_ACTOR));
+      expect(response.statusCode).toBe(400);
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    },
+  );
+
   it('bootstraps revision 1 off/false and audit with conditional Put entries', async () => {
     ddbMock.on(TransactWriteCommand).resolves({});
 
@@ -244,6 +282,7 @@ describe('CommercialConfigBroker flag mutations', () => {
       Item: {
         pk: 'COMMERCIAL#CONFIG',
         sk: 'FLAGS',
+        ...FAMILY_DEFAULTS,
         revision: 1,
         quotaMode: 'off',
         capabilityMode: 'off',
@@ -309,7 +348,7 @@ describe('CommercialConfigBroker flag mutations', () => {
         ':accessCodeIssuanceEnabled': true,
       },
     });
-    expect(update?.UpdateExpression).toBe(
+    expect(update?.UpdateExpression).toContain(
       'SET #revision = :nextRevision, #updatedAt = :updatedAt, #updatedBy = :updatedBy, #reason = :reason, #quotaMode = :quotaMode, #accessCodeIssuanceEnabled = :accessCodeIssuanceEnabled',
     );
     expect(transaction.TransactItems?.[1]).toMatchObject({
