@@ -130,6 +130,8 @@ Evita `pull_request_target` en cualquier workflow con permisos AWS. Los PR norma
 
 ## Secuencia de bootstrap controlada
 
+Al crear el operador del piloto familiar, CloudFormation consulta primero su nombre de rol antes de que exista una ruta IAM. La plantilla del operador temporal permite `GetRole` y `DeleteRole` sobre los tres nombres exactos `roadmap2u-<stage>-family-pilot-operator` sin ruta para ese precheck y su limpieza. La creación y las escrituras de políticas siguen usando la ruta del stage; ese fallback no autoriza crear roles en la raíz.
+
 1. Mantener `AWS_DEPLOY_ENABLED=false` y `AWS_ROLLBACK_ENABLED=false` en ambos repositorios.
 2. Autenticarse en AWS con la identidad administrativa aprobada y verificar account/region mediante una llamada de solo lectura.
 3. Confirmar que el proveedor OIDC existente tiene exactamente el issuer/audience aprobados; abortar si falta o difiere, sin recrearlo automáticamente.

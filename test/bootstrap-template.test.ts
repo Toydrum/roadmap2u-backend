@@ -646,6 +646,33 @@ describe('custom stage CDK bootstrap template', () => {
     });
   });
 
+  it.each(['dev', 'test', 'prod'] as const)(
+    'handles a missing family pilot role precheck without permitting root-path creation (%s)',
+    (stage) => {
+      const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
+      const statements =
+        template.Resources.BootstrapOperatorRole.Properties.Policies[0].PolicyDocument.Statement;
+      const missingRoles = statements.find(
+        (statement: any) => statement.Sid === 'InspectAndCleanMissingFamilyPilotRoles',
+      );
+
+      // IAM resolves an absent GetRole/DeleteRole by its globally unique name, before a path exists.
+      expect(missingRoles?.Effect).toBe('Allow');
+      expect(missingRoles.Action).toEqual(['iam:GetRole', 'iam:DeleteRole']);
+      expect(missingRoles.Resource).toContain(
+        `arn:aws:iam::765932874577:role/roadmap2u-${stage}-family-pilot-operator`,
+      );
+      expect(missingRoles.Resource).toEqual(
+        ['dev', 'test', 'prod'].map(
+          (target) => `arn:aws:iam::765932874577:role/roadmap2u-${target}-family-pilot-operator`,
+        ),
+      );
+      expect(JSON.stringify(missingRoles)).not.toContain('*');
+      expect(missingRoles.Action).not.toContain('iam:CreateRole');
+      expect(missingRoles.Action).not.toContain('iam:PutRolePolicy');
+    },
+  );
+
   it('manages CloudFormation role-name lookups only for the exact control-plane roles', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
     const statements =
