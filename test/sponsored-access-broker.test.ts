@@ -1,6 +1,7 @@
 import { ApiError } from '@app/api/contracts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { deriveAccessItem } from '../lambda/commercial/access-resolver';
+import { createCoverageAssignment } from '../lambda/family/model';
 import {
   ACCESS_CODE_VERSION,
   buildIssuedAccessCode,
@@ -19,7 +20,7 @@ import {
   type SponsoredAccessCommand,
   type UnsignedSponsoredAccessCommand,
 } from '../lambda/commercial/sponsored-access-broker';
-import type { CommercialConfigResult, CommercialFlags } from '../lambda/commercial/flags';
+import { FAMILY_BILLING_FLAG_DEFAULTS, type CommercialConfigResult, type CommercialFlags } from '../lambda/commercial/flags';
 import type { AccessItem, GrantItem } from '../lambda/commercial/model';
 
 const NOW = Date.parse('2026-08-22T18:30:00.000Z');
@@ -40,6 +41,7 @@ function flags(overrides: Partial<CommercialFlags> = {}): CommercialConfigResult
     freshness: 'fresh',
     loadedAt: NOW,
     flags: {
+      ...FAMILY_BILLING_FLAG_DEFAULTS,
       revision: 1,
       quotaMode: 'enforce',
       capabilityMode: 'enforce',
@@ -136,6 +138,16 @@ function expectApiError(error: unknown, code: string): void {
 
 describe('SponsoredAccessBroker', () => {
   beforeEach(() => vi.restoreAllMocks());
+
+  it('revokes only the grant while retaining independent family coverage', async () => {
+    const coverage = createCoverageAssignment({ householdId: 'household-a', accountId: OWNER, seatType: 'primary_responsible', paidThrough: NOW + 60_000, now: NOW - 1_000 });
+    const { broker, proposals } = makeDeps({ readGrantSnapshot: async () => ({ ...premiumSnapshot(), coverage }) });
+    await broker.execute(signed({ command: 'revoke-grant', stage: STAGE, commandId: COMMAND_ID, issuanceId: ISSUANCE_ID, reason: 'remove only sponsored access' }), { actorArn: ACTOR, requestId: 'request-1' });
+    expect(proposals[0]).toMatchObject({
+      kind: 'revoke-grant', paidSources: { coverage }, grant: { status: 'revoked' },
+      access: { effectivePlanKey: 'premium', capabilities: { family: true }, activeSources: [expect.objectContaining({ scope: 'family_member' })] },
+    });
+  });
 
   it('rejects callers outside the stage-scoped IAM role allowlist', async () => {
     const { deps, broker } = makeDeps();

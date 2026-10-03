@@ -2,6 +2,7 @@ import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, it } from 'vitest';
 import { RoadmapStack } from '../lib/roadmap-stack';
+import { COMMERCIAL_FLAGS_ATTRIBUTES } from '../lambda/commercial/flags';
 
 const ACCOUNT = '123456789012';
 const HOSTED_ZONE_ID = 'Z0123456789ABCDEFGHIJ';
@@ -92,7 +93,7 @@ describe('commercial exact HTTP routes', () => {
 });
 
 describe('commercial route runtime isolation', () => {
-  it('gives the public catalog no data, identity, queue, config or secret permission', () => {
+  it('gives the public catalog only projected GetItem on the config partition, without user data or writes', () => {
     const template = renderedBackend();
     const [, catalog] = lambdaByName(template, 'roadmap-catalog-dev');
     const roleId = catalog.Properties.Role['Fn::GetAtt'][0] as string;
@@ -100,12 +101,21 @@ describe('commercial route runtime isolation', () => {
     const statements = roleStatements(template, roleId);
     const serialized = JSON.stringify(statements);
 
-    expect(catalog.Properties.Environment).toBeUndefined();
+    expect(catalog.Properties.Environment.Variables).toEqual({ TABLE_NAME: { Ref: expect.stringMatching(/^Table/) } });
     expect(role.Properties.ManagedPolicyArns).toHaveLength(1);
     expect(JSON.stringify(role.Properties.ManagedPolicyArns)).toContain(
       'AWSLambdaBasicExecutionRole',
     );
-    expect(serialized).not.toMatch(/dynamodb:|ssm:|secretsmanager:|cognito-idp:|sqs:/i);
+    expect(statements).toEqual([expect.objectContaining({
+      Sid: 'ReadPublicCatalogFlags', Effect: 'Allow', Action: 'dynamodb:GetItem',
+      Resource: { 'Fn::GetAtt': [expect.stringMatching(/^Table/), 'Arn'] },
+      Condition: {
+        'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['COMMERCIAL#CONFIG'], 'dynamodb:Attributes': [...COMMERCIAL_FLAGS_ATTRIBUTES] },
+        Null: { 'dynamodb:Attributes': 'false' },
+        StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+      },
+    })]);
+    expect(serialized).not.toMatch(/ssm:|secretsmanager:|cognito-idp:|sqs:|USER#|HOUSEHOLD#|\/index\//i);
   }, 20_000);
 
   it('restricts the access reader to owner reads and transaction-enclosed materialization', () => {
@@ -164,6 +174,7 @@ describe('commercial route runtime isolation', () => {
         'grantId',
         'activeTrees',
         'effectivePlanKey',
+        'paidThrough', 'graceUntil', 'householdId', 'seatType', 'entityType', 'sourceId', 'accountId',
       ]),
     );
     expect(JSON.stringify(safeAttributes)).not.toMatch(

@@ -42,6 +42,7 @@ import { PASSWORD_POLICY } from '@app/auth/auth-types';
 import { createStageManagedPolicies } from './stage-policies';
 import { createCommercialObservability } from './commercial-observability';
 import { bundledAwsSdkEsm } from './lambda-bundling';
+import { COMMERCIAL_FLAGS_ATTRIBUTES } from '../lambda/commercial/flags';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT_DOMAIN = 'roadmap2u.com';
@@ -149,19 +150,37 @@ const COMMERCIAL_CONFIG_WRITE_ACTIONS = [
 
 const FAMILY_FENCE_SAFE_READ_ATTRIBUTES = [
   'accountType',
+  'accountId',
+  'adultId',
+  'assignedAt',
+  'country',
   'createdAt',
   'createdMinorIds',
+  'entityType',
   'familyFenceVersion',
   'gsi1pk',
   'gsi1sk',
+  'gsi2pk',
+  'gsi2sk',
   'guardianId',
+  'householdId',
   'kind',
   'linkId',
+  'majorityAt',
   'minorId',
   'pk',
+  'primaryResponsibleId',
+  'revision',
+  'role',
+  'seatNumber',
+  'seatType',
   'sk',
+  'state',
   'status',
+  'updatedAt',
   'userId',
+  'validFrom',
+  'validUntil',
 ] as const;
 
 const COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES = [
@@ -182,6 +201,13 @@ const COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES = [
 ] as const;
 
 const COMMERCIAL_ACCESS_SAFE_ATTRIBUTES = [
+  'entityType',
+  'accountId',
+  'householdId',
+  'seatType',
+  'sourceId',
+  'paidThrough',
+  'graceUntil',
   'pk',
   'sk',
   'userId',
@@ -599,6 +625,57 @@ export class RoadmapStack extends Stack {
       authType: lambda.FunctionUrlAuthType.AWS_IAM,
     });
 
+    const familyPilotBrokerName = `roadmap-family-pilot-broker-${stage}`;
+    const familyPilotBrokerRole = createRuntimeRole(this, 'FamilyPilotBrokerRole', stage);
+    const familyPilotBroker = new NodejsFunction(this, 'FamilyPilotBroker', {
+      functionName: familyPilotBrokerName,
+      entry: join(here, '../lambda/family-pilot-broker-handler.ts'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
+      timeout: Duration.seconds(15),
+      role: familyPilotBrokerRole,
+      logGroup: createFunctionLogGroup(this, 'FamilyPilotBrokerLogs', familyPilotBrokerName, stage),
+      environment: {
+        TABLE_NAME: table.tableName,
+        AUDIT_TABLE_NAME: accessAuditTable.tableName,
+        COMMERCIAL_STAGE: stage,
+        PILOT_ACCOUNT_ID: this.account,
+      },
+      bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
+    });
+    familyPilotBrokerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'ReadOnlyFamilyPilotState',
+      actions: ['dynamodb:GetItem'],
+      resources: [table.tableArn],
+      conditions: { 'ForAllValues:StringLike': {
+        'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*', 'ADMIN#FAMILY_PILOT'],
+      } },
+    }));
+    familyPilotBrokerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'TransactOnlyFamilyPilotState',
+      actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+      resources: [table.tableArn],
+      conditions: {
+        'ForAllValues:StringLike': {
+          'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*', 'ADMIN#FAMILY_PILOT'],
+        },
+        StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+      },
+    }));
+    familyPilotBrokerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'TransactOnlyFamilyPilotAudit',
+      actions: ['dynamodb:PutItem'],
+      resources: [accessAuditTable.tableArn],
+      conditions: {
+        'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#FAMILY_PILOT#*' },
+        StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+      },
+    }));
+    denyCommercialConfigWrites(familyPilotBrokerRole, table);
+    const familyPilotBrokerUrl = familyPilotBroker.addFunctionUrl({
+      authType: lambda.FunctionUrlAuthType.AWS_IAM,
+    });
+
     const commercialInventoryExecutorName = `roadmap-commercial-inventory-executor-${stage}`;
     const commercialInventoryExecutorRole = createRuntimeRole(
       this,
@@ -766,6 +843,62 @@ export class RoadmapStack extends Stack {
       targets: [new eventTargets.LambdaFunction(accountClosureReconciler)],
     });
 
+    const majorityReconcilerName = `roadmap-family-majority-reconciler-${stage}`;
+    const majorityReconcilerRole = createRuntimeRole(this, 'FamilyMajorityReconcilerRole', stage);
+    const majorityReconciler = new NodejsFunction(this, 'FamilyMajorityReconciler', {
+      functionName: majorityReconcilerName,
+      entry: join(here, '../lambda/family-majority-reconciler.ts'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
+      timeout: Duration.minutes(2),
+      role: majorityReconcilerRole,
+      logGroup: createFunctionLogGroup(this, 'FamilyMajorityReconcilerLogs', majorityReconcilerName, stage),
+      environment: { TABLE_NAME: table.tableName, USER_POOL_ID: pool.userPoolId,
+        AUDIT_TABLE_NAME: accessAuditTable.tableName },
+      bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
+    });
+    majorityReconcilerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'ReadDueMajorityIndex',
+      actions: ['dynamodb:Query'],
+      resources: [`${table.tableArn}/index/gsi2`],
+    }));
+    majorityReconcilerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'ReadFamilyMajorityState',
+      actions: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:BatchGetItem'],
+      resources: [table.tableArn],
+      conditions: { 'ForAllValues:StringLike': {
+        'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
+      } },
+    }));
+    majorityReconcilerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'TransactFamilyMajorityState',
+      actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+      resources: [table.tableArn],
+      conditions: {
+        'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'] },
+        StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+      },
+    }));
+    majorityReconcilerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'TransactFamilyMajorityAudit', actions: ['dynamodb:PutItem'],
+      resources: [accessAuditTable.tableArn],
+      conditions: {
+        'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#FAMILY_AGE#*' },
+        StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+      },
+    }));
+    majorityReconcilerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'UpdateOnlyOwnUserPoolAccountType',
+      actions: ['cognito-idp:AdminUpdateUserAttributes'],
+      resources: [pool.userPoolArn],
+    }));
+    denyCommercialConfigWrites(majorityReconcilerRole, table);
+    new events.Rule(this, 'FamilyMajorityReconcileSchedule', {
+      ruleName: majorityReconcilerName,
+      schedule: events.Schedule.rate(Duration.hours(1)),
+      targets: [new eventTargets.LambdaFunction(majorityReconciler)],
+    });
+
     postConfirmation.addEnvironment('TABLE_NAME', table.tableName);
     postConfirmationRole.addToPolicy(
       new iam.PolicyStatement({
@@ -879,6 +1012,20 @@ export class RoadmapStack extends Stack {
 
     const catalogName = `roadmap-catalog-${stage}`;
     const catalogRole = createRuntimeRole(this, 'CatalogRole', stage);
+    // IAM scopes partition + attributes; the handler fixes sk=FLAGS, never request data.
+    catalogRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'ReadPublicCatalogFlags',
+      actions: ['dynamodb:GetItem'],
+      resources: [table.tableArn],
+      conditions: {
+        'ForAllValues:StringEquals': {
+          'dynamodb:LeadingKeys': ['COMMERCIAL#CONFIG'],
+          'dynamodb:Attributes': [...COMMERCIAL_FLAGS_ATTRIBUTES],
+        },
+        Null: { 'dynamodb:Attributes': 'false' },
+        StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+      },
+    }));
     const catalog = new NodejsFunction(this, 'Catalog', {
       functionName: catalogName,
       entry: join(here, '../lambda/catalog.ts'),
@@ -887,6 +1034,7 @@ export class RoadmapStack extends Stack {
       timeout: Duration.seconds(5),
       role: catalogRole,
       logGroup: createFunctionLogGroup(this, 'CatalogLogs', catalogName, stage),
+      environment: { TABLE_NAME: table.tableName },
       bundling: {
         format: OutputFormat.ESM,
         tsconfig: join(here, '../tsconfig.json'),
@@ -1256,6 +1404,7 @@ export class RoadmapStack extends Stack {
     new CfnOutput(this, 'SponsoredAccessBrokerFunctionUrl', {
       value: sponsoredAccessBrokerUrl.url,
     });
+    new CfnOutput(this, 'FamilyPilotBrokerFunctionUrl', { value: familyPilotBrokerUrl.url });
 
     const commercialObservability = createCommercialObservability(this, 'CommercialObservability', {
       stage,
@@ -1282,6 +1431,7 @@ export class RoadmapStack extends Stack {
     new CfnOutput(this, 'SponsoredAccessBrokerFunctionArn', {
       value: sponsoredAccessBroker.functionArn,
     });
+    new CfnOutput(this, 'FamilyPilotBrokerFunctionArn', { value: familyPilotBroker.functionArn });
     new CfnOutput(this, 'CommercialAlarmTopicArn', {
       value: commercialObservability.topic.topicArn,
     });
@@ -1443,6 +1593,10 @@ export class RoadmapCiBootstrapStack extends Stack {
         props.operationsPrincipalArn,
         stage,
       );
+      const familyPilotOperatorRole = this.createFamilyPilotOperatorRole(
+        props.operationsPrincipalArn,
+        stage,
+      );
       const commercialE2EFixtureRole =
         stage === 'prod'
           ? undefined
@@ -1458,6 +1612,9 @@ export class RoadmapCiBootstrapStack extends Stack {
       });
       new CfnOutput(this, `${stage}SponsoredAccessOperatorRoleArn`, {
         value: sponsoredAccessOperatorRole.roleArn,
+      });
+      new CfnOutput(this, `${stage}FamilyPilotOperatorRoleArn`, {
+        value: familyPilotOperatorRole.roleArn,
       });
       if (commercialE2EFixtureRole) {
         new CfnOutput(this, `${stage}CommercialE2EFixtureRoleArn`, {
@@ -1656,6 +1813,10 @@ export class RoadmapCiBootstrapStack extends Stack {
     return `arn:${Aws.PARTITION}:lambda:us-east-1:${this.account}:function:roadmap-sponsored-access-broker-${stage}`;
   }
 
+  private familyPilotBrokerArn(stage: DeploymentStage): string {
+    return `arn:${Aws.PARTITION}:lambda:us-east-1:${this.account}:function:roadmap-family-pilot-broker-${stage}`;
+  }
+
   private denyCommercialConfigStatement(stage: DeploymentStage): iam.PolicyStatement {
     return new iam.PolicyStatement({
       sid: 'DenyCommercialConfigWrites',
@@ -1732,6 +1893,24 @@ export class RoadmapCiBootstrapStack extends Stack {
         conditions: {
           Bool: { 'lambda:InvokedViaFunctionUrl': 'true' },
         },
+      }),
+    ];
+  }
+
+  private familyPilotBrokerInvokeStatements(stage: DeploymentStage): iam.PolicyStatement[] {
+    const brokerArn = this.familyPilotBrokerArn(stage);
+    return [
+      new iam.PolicyStatement({
+        sid: 'InvokeFamilyPilotBrokerFunctionUrl',
+        actions: ['lambda:InvokeFunctionUrl'],
+        resources: [brokerArn],
+        conditions: { StringEquals: { 'lambda:FunctionUrlAuthType': 'AWS_IAM' } },
+      }),
+      new iam.PolicyStatement({
+        sid: 'InvokeFamilyPilotBrokerOnlyViaFunctionUrl',
+        actions: ['lambda:InvokeFunction'],
+        resources: [brokerArn],
+        conditions: { Bool: { 'lambda:InvokedViaFunctionUrl': 'true' } },
       }),
     ];
   }
@@ -1878,6 +2057,24 @@ export class RoadmapCiBootstrapStack extends Stack {
         statements: this.sponsoredAccessBrokerInvokeStatements(stage),
       }),
     );
+    return role;
+  }
+
+  private createFamilyPilotOperatorRole(principalArn: string, stage: DeploymentStage): iam.Role {
+    const role = new iam.Role(this, `FamilyPilotOperatorRole${stage}`, {
+      roleName: `roadmap2u-${stage}-family-pilot-operator`,
+      description: `MFA-only RoadMap2U ${stage} invited-family pilot operator`,
+      assumedBy: this.mfaUserPrincipal(principalArn),
+      path: `/roadmap2u/${stage}/operations/`,
+      maxSessionDuration: Duration.hours(1),
+    });
+    Tags.of(role).add('roadmap2u-project', 'RoadMap2U');
+    Tags.of(role).add('roadmap2u-stage', stage);
+    Tags.of(role).add('roadmap2u-purpose', 'family-pilot-operator');
+    role.attachInlinePolicy(new iam.Policy(this, `FamilyPilotOperatorPolicy${stage}`, {
+      policyName: `FamilyPilotOperatorPolicy-${stage}`,
+      statements: this.familyPilotBrokerInvokeStatements(stage),
+    }));
     return role;
   }
 

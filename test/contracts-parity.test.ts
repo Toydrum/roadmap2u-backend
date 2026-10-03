@@ -61,9 +61,9 @@ describe('vendored frontend contracts', () => {
       commitSha: expect.stringMatching(/^[0-9a-f]{40}$/),
       contractHash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
-    expect(lock['commitSha']).toBe('81df0894fe5643b31963a11b528f6a14a00ea5dd');
+    expect(lock['commitSha']).toBe('cd2c7b3c966cab69f0cde30def5286469b7ca899');
     expect(lock['contractHash']).toBe(
-      '433ff83548ac9ec806a2352a59b403438220bb05f25c2fa70dc1e776d253d61c',
+      'de593ab903028f8812c6b6f616e509eff3f2102400a8b70738d82e7ae0f86485',
     );
     expect(lock['contractHash']).toBe(contractHash(join(backendRoot, 'shared')));
   });

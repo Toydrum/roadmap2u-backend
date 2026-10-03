@@ -4,7 +4,8 @@ import { accountClosureKey } from '../account-closure';
 import { WRITABLE_PROFILE_CONDITION } from '../authz';
 import { K, type ProfileItem } from '../db';
 import type { AccessItem, GrantItem } from './model';
-import { createAccessPutProposal, deriveAccessItem } from './access-resolver';
+import { createAccessPutProposal, deriveAccessItem, type PaidAccessSources } from './access-resolver';
+import { paidSourceGuards } from './paid-source-guards';
 import {
   flagsForCommercialOperation,
   type CommercialConfigResult,
@@ -14,7 +15,7 @@ import type { UsageMutationDelta } from './usage';
 
 type TransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
 
-export interface CommercialMutationSnapshot {
+export interface CommercialMutationSnapshot extends PaidAccessSources {
   readonly profile?: ProfileItem;
   readonly closure?: Readonly<Record<string, unknown>>;
   readonly access?: AccessItem;
@@ -332,7 +333,7 @@ function assertCurrentAccess(access: AccessItem, ownerSub: string, now: number):
     !isRecord(capabilities) ||
     typeof capabilities['cloudSync'] !== 'boolean' ||
     typeof capabilities['social'] !== 'boolean' ||
-    capabilities['family'] !== false;
+    typeof capabilities['family'] !== 'boolean';
   if (invalid) {
     throw new ApiError(
       'ACCESS_REVISION_CONFLICT',
@@ -576,7 +577,7 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
       const usage = migratedUsage(snapshot.usage, request.ownerSub);
       const access = snapshot.access
         ? await this.deps.resolveFreshAccess(request.ownerSub)
-        : deriveAccessItem(request.ownerSub, now, undefined, snapshot.grants);
+        : deriveAccessItem(request.ownerSub, now, undefined, snapshot.grants, snapshot);
       assertCurrentAccess(access, request.ownerSub, now);
       const resolvedFlags = applyCapabilityPolicy(
         this.deps.emitDecision,
@@ -591,7 +592,8 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
         currentMigrationGuard,
         ...(snapshot.access
           ? [accessGuard(this.deps.tableName, access, now)]
-          : [createAccessPutProposal(this.deps.tableName, access, undefined)]),
+          : [createAccessPutProposal(this.deps.tableName, access, undefined),
+            ...paidSourceGuards(this.deps.tableName, request.ownerSub, snapshot)]),
       ];
       if (usage) {
         if (usage.activeTrees + aggregate.physicalActiveTrees < 0) {

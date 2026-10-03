@@ -142,8 +142,7 @@ async function readAccountSnapshot(
   ]);
   return {
     ...lifecycle,
-    ...(commercial.access ? { access: commercial.access } : {}),
-    grants: commercial.grants,
+    ...commercial,
   };
 }
 
@@ -163,6 +162,8 @@ async function readGrantSnapshot(
     grant,
     grants: snapshot.grants,
     access: snapshot.access,
+    subscription: snapshot.subscription,
+    coverage: snapshot.coverage,
   };
 }
 

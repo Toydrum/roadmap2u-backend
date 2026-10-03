@@ -1,6 +1,6 @@
 import { ApiError } from '@app/api/contracts';
 import { createHash } from 'node:crypto';
-import { deriveAccessItem } from './access-resolver';
+import { deriveAccessItem, type PaidAccessSources } from './access-resolver';
 import {
   accessCodeCommandKey,
   buildIssuedAccessCode,
@@ -76,7 +76,7 @@ export interface SponsoredAccessBrokerContext {
   readonly requestId: string;
 }
 
-export interface SponsoredGrantSnapshot {
+export interface SponsoredGrantSnapshot extends PaidAccessSources {
   readonly code: AccessCodeItem;
   readonly ownerSub: string;
   readonly grant: GrantItem;
@@ -103,6 +103,7 @@ export type SponsoredAccessBrokerProposal =
     })
   | (ProposalBase & {
       readonly kind: 'extend-grant';
+      readonly paidSources?: PaidAccessSources;
       readonly ownerSub: string;
       readonly issuanceId: string;
       readonly expectedGrantRevision: number;
@@ -112,6 +113,7 @@ export type SponsoredAccessBrokerProposal =
     })
   | (ProposalBase & {
       readonly kind: 'revoke-grant';
+      readonly paidSources?: PaidAccessSources;
       readonly ownerSub: string;
       readonly issuanceId: string;
       readonly expectedGrantRevision: number;
@@ -545,7 +547,7 @@ export class SponsoredAccessBroker {
         updatedAt: now,
       };
     }
-    const nextAccess = deriveAccessItem(ownerSub, now, access, replaceGrant(grants, next));
+    const nextAccess = deriveAccessItem(ownerSub, now, access, replaceGrant(grants, next), snapshot);
     const metadata = grantMetadata(command.issuanceId, next);
     const item = commandItem(command, requestHash, context.actorArn, now, { metadata });
     const proposal: SponsoredAccessBrokerProposal = {
@@ -556,6 +558,8 @@ export class SponsoredAccessBroker {
       expectedAccessRevision: access.revision,
       grant: next,
       access: nextAccess,
+      paidSources: { ...(snapshot.subscription ? { subscription: snapshot.subscription } : {}),
+        ...(snapshot.coverage ? { coverage: snapshot.coverage } : {}) },
       commandItem: item,
       audit: audit(context, {
         targetKind: 'GRANT',

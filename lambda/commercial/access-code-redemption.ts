@@ -1,7 +1,7 @@
 import { ApiError } from '@app/api/contracts';
 import { isTrustedRequestId } from '../request-id';
 import type { ProfileItem } from '../db';
-import { deriveAccessItem } from './access-resolver';
+import { deriveAccessItem, type PaidAccessSources } from './access-resolver';
 import {
   accessCodeFingerprint,
   buildSponsoredGrant,
@@ -15,7 +15,7 @@ import type { AccessItem, GrantItem } from './model';
 
 export type AccessCodeRedemptionMetric = 'success' | 'invalid' | 'rate_limited' | 'conflict';
 
-export interface RedemptionAccountSnapshot {
+export interface RedemptionAccountSnapshot extends PaidAccessSources {
   readonly profile?: ProfileItem;
   readonly closure?: Readonly<Record<string, unknown>>;
   readonly access?: AccessItem;
@@ -23,6 +23,7 @@ export interface RedemptionAccountSnapshot {
 }
 
 export interface RedemptionCommitProposal {
+  readonly paidSources?: PaidAccessSources;
   readonly ownerSub: string;
   readonly issuanceId: string;
   readonly expectedCodeRevision: number;
@@ -185,7 +186,7 @@ export class AccessCodeRedeemer {
     const access = deriveAccessItem(input.ownerSub, now, snapshot.access, [
       ...snapshot.grants,
       grant,
-    ]);
+    ], snapshot);
     const proposal: RedemptionCommitProposal = {
       ownerSub: input.ownerSub,
       issuanceId: stored.issuanceId,
@@ -195,6 +196,8 @@ export class AccessCodeRedeemer {
       requestId: input.requestId,
       grant,
       access,
+      paidSources: { ...('subscription' in snapshot ? { subscription: snapshot.subscription } : {}),
+        ...('coverage' in snapshot ? { coverage: snapshot.coverage } : {}) },
       audit: {
         targetKind: 'ACCESS_CODE',
         targetId: stored.issuanceId,

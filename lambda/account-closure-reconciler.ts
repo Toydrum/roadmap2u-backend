@@ -15,6 +15,23 @@ export interface AccountClosureReconcilerDeps extends Pick<Deps, 'ddb' | 'table'
   readonly queue: AccountClosureQueue;
 }
 
+export function isDueOpenAccountClosure(
+  closure: AccountClosureItem,
+  observedAt: number,
+): boolean {
+  const isProcessableState =
+    closure.state === 'requested' ||
+    closure.state === 'purging' ||
+    closure.state === 'purgeComplete';
+  return (
+    isProcessableState &&
+    typeof closure.sub === 'string' &&
+    typeof closure.closureId === 'string' &&
+    typeof closure.nextAttemptAt === 'number' &&
+    closure.nextAttemptAt <= observedAt
+  );
+}
+
 export async function reconcileOpenAccountClosures(
   deps: AccountClosureReconcilerDeps,
 ): Promise<void> {
@@ -35,14 +52,9 @@ export async function reconcileOpenAccountClosures(
       }),
     );
     for (const closure of (page.Items ?? []) as AccountClosureItem[]) {
-      if (
-        closure.state !== 'completed' &&
-        closure.state !== 'blocked' &&
-        typeof closure.sub === 'string' &&
-        typeof closure.closureId === 'string' &&
-        typeof closure.nextAttemptAt === 'number' &&
-        closure.nextAttemptAt <= deps.now()
-      ) {
+      // Legacy purgeComplete records remain processable: the worker reopens them
+      // at the Household v2 checkpoint before attempting identity deletion.
+      if (isDueOpenAccountClosure(closure, deps.now())) {
         await deps.queue.enqueue({ sub: closure.sub, closureId: closure.closureId });
       }
     }

@@ -78,6 +78,30 @@ function deps(overrides: Record<string, unknown> = {}) {
 }
 
 describe('commercial config CLI', () => {
+  it('previews all seven controls without writes, then serializes them after hash confirmation', async () => {
+    const { runCommercialConfigCli } = await cliModule();
+    const fixture = deps({ getCallerIdentity: vi.fn(async () => ({ Account: ACCOUNT, Arn: FLAG_ARN })) });
+    const argv = [
+      '--stage', 'dev', '--url', URL, '--reason', 'prepare family rollout', '--expected-revision', '7',
+      '--family-creation-enabled', 'false', '--minor-linking-enabled', 'false', '--minor-social-enabled', 'false',
+      '--family-catalog-enabled', 'true', '--checkout-enabled', 'false', '--subscription-changes-enabled', 'false',
+      '--billing-enforcement-mode', 'off',
+    ];
+    await expect(runCommercialConfigCli({ ...fixture.options, command: 'set-flags', argv })).resolves.toBe(0);
+    const output = fixture.output.join('\n');
+    const hash = /dryRunHash=([a-f0-9]{64})/.exec(output)?.[1];
+    expect(hash).toBeDefined();
+    expect(fixture.options.fetch).not.toHaveBeenCalled();
+    const send = vi.fn(async () => ({ ok: true, status: 200,
+      text: async () => JSON.stringify({ command: 'set-flags', revision: 8 }) }));
+    await runCommercialConfigCli({ ...fixture.options, fetch: send, command: 'set-flags',
+      argv: [...argv, '--apply', '--confirm-stage', 'dev', '--confirm-hash', hash] });
+    expect(JSON.parse((send.mock.calls as unknown as [string, { body: string }][])[0]![1].body).changes).toEqual({
+      familyCreationEnabled: false, minorLinkingEnabled: false, minorSocialEnabled: false,
+      familyCatalogEnabled: true, checkoutEnabled: false, subscriptionChangesEnabled: false,
+      billingEnforcementMode: 'off',
+    });
+  });
   it('uses the direct AWS SDK credential provider for apply credentials, preserves the profile, and never calls DynamoDB', async () => {
     const { createAwsCredentialLoader } = await cliModule();
     const env: Record<string, string> = {

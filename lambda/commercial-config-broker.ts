@@ -4,13 +4,15 @@ import {
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
 import type { AuditWriter } from './commercial/audit';
-import type { CommercialMode } from './commercial/flags';
+import {
+  FAMILY_BILLING_FLAG_DEFAULTS,
+  FAMILY_BILLING_FLAG_NAMES,
+  type FamilyBillingFlags,
+  type CommercialMode,
+} from './commercial/flags';
 import { isTrustedRequestId } from './request-id';
 
-export type CommercialConfigCommand =
-  | 'bootstrap-flags'
-  | 'set-flags'
-  | 'freeze-cutover';
+export type CommercialConfigCommand = 'bootstrap-flags' | 'set-flags' | 'freeze-cutover';
 
 export interface CommercialConfigBrokerEvent {
   readonly body?: string | null;
@@ -48,18 +50,21 @@ interface BootstrapFlagsRequest {
 }
 
 type MutableFlagName =
+  | keyof FamilyBillingFlags
   | 'quotaMode'
   | 'capabilityMode'
   | 'accessCodeIssuanceEnabled'
   | 'accessCodeRedemptionEnabled';
 
 type MutableFlagChanges = Readonly<
-  Partial<{
-    quotaMode: CommercialMode;
-    capabilityMode: CommercialMode;
-    accessCodeIssuanceEnabled: boolean;
-    accessCodeRedemptionEnabled: boolean;
-  }>
+  Partial<
+    FamilyBillingFlags & {
+      quotaMode: CommercialMode;
+      capabilityMode: CommercialMode;
+      accessCodeIssuanceEnabled: boolean;
+      accessCodeRedemptionEnabled: boolean;
+    }
+  >
 >;
 
 interface SetFlagsRequest {
@@ -90,6 +95,7 @@ const MUTABLE_FLAG_NAMES = Object.freeze<readonly MutableFlagName[]>([
   'capabilityMode',
   'accessCodeIssuanceEnabled',
   'accessCodeRedemptionEnabled',
+  ...FAMILY_BILLING_FLAG_NAMES,
 ]);
 const MUTABLE_FLAG_NAME_SET = new Set<string>(MUTABLE_FLAG_NAMES);
 const MAX_REASON_BYTES = 256;
@@ -99,7 +105,10 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const ASSUMED_ROLE_ARN_PATTERN =
   /^arn:aws:sts::([0-9]{12}):assumed-role\/([A-Za-z0-9_+=,.@-]{1,64})\/([A-Za-z0-9_+=,.@-]{2,64})$/;
 
-function respond(statusCode: number, payload: Readonly<Record<string, unknown>>): CommercialConfigBrokerResponse {
+function respond(
+  statusCode: number,
+  payload: Readonly<Record<string, unknown>>,
+): CommercialConfigBrokerResponse {
   return { statusCode, headers: JSON_HEADERS, body: JSON.stringify(payload) };
 }
 
@@ -152,7 +161,10 @@ function parseChanges(value: unknown): MutableFlagChanges | null {
 
   for (const key of keys) {
     const flagValue = value[key];
-    if (key === 'quotaMode' || key === 'capabilityMode') {
+    if ((key === 'checkoutEnabled' || key === 'subscriptionChangesEnabled') && flagValue !== false) {
+      return null;
+    }
+    if (key === 'quotaMode' || key === 'capabilityMode' || key === 'billingEnforcementMode') {
       if (!isMode(flagValue)) return null;
     } else if (typeof flagValue !== 'boolean') {
       return null;
@@ -179,15 +191,7 @@ function parseBody(event: CommercialConfigBrokerEvent): BrokerRequest | null {
   }
 
   if (value['command'] === 'set-flags') {
-    if (
-      !hasExactKeys(value, [
-        'command',
-        'stage',
-        'expectedRevision',
-        'reason',
-        'changes',
-      ])
-    ) {
+    if (!hasExactKeys(value, ['command', 'stage', 'expectedRevision', 'reason', 'changes'])) {
       return null;
     }
     const changes = parseChanges(value['changes']);
@@ -279,6 +283,7 @@ async function bootstrapFlags(
               TableName: deps.tableName,
               Item: {
                 ...CONFIG_KEY,
+                ...FAMILY_BILLING_FLAG_DEFAULTS,
                 revision: 1,
                 quotaMode: 'off',
                 capabilityMode: 'off',
@@ -321,9 +326,7 @@ async function setFlags(
 ): Promise<CommercialConfigBrokerResponse> {
   const now = deps.now();
   const nextRevision = request.expectedRevision + 1;
-  const changedFields = MUTABLE_FLAG_NAMES.filter((field) =>
-    Object.hasOwn(request.changes, field),
-  );
+  const changedFields = MUTABLE_FLAG_NAMES.filter((field) => Object.hasOwn(request.changes, field));
   const expressionParts = [
     '#revision = :nextRevision',
     '#updatedAt = :updatedAt',
@@ -349,6 +352,13 @@ async function setFlags(
   for (const field of changedFields) {
     names[`#${field}`] = field;
     values[`:${field}`] = request.changes[field];
+  }
+  // Complete legacy rows atomically, preserving any already-configured controls.
+  for (const field of FAMILY_BILLING_FLAG_NAMES) {
+    if (changedFields.includes(field)) continue;
+    names[`#${field}`] = field;
+    values[`:default_${field}`] = FAMILY_BILLING_FLAG_DEFAULTS[field];
+    expressionParts.push(`#${field} = if_not_exists(#${field}, :default_${field})`);
   }
 
   try {
@@ -488,9 +498,7 @@ export function createCommercialConfigBroker(deps: CommercialConfigBrokerDeps) {
       return respond(401, { error: 'UNAUTHENTICATED' });
     }
     const requestId = event.requestContext?.requestId;
-    if (
-      !isTrustedRequestId(requestId)
-    ) {
+    if (!isTrustedRequestId(requestId)) {
       return respond(400, { error: 'INVALID_REQUEST' });
     }
     if (event.requestContext?.http?.method !== 'POST') {

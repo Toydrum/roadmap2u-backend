@@ -17,10 +17,13 @@ import {
   createAccessReader,
   createDynamoAccessReaderDeps,
   createDynamoAccessResolver,
+  accessSummary,
   type AccessReaderEvent,
   type OwnerCommercialSnapshot,
 } from '../lambda/access-reader';
-import { createCatalogHandler } from '../lambda/catalog';
+import { createCatalogHandler, createDynamoCatalogHandler } from '../lambda/catalog';
+import { COMMERCIAL_FLAGS_ATTRIBUTES, FAMILY_BILLING_FLAG_DEFAULTS, type CommercialConfigResult } from '../lambda/commercial/flags';
+import { createCoverageAssignment } from '../lambda/family/model';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const NOW = Date.UTC(2026, 7, 19, 18, 0, 0);
@@ -102,33 +105,65 @@ function json(response: { body: string }): unknown {
 }
 
 describe('GET /v1/plans catalog Lambda', () => {
-  it('returns the exact compiled prepayment catalog with a five-minute public cache', async () => {
-    const previousTableName = process.env['TABLE_NAME'];
-    process.env['TABLE_NAME'] = 'must-not-be-read';
+  beforeEach(() => ddbMock.reset());
+  const rawFlags = {
+    pk: 'COMMERCIAL#CONFIG', sk: 'FLAGS', ...FAMILY_BILLING_FLAG_DEFAULTS,
+    revision: 1, quotaMode: 'off', capabilityMode: 'off', accessCodeIssuanceEnabled: false,
+    accessCodeRedemptionEnabled: false, premiumPaymentsEnabled: false, updatedAt: NOW,
+    updatedBy: 'operator', reason: 'public catalog rollout',
+  };
 
-    try {
-      const response = await createCatalogHandler()({ arbitrary: 'public request' });
-
-      expect(response).toEqual({
-        statusCode: 200,
-        headers: {
-          'content-type': 'application/json',
-          'cache-control': 'public, max-age=300',
-        },
-        body: JSON.stringify(PREPAYMENT_CATALOG),
-      });
-      expect(json(response)).toEqual(PREPAYMENT_CATALOG);
-      expect(json(response)).toMatchObject({ paymentsEnabled: false });
-    } finally {
-      if (previousTableName === undefined) delete process.env['TABLE_NAME'];
-      else process.env['TABLE_NAME'] = previousTableName;
+  it.each([false, true])('chooses only the server-configured catalog when familyCatalogEnabled=%s', async (enabled) => {
+    ddbMock.on(GetCommand).resolves({ Item: { ...rawFlags, familyCatalogEnabled: enabled } });
+    const catalog = createDynamoCatalogHandler({ ddb: DynamoDBDocumentClient.from(new DynamoDBClient({})), tableName: 'roadmap-dev', now: () => NOW });
+    const response = await catalog({ body: JSON.stringify({ familyCatalogEnabled: !enabled }), queryStringParameters: { tableName: 'attacker', sk: 'PROFILE' } });
+    const body = JSON.parse(response.body);
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['cache-control']).toBe('public, max-age=30');
+    if (enabled) expect(body).toEqual(PREPAYMENT_CATALOG);
+    else {
+      expect(body).toEqual({ version: '2026-08-prepayment-v1', pricingVersion: 'launch-2026',
+        currency: 'MXN', taxInclusive: true, paymentsEnabled: false, plans: PREPAYMENT_CATALOG.plans });
+      expect(body).not.toHaveProperty('offers');
     }
+    expect(body.paymentsEnabled).toBe(false);
+    expect(response.body).not.toMatch(/priceId|providerId|updatedBy|reason/);
+    const input = ddbMock.commandCalls(GetCommand)[0]!.args[0].input;
+    expect(input).toMatchObject({ TableName: 'roadmap-dev', Key: { pk: 'COMMERCIAL#CONFIG', sk: 'FLAGS' }, ConsistentRead: true });
+    expect(Object.values(input.ExpressionAttributeNames!)).toEqual([...COMMERCIAL_FLAGS_ATTRIBUTES]);
+    expect(input.ProjectionExpression!.split(', ')).toHaveLength(COMMERCIAL_FLAGS_ATTRIBUTES.length);
+    await catalog();
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
   });
 
-  it('has no runtime data, identity, secret or payment dependency', () => {
+  it.each([undefined, null, { ...rawFlags, familyCatalogEnabled: 'yes' }])('keeps legacy offers on missing or malformed config %j', async (Item) => {
+    ddbMock.on(GetCommand).callsFake(() => ({ Item }));
+    const catalog = createDynamoCatalogHandler({ ddb: DynamoDBDocumentClient.from(new DynamoDBClient({})), tableName: 'roadmap-dev', now: () => NOW });
+    const response = await catalog();
+    expect(JSON.parse(response.body)).not.toHaveProperty('offers');
+    expect(response.headers['cache-control']).toBe('no-store');
+  });
+
+  it('falls back to legacy when a previously enabled configuration becomes stale', async () => {
+    let now = NOW;
+    ddbMock.on(GetCommand).resolvesOnce({ Item: { ...rawFlags, familyCatalogEnabled: true } }).rejects(new Error('read unavailable'));
+    const catalog = createDynamoCatalogHandler({ ddb: DynamoDBDocumentClient.from(new DynamoDBClient({})), tableName: 'roadmap-dev', now: () => now });
+    expect(JSON.parse((await catalog()).body).offers).toHaveLength(5);
+    now += 30_000;
+    const fallback = await catalog();
+    expect(JSON.parse(fallback.body)).not.toHaveProperty('offers');
+    expect(fallback.headers['cache-control']).toBe('no-store');
+  });
+
+  it('uses the legacy catalog when flags are explicitly unavailable', async () => {
+    const response = await createCatalogHandler({ resolveFlags: async (): Promise<CommercialConfigResult> => ({ status: 'unavailable', reason: 'read-failed' }) })();
+    expect(JSON.parse(response.body)).not.toHaveProperty('offers');
+  });
+
+  it('has no identity, secret or payment dependency', () => {
     const source = readFileSync(new URL('../lambda/catalog.ts', import.meta.url), 'utf8');
 
-    expect(source).not.toMatch(/process\.env|Dynamo|SSM|Secrets|Cognito|authorizer|jwt/i);
+    expect(source).not.toMatch(/SSM|Secrets|Cognito|authorizer|jwt/i);
     expect(source).not.toMatch(/Stripe|checkout|portal|webhook|priceId/i);
   });
 });
@@ -346,6 +381,57 @@ describe('Dynamo commercial reader adapters', () => {
     });
   });
 
+  it('reads both paid sources and preserves their trace in the public summary', async () => {
+    const coverage = createCoverageAssignment({ householdId: 'household-a', accountId: OWNER, seatType: 'primary_responsible', paidThrough: NOW + 60_000, now: NOW - 1_000 });
+    const subscription = {
+      pk: `USER#${OWNER}`, sk: 'SUBSCRIPTION#INDIVIDUAL', entityType: 'SubscriptionSource',
+      ownerSub: OWNER, sourceId: 'sub-a', state: 'active', paidThrough: NOW + 90_000,
+      graceUntil: null, revision: 1, updatedAt: NOW - 1_000,
+    };
+    ddbMock.on(GetCommand).callsFake((input) => ({ Item: [coverage, subscription].find((row) => row.pk === input.Key.pk && row.sk === input.Key.sk) }));
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    ddbMock.on(TransactWriteCommand).resolves({});
+    const resolver = createDynamoAccessResolver({ ddb: DynamoDBDocumentClient.from(new DynamoDBClient({})), tableName: 'roadmap-dev', now: () => NOW });
+    const result = await resolver.resolveFresh(OWNER);
+    expect(result.access.capabilities.family).toBe(true);
+    expect(result.access.activeSources).toHaveLength(2);
+    expect(accessSummary(result.access, { activeTrees: 0, visibleBranchesByTree: {} }).activeSources).toEqual(result.access.activeSources);
+    const transaction = ddbMock.commandCalls(TransactWriteCommand)[0]!.args[0].input.TransactItems!;
+    for (const row of [coverage, subscription]) {
+      expect(transaction).toContainEqual({ ConditionCheck: expect.objectContaining({
+        Key: { pk: row.pk, sk: row.sk },
+        ExpressionAttributeValues: expect.objectContaining({ ':revision': 1, ':state': 'active', ':paidThrough': row.paidThrough }),
+      }) });
+    }
+    for (const { args } of ddbMock.commandCalls(GetCommand)) {
+      expect(args[0].input.ConsistentRead).toBe(true);
+      expect(args[0].input.ProjectionExpression).toBeTypeOf('string');
+    }
+  });
+
+  it('re-derives access if coverage ends between its read and materialization', async () => {
+    const initial = createCoverageAssignment({ householdId: 'household-a', accountId: OWNER, seatType: 'minor', paidThrough: NOW + 60_000, now: NOW - 1_000 });
+    let current = initial;
+    ddbMock.on(GetCommand).callsFake((input) => ({ Item: input.Key.sk === 'COVERAGE#FAMILY' ? current : undefined }));
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    ddbMock.on(TransactGetCommand).resolves({ Responses: [{ Item: profile() }, {}, {}] });
+    let attempts = 0;
+    ddbMock.on(TransactWriteCommand).callsFake(() => {
+      if (++attempts === 1) {
+        current = { ...initial, state: 'ended', revision: 2 };
+        throw Object.assign(new Error('coverage changed'), { name: 'TransactionCanceledException' });
+      }
+      return {};
+    });
+    const resolver = createDynamoAccessResolver({ ddb: DynamoDBDocumentClient.from(new DynamoDBClient({})), tableName: 'roadmap-dev', now: () => NOW });
+    const result = await resolver.resolveFresh(OWNER);
+    expect(attempts).toBe(2);
+    expect(result.access.effectivePlanKey).toBe('free');
+    const first = ddbMock.commandCalls(TransactWriteCommand)[0]!.args[0].input.TransactItems!;
+    expect(first.some((item) => item.ConditionCheck?.Key?.sk === 'COVERAGE#FAMILY')).toBe(true);
+    expect(ddbMock.commandCalls(TransactWriteCommand).every(({ args }) => args[0].input.TransactItems?.every((item) => !item.Delete))).toBe(true);
+  });
+
   it('paginates a strong GRANT query and retries the whole snapshot when ACCESS changes', async () => {
     const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
     const first = access({ revision: 1 });
@@ -360,7 +446,7 @@ describe('Dynamo commercial reader adapters', () => {
       capabilities: { cloudSync: true, social: true, family: false },
     });
     const accessReads = [first, winner, winner, winner];
-    ddbMock.on(GetCommand).callsFake(() => ({ Item: accessReads.shift() }));
+    ddbMock.on(GetCommand).callsFake((input) => ({ Item: input.Key.sk === 'ACCESS' ? accessReads.shift() : undefined }));
     let queryCall = 0;
     ddbMock.on(QueryCommand).callsFake((input) => {
       queryCall += 1;
@@ -380,7 +466,7 @@ describe('Dynamo commercial reader adapters', () => {
       access: winner,
       materialization: 'not-required',
     });
-    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(4);
+    expect(ddbMock.commandCalls(GetCommand).filter(({ args }) => args[0].input.Key?.sk === 'ACCESS')).toHaveLength(4);
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(3);
     for (const call of ddbMock.commandCalls(GetCommand)) {
       expect(call.args[0].input.ConsistentRead).toBe(true);
@@ -447,6 +533,10 @@ describe('Dynamo commercial reader adapters', () => {
           Item: expect.objectContaining({ ownerSub: OWNER, sk: 'ACCESS' }),
         }),
       },
+      ...['SUBSCRIPTION#INDIVIDUAL', 'COVERAGE#FAMILY'].map((sk) => ({ ConditionCheck: {
+        TableName: 'roadmap-dev', Key: { pk: `USER#${OWNER}`, sk },
+        ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+      } })),
     ]);
   });
 
@@ -460,7 +550,7 @@ describe('Dynamo commercial reader adapters', () => {
       access({ revision: 3 }),
       access({ revision: 4 }),
     ];
-    ddbMock.on(GetCommand).callsFake(() => ({ Item: unstableReads.shift() }));
+    ddbMock.on(GetCommand).callsFake((input) => ({ Item: input.Key.sk === 'ACCESS' ? unstableReads.shift() : undefined }));
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     const resolver = createDynamoAccessResolver({
       ddb,
@@ -472,7 +562,7 @@ describe('Dynamo commercial reader adapters', () => {
       name: 'ApiError',
       code: 'ACCESS_REVISION_CONFLICT',
     });
-    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(6);
+    expect(ddbMock.commandCalls(GetCommand).filter(({ args }) => args[0].input.Key?.sk === 'ACCESS')).toHaveLength(6);
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(3);
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
@@ -509,7 +599,7 @@ describe('Dynamo commercial reader adapters', () => {
     const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
     const winner = access({ revision: 1 });
     const accessReads: Array<AccessItem | undefined> = [undefined, undefined, winner, winner];
-    ddbMock.on(GetCommand).callsFake(() => ({ Item: accessReads.shift() }));
+    ddbMock.on(GetCommand).callsFake((input) => ({ Item: input.Key.sk === 'ACCESS' ? accessReads.shift() : undefined }));
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     ddbMock
       .on(TransactWriteCommand)
@@ -544,7 +634,7 @@ describe('Dynamo commercial reader adapters', () => {
         updatedAt: NOW - 1_000,
       }),
     );
-    ddbMock.on(GetCommand).resolves({ Item: access() });
+    ddbMock.on(GetCommand).callsFake((input) => ({ Item: input.Key.sk === 'ACCESS' ? access() : undefined }));
     ddbMock.on(QueryCommand).resolves({ Items: historical });
     const resolver = createDynamoAccessResolver({
       ddb,
@@ -562,7 +652,7 @@ describe('Dynamo commercial reader adapters', () => {
   it('fails operationally instead of following an unbounded grant-page stream', async () => {
     const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
     let page = 0;
-    ddbMock.on(GetCommand).resolves({ Item: access() });
+    ddbMock.on(GetCommand).callsFake((input) => ({ Item: input.Key.sk === 'ACCESS' ? access() : undefined }));
     ddbMock.on(QueryCommand).callsFake(() => {
       page += 1;
       return {

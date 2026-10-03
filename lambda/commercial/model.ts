@@ -2,6 +2,7 @@ import type {
   AccessSource,
   AccessSummary,
   PlanKey,
+  CoverageState,
 } from '@app/api/contracts';
 import { ACCESS_OFFLINE_LEASE_MS } from '@app/api/contracts';
 import type { AccountClosureItem as DurableAccountClosureItem } from '../account-closure';
@@ -47,9 +48,27 @@ export interface GrantItem {
   readonly revokedAt?: number;
 }
 
-/** Reserved contract boundary only; this phase has no subscription item. */
+/** Public subscription trace, independent of provider-specific billing records. */
 export interface ReservedSubscriptionSource extends AccessSource {
   readonly kind: 'subscription';
+}
+
+/** Normalized individual paid-access source; only a trusted billing writer creates it. */
+export interface SubscriptionSourceItem {
+  readonly pk: string;
+  readonly sk: 'SUBSCRIPTION#INDIVIDUAL';
+  readonly entityType: 'SubscriptionSource';
+  readonly ownerSub: string;
+  readonly sourceId: string;
+  readonly state: CoverageState;
+  readonly paidThrough: number;
+  readonly graceUntil: number | null;
+  readonly revision: number;
+  readonly updatedAt: number;
+}
+
+export function subscriptionSourceKey(ownerSub: string): { pk: string; sk: 'SUBSCRIPTION#INDIVIDUAL' } {
+  return { pk: `USER#${ownerSub}`, sk: 'SUBSCRIPTION#INDIVIDUAL' };
 }
 
 /** Keep commercial guards structurally identical to the durable closure item. */

@@ -19,7 +19,18 @@ import {
   type AccessPutProposal,
   type AccessSnapshot,
 } from './commercial/access-resolver';
-import { accessKey, type AccessItem, type GrantItem } from './commercial/model';
+import {
+  accessKey,
+  type AccessItem,
+  type GrantItem,
+  type SubscriptionSourceItem,
+} from './commercial/model';
+import type { CoverageAssignmentItem } from './family/model';
+import {
+  paidSourceGuards,
+  SUBSCRIPTION_SOURCE_ATTRIBUTES,
+  COVERAGE_SOURCE_ATTRIBUTES,
+} from './commercial/paid-source-guards';
 import { instrumentHandler } from './observability';
 
 export type AccessReaderEvent = APIGatewayProxyEventV2WithJWTAuthorizer;
@@ -65,7 +76,7 @@ function projection(attributes: readonly string[]): {
   };
 }
 
-const PROFILE_PROJECTION = projection(['pk', 'sk', 'userId', 'status']);
+const PROFILE_PROJECTION = projection(['pk', 'sk', 'userId', 'status', 'accountType', 'majorityAt']);
 const CLOSURE_PROJECTION = projection(['pk', 'sk']);
 const USAGE_PROJECTION = projection(['pk', 'sk', 'state', 'activeTrees']);
 const ACCESS_PROJECTION = projection([
@@ -146,6 +157,9 @@ export function accessSummary(access: AccessItem, usage: AccessSummary['usage'])
       sourceId: source.sourceId,
       planKey: source.planKey,
       validUntil: source.validUntil,
+      ...(source.scope ? { scope: source.scope } : {}),
+      ...(source.householdId ? { householdId: source.householdId } : {}),
+      ...(source.seatType ? { seatType: source.seatType } : {}),
     })),
     limits: {
       maxActiveTrees: access.limits.maxActiveTrees,
@@ -315,6 +329,7 @@ async function readAllGrants(
  * A strong Query can paginate, so it is not by itself a cross-page snapshot.
  * ACCESS is the fence: every GRANT mutation must update ACCESS in the same
  * TransactWrite. Reading the fence before and after all pages detects a race.
+ * Paid sources are independently fenced by exact conditions when materializing.
  */
 export async function readStableAccessSnapshot(
   ddb: DynamoDBDocumentClient,
@@ -323,10 +338,40 @@ export async function readStableAccessSnapshot(
 ): Promise<AccessSnapshot> {
   for (let attempt = 0; attempt < ACCESS_SNAPSHOT_ATTEMPTS; attempt += 1) {
     const before = await readAccess(ddb, tableName, ownerSub);
-    const grants = await readAllGrants(ddb, tableName, ownerSub);
+    const [grants, subscriptionResult, coverageResult, profileResult] = await Promise.all([
+      readAllGrants(ddb, tableName, ownerSub),
+      ddb.send(
+        new GetCommand({
+          TableName: tableName,
+          Key: { pk: K.user(ownerSub), sk: 'SUBSCRIPTION#INDIVIDUAL' },
+          ConsistentRead: true,
+          ...projection(SUBSCRIPTION_SOURCE_ATTRIBUTES),
+        }),
+      ),
+      ddb.send(
+        new GetCommand({
+          TableName: tableName,
+          Key: { pk: K.user(ownerSub), sk: 'COVERAGE#FAMILY' },
+          ConsistentRead: true,
+          ...projection(COVERAGE_SOURCE_ATTRIBUTES),
+        }),
+      ),
+      ddb.send(new GetCommand({
+        TableName: tableName, Key: K.profile(ownerSub), ConsistentRead: true,
+        ...PROFILE_PROJECTION,
+      })),
+    ]);
     const after = await readAccess(ddb, tableName, ownerSub);
     if (isDeepStrictEqual(before, after)) {
-      return { ...(after ? { access: after } : {}), grants };
+      return {
+        ...(after ? { access: after } : {}),
+        grants,
+        ...(subscriptionResult.Item
+          ? { subscription: subscriptionResult.Item as SubscriptionSourceItem }
+          : {}),
+        ...(coverageResult.Item ? { coverage: coverageResult.Item as CoverageAssignmentItem } : {}),
+        ...(profileResult.Item ? { ownerProfile: profileResult.Item as ProfileItem } : {}),
+      };
     }
   }
   throw new ApiError(
@@ -349,9 +394,19 @@ async function materializeAccess(
       ConditionCheck: {
         TableName: options.tableName,
         Key: K.profile(ownerSub),
-        ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND userId = :ownerSub`,
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: { ':active': 'active', ':ownerSub': ownerSub },
+        ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND userId = :ownerSub${
+          proposal.ownerProfile ? ' AND #accountType = :accountType' : ''}${
+          proposal.ownerProfile?.accountType === 'minor'
+            ? typeof proposal.ownerProfile.majorityAt === 'string'
+              ? ' AND majorityAt = :majorityAt' : ' AND attribute_not_exists(majorityAt)'
+            : ''}`,
+        ExpressionAttributeNames: { '#status': 'status',
+          ...(proposal.ownerProfile ? { '#accountType': 'accountType' } : {}) },
+        ExpressionAttributeValues: { ':active': 'active', ':ownerSub': ownerSub,
+          ...(proposal.ownerProfile ? { ':accountType': proposal.ownerProfile.accountType } : {}),
+          ...(proposal.ownerProfile?.accountType === 'minor' &&
+            typeof proposal.ownerProfile.majorityAt === 'string'
+            ? { ':majorityAt': proposal.ownerProfile.majorityAt } : {}) },
       },
     },
     {
@@ -362,6 +417,7 @@ async function materializeAccess(
       },
     },
     { Put: proposal.Put },
+    ...paidSourceGuards(options.tableName, ownerSub, proposal.paidSources ?? {}),
   ];
   try {
     await options.ddb.send(new TransactWriteCommand({ TransactItems: items }));

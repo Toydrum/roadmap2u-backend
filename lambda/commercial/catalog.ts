@@ -5,10 +5,21 @@ import {
 } from '@app/api/contracts';
 
 /**
- * Compiled, public launch catalog. It deliberately has no runtime billing
- * configuration: both cadences describe the same Premium plan and capabilities.
+ * Five compiled, public launch offers from the shared frontend contract.
+ * Cadences only change price, not seats or capabilities; legacy free/premium
+ * plans remain available. No provider IDs or payment activation live here.
  */
 export const PREPAYMENT_CATALOG: PlanCatalog = PREPAYMENT_PLAN_CATALOG;
+
+/** Exact pre-family public shape; switching catalogs never grants account access. */
+export const LEGACY_PREPAYMENT_CATALOG = Object.freeze({
+  version: '2026-08-prepayment-v1',
+  pricingVersion: 'launch-2026',
+  currency: PREPAYMENT_CATALOG.currency,
+  taxInclusive: PREPAYMENT_CATALOG.taxInclusive,
+  paymentsEnabled: false,
+  plans: PREPAYMENT_CATALOG.plans,
+});
 
 export type AdminGrantOfferKey = 'premium_demo';
 

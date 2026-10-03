@@ -1,5 +1,4 @@
 ﻿import {
-  AdminCreateUserCommand,
   AdminDeleteUserCommand,
   AdminSetUserPasswordCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
@@ -31,15 +30,13 @@ import {
   WRITABLE_PROFILE_CONDITION,
   closureAbsenceConditionCheck,
   guardiansOf,
-  minorsOf,
   profileOf,
   requireCreatedGuardianOf,
   requireGuardianOf,
-  requireGuardianOfConsistent,
   requireWritableOwner,
   toPublic,
 } from '../authz';
-import { accountClosureKey, type AccountClosureDeps } from '../account-closure';
+import type { AccountClosureDeps } from '../account-closure';
 import {
   realAccountClosureRequestDeps,
   requestGuardianMinorClosure,
@@ -56,22 +53,36 @@ import {
   getItem,
   queryPrefix,
   queryPrefixPage,
-  readRateCount,
 } from '../db';
 import { friendCode, tempPassword } from '../codes';
+import { FK } from '../family/keys';
+import type { CoverageAssignmentItem } from '../family/model';
+import {
+  primaryMinorAuthorityChecks,
+  requirePrimaryMinorAuthority,
+  samePrimaryMinorAuthority,
+  type PrimaryMinorAction,
+  type PrimaryMinorAuthority,
+} from '../family/minor-authority';
 import {
   guardianInviteMirrors,
   idempotentGuardianInviteMirrorDelete,
 } from '../guardian-invites';
 import { profileView } from './me';
 import { friendsOf, removeFriendshipAs } from './friends';
+import { requireMinorFriendOversight, revokeMinorFriendship } from './minor-social';
+import {
+  acceptLegacyCoGuardianInvite,
+  acceptLegacyLinkExistingInvite,
+  createMinorFromLegacy,
+} from './household';
 import {
   exactCodeOperation,
   exactLinkOperation,
   exactRequestOperation,
   getConsistent,
   guardedWrite,
-  recordBadAttempt,
+  reserveCodeAttempt,
   sameCode,
   sameLink,
   sameRequest,
@@ -81,28 +92,6 @@ import {
 const INVITE_TTL_MS = 72 * 3600 * 1000;
 const IDENTITY_OPERATION_LEASE_MS = 60_000;
 const FAMILY_FENCE_VERSION = 1;
-
-/**
- * Adds a created child to the guardian's lifecycle fence. Legacy profiles may
- * mutate while backfill is running, but an unknown fence version fails closed.
- */
-function addCreatedMinorToFence(ctx: Ctx, guardianId: string, minorId: string): TransactItem {
-  return {
-    Update: {
-      TableName: ctx.deps.table,
-      Key: K.profile(guardianId),
-      UpdateExpression: 'ADD createdMinorIds :createdMinorIds',
-      ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND ((attribute_not_exists(familyFenceVersion) OR familyFenceVersion = :familyFenceVersion) AND (attribute_not_exists(createdMinorIds) OR size(createdMinorIds) < :maxCreatedMinors))`,
-      ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: {
-        ':active': 'active',
-        ':familyFenceVersion': FAMILY_FENCE_VERSION,
-        ':createdMinorIds': new Set([minorId]),
-        ':maxCreatedMinors': LIMITS.maxChildrenPerGuardian,
-      },
-    },
-  };
-}
 
 /** Version 1 proves the set is authoritative, so deleting requires membership. */
 function removeCreatedMinorFromFence(
@@ -127,29 +116,46 @@ function removeCreatedMinorFromFence(
   };
 }
 
-async function requireCreatedGuardianConsistent(ctx: Ctx, minorId: string): Promise<LinkItem> {
-  const current = await requireGuardianOfConsistent(ctx, minorId);
-  if (current.kind !== 'created') {
-    throw new ApiError('FORBIDDEN', 'invited links have no identity admin');
-  }
-  return current;
+function authorityChecks(ctx: Ctx, authority: PrimaryMinorAuthority): TransactItem[] {
+  return authority.model === 'legacy'
+    ? [exactLinkOperation(ctx.deps, authority.link, 'check')]
+    : primaryMinorAuthorityChecks(ctx.deps.table, authority);
 }
 
-async function requireWritableExportAuthority(ctx: Ctx, minorId: string): Promise<LinkItem> {
-  const [caller, child, link] = await Promise.all([
+async function requireSensitiveMinorAuthority(
+  ctx: Ctx,
+  minorId: string,
+  action: PrimaryMinorAction,
+): Promise<PrimaryMinorAuthority> {
+  return requirePrimaryMinorAuthority(ctx.deps, ctx.caller, minorId, action);
+}
+
+async function requireCreatedGuardianConsistent(ctx: Ctx, minorId: string): Promise<LinkItem> {
+  const link = await getConsistent<LinkItem>(ctx, K.link(minorId, ctx.callerId));
+  if (!link) throw new ApiError('NOT_FOUND');
+  if (link.kind !== 'created') {
+    throw new ApiError('FORBIDDEN', 'invited links have no identity admin');
+  }
+  await requireSensitiveMinorAuthority(ctx, minorId, 'manage_minor_identity');
+  return link;
+}
+
+async function requireWritableExportAuthority(
+  ctx: Ctx,
+  minorId: string,
+): Promise<PrimaryMinorAuthority> {
+  const [caller, child, authority] = await Promise.all([
     requireWritableOwner(ctx, ctx.callerId),
     requireWritableOwner(ctx, minorId),
-    requireCreatedGuardianConsistent(ctx, minorId),
+    requireSensitiveMinorAuthority(ctx, minorId, 'export_minor'),
   ]);
   if (
     caller.userId !== ctx.callerId ||
-    child.userId !== minorId ||
-    link.guardianId !== ctx.callerId ||
-    link.minorId !== minorId
+    child.userId !== minorId
   ) {
     throw new ApiError('NOT_FOUND');
   }
-  return link;
+  return authority;
 }
 
 async function exportRecordsConsistent(ctx: Ctx, ownerId: string): Promise<RecordItem[]> {
@@ -207,96 +213,8 @@ export async function createChild(
   if (!displayName || displayName.length > 40)
     throw new ApiError('VALIDATION', 'displayName 1-40 chars');
   await requireWritableOwner(ctx, ctx.callerId);
-  if ((await minorsOf(ctx.deps, ctx.callerId)).length >= LIMITS.maxChildrenPerGuardian) {
-    throw new ApiError(
-      'LIMIT_EXCEEDED',
-      `max ${LIMITS.maxChildrenPerGuardian} minors per guardian`,
-    );
-  }
-
-  // Cognito owns login-name uniqueness; SUPPRESS = no invitation email (kids
-  // have none). The guardian relays the temp password in person.
-  const password = tempPassword();
-  let sub: string;
-  try {
-    const created = await ctx.deps.cognito.send(
-      new AdminCreateUserCommand({
-        UserPoolId: ctx.deps.userPoolId,
-        Username: username,
-        TemporaryPassword: password,
-        MessageAction: 'SUPPRESS',
-        UserAttributes: [
-          { Name: 'name', Value: displayName },
-          { Name: 'custom:accountType', Value: 'minor' },
-        ],
-      }),
-    );
-    sub = created.User?.Attributes?.find((a) => a.Name === 'sub')?.Value ?? username;
-  } catch (error) {
-    if ((error as { name?: string })?.name === 'UsernameExistsException') {
-      throw new ApiError('USERNAME_TAKEN');
-    }
-    throw error;
-  }
-
-  const now = ctx.deps.now();
-  const child: ProfileItem = {
-    ...K.profile(sub),
-    userId: sub,
-    username,
-    displayName,
-    accountType: 'minor',
-    socialEnabled: false,
-    createdAt: now,
-    status: 'active',
-  };
-  try {
-    await guardedWrite(
-      ctx,
-      [ctx.callerId],
-      [
-        closureAbsenceConditionCheck(ctx.deps, sub),
-        {
-          Put: {
-            TableName: ctx.deps.table,
-            Item: { ...K.uniqUsername(username), userId: sub },
-            ConditionExpression: 'attribute_not_exists(pk)',
-          },
-        },
-        {
-          Put: {
-            TableName: ctx.deps.table,
-            Item: child,
-            ConditionExpression: 'attribute_not_exists(pk)',
-          },
-        },
-        {
-          Put: {
-            TableName: ctx.deps.table,
-            Item: linkItem(ctx.callerId, sub, 'created', now),
-            ConditionExpression: 'attribute_not_exists(pk)',
-          },
-        },
-        addCreatedMinorToFence(ctx, ctx.callerId, sub),
-      ],
-      async () => {
-        const [closure, reservation] = await Promise.all([
-          getConsistent<Record<string, unknown>>(ctx, accountClosureKey(sub)),
-          getConsistent<{ userId?: string }>(ctx, K.uniqUsername(username)),
-        ]);
-        if (closure) throw new ApiError('CONFLICT', 'account closure is in progress');
-        if (reservation) throw new ApiError('USERNAME_TAKEN');
-      },
-      { [ctx.callerId]: { profile: true } },
-    );
-  } catch (error) {
-    // Compensate the identity so a failed transact never leaves a ghost login.
-    await ctx.deps.cognito
-      .send(new AdminDeleteUserCommand({ UserPoolId: ctx.deps.userPoolId, Username: username }))
-      .catch(() => {});
-    throw error;
-  }
-  return { child: profileView(child), tempPassword: password };
+  const result = await createMinorFromLegacy(ctx, { username, displayName });
+  return { child: result.minor, tempPassword: result.tempPassword };
 }
 
 export async function resetChildPassword(
@@ -304,7 +222,7 @@ export async function resetChildPassword(
   minorId: string,
   nextIdentityLeaseId: () => string = randomUUID,
 ): Promise<{ tempPassword: string }> {
-  const guardianLink = await requireCreatedGuardianConsistent(ctx, minorId);
+  const authority = await requireSensitiveMinorAuthority(ctx, minorId, 'manage_minor_recovery');
   await requireWritableOwner(ctx, ctx.callerId);
   const child = await requireWritableOwner(ctx, minorId);
   const password = tempPassword();
@@ -331,11 +249,11 @@ export async function resetChildPassword(
         },
       },
       closureAbsenceConditionCheck(ctx.deps, minorId),
-      exactLinkOperation(ctx.deps, guardianLink, 'check'),
+      ...authorityChecks(ctx, authority),
     ],
     async () => {
-      const currentLink = await requireCreatedGuardianConsistent(ctx, minorId);
-      if (!sameLink(currentLink, guardianLink)) return;
+      const current = await requireSensitiveMinorAuthority(ctx, minorId, 'manage_minor_recovery');
+      if (!samePrimaryMinorAuthority(current, authority)) return;
     },
     { [minorId]: { profile: true, closure: true } },
   );
@@ -373,11 +291,11 @@ export async function resetChildPassword(
             },
           },
         },
-        exactLinkOperation(ctx.deps, guardianLink, 'check'),
+        ...authorityChecks(ctx, authority),
       ],
       async () => {
-        const currentLink = await requireCreatedGuardianConsistent(ctx, minorId);
-        if (!sameLink(currentLink, guardianLink)) throw new ApiError('NOT_FOUND');
+        const current = await requireSensitiveMinorAuthority(ctx, minorId, 'manage_minor_recovery');
+        if (!samePrimaryMinorAuthority(current, authority)) throw new ApiError('NOT_FOUND');
       },
       { [minorId]: { profile: true } },
     );
@@ -404,7 +322,7 @@ export async function patchChild(
   minorId: string,
   body: { displayName?: string; socialEnabled?: boolean },
 ): Promise<UserProfile> {
-  const guardianLink = await requireCreatedGuardianOf(ctx, minorId);
+  const authority = await requireSensitiveMinorAuthority(ctx, minorId, 'manage_minor_identity');
   const child = await profileOf(ctx.deps, minorId);
   if (!child) throw new ApiError('NOT_FOUND');
 
@@ -423,15 +341,15 @@ export async function patchChild(
     child.socialEnabled = !!body.socialEnabled;
   }
   if (!sets.length) {
-    const [caller, currentChild, currentLink] = await Promise.all([
+    const [caller, currentChild, currentAuthority] = await Promise.all([
       requireWritableOwner(ctx, ctx.callerId),
       requireWritableOwner(ctx, minorId),
-      requireCreatedGuardianConsistent(ctx, minorId),
+      requireSensitiveMinorAuthority(ctx, minorId, 'manage_minor_identity'),
     ]);
     if (
       caller.userId !== ctx.callerId ||
       currentChild.userId !== minorId ||
-      !sameLink(currentLink, guardianLink)
+      !samePrimaryMinorAuthority(currentAuthority, authority)
     ) {
       throw new ApiError('NOT_FOUND');
     }
@@ -453,11 +371,11 @@ export async function patchChild(
           },
         },
         closureAbsenceConditionCheck(ctx.deps, minorId),
-        exactLinkOperation(ctx.deps, guardianLink, 'check'),
+        ...authorityChecks(ctx, authority),
       ],
       async () => {
-        const currentLink = await requireCreatedGuardianConsistent(ctx, minorId);
-        if (!sameLink(currentLink, guardianLink)) return;
+        const current = await requireSensitiveMinorAuthority(ctx, minorId, 'manage_minor_identity');
+        if (!samePrimaryMinorAuthority(current, authority)) return;
       },
       { [minorId]: { profile: true, closure: true } },
     );
@@ -471,7 +389,7 @@ export async function exportChild(ctx: Ctx, minorId: string): Promise<ExportEnve
   // The postflight keeps a concurrent closure or unlink from returning a stale
   // export. This lifecycle check is deliberately independent of Premium.
   const currentLink = await requireWritableExportAuthority(ctx, minorId);
-  if (!sameLink(currentLink, expectedLink)) throw new ApiError('NOT_FOUND');
+  if (!samePrimaryMinorAuthority(currentLink, expectedLink)) throw new ApiError('NOT_FOUND');
   const of = <T>(store: string): T[] =>
     records.filter((r) => r.store === store).map((r) => r.record as T);
   return {
@@ -601,112 +519,18 @@ export async function acceptFamilyInvite(
 ): Promise<FamilyLinkView> {
   const code = body.code?.trim().toUpperCase().replace(/-/g, '');
   if (!code) throw new ApiError('VALIDATION');
-  // Same guessing brake as friend codes (0.0.115 S1 — this door had none):
-  // 5 bad redemptions per rolling hour, shared bucket with friend attempts.
-  if ((await readRateCount(ctx.deps, ctx.callerId)) >= LIMITS.codeAttemptsPerHour) {
-    throw new ApiError('RATE_LIMITED');
-  }
-  const badAttempt = async (errorCode: 'CODE_INVALID' | 'CODE_EXPIRED'): Promise<never> => {
-    await recordBadAttempt(ctx);
-    throw new ApiError(errorCode);
-  };
+  await reserveCodeAttempt(ctx);
   const invite = await getItem<CodeItem>(ctx.deps, K.codeG(code));
-  if (!invite) return badAttempt('CODE_INVALID');
-  if (invite.expiresAt <= ctx.deps.now()) return badAttempt('CODE_EXPIRED');
+  if (!invite) throw new ApiError('CODE_INVALID');
+  if (invite.expiresAt <= ctx.deps.now()) throw new ApiError('CODE_EXPIRED');
 
-  const now = ctx.deps.now();
   if (invite.kind === 'coGuardian') {
-    // Redeemer becomes a co-guardian of the invite's minor.
-    if (ctx.caller.accountType !== 'adult') throw new ApiError('FORBIDDEN');
-    const minorId = invite.minorId;
-    if (!minorId) return badAttempt('CODE_INVALID');
-    const issuerLink = await getItem<LinkItem>(ctx.deps, K.link(minorId, invite.userId));
-    if (issuerLink?.kind !== 'created') return badAttempt('CODE_INVALID');
-    const minor = await profileOf(ctx.deps, minorId);
-    if (!minor) throw new ApiError('NOT_FOUND');
-    if (await getItem<LinkItem>(ctx.deps, K.link(minorId, ctx.callerId))) {
-      throw new ApiError('CONFLICT', 'already a guardian');
-    }
-    if ((await guardiansOf(ctx.deps, minorId)).length >= LIMITS.maxGuardiansPerMinor) {
-      throw new ApiError('LIMIT_EXCEEDED');
-    }
-    const link = linkItem(ctx.callerId, minorId, 'created', now);
-    const owners = [ctx.callerId, invite.userId, minorId];
-    await guardedWrite(
-      ctx,
-      owners,
-      [
-        {
-          Put: {
-            TableName: ctx.deps.table,
-            Item: link,
-            ConditionExpression: 'attribute_not_exists(pk)',
-          },
-        },
-        addCreatedMinorToFence(ctx, ctx.callerId, minorId),
-        ...familyInviteDeleteOperations(ctx, invite),
-        exactLinkOperation(ctx.deps, issuerLink, 'check'),
-      ],
-      async () => {
-        const [currentInvite, currentIssuerLink, currentLink] = await Promise.all([
-          getConsistent<CodeItem>(ctx, K.codeG(code)),
-          getConsistent<LinkItem>(ctx, K.link(minorId, invite.userId)),
-          getConsistent<LinkItem>(ctx, K.link(minorId, ctx.callerId)),
-        ]);
-        if (!currentInvite || currentInvite.kind !== 'coGuardian') {
-          throw new ApiError('CODE_INVALID');
-        }
-        if (currentInvite.expiresAt <= ctx.deps.now()) throw new ApiError('CODE_EXPIRED');
-        if (!currentIssuerLink || currentIssuerLink.kind !== 'created') {
-          throw new ApiError('CODE_INVALID');
-        }
-        if (currentLink) throw new ApiError('CONFLICT', 'already a guardian');
-        if (!sameCode(currentInvite, invite) || !sameLink(currentIssuerLink, issuerLink)) return;
-      },
-      { [ctx.callerId]: { profile: true } },
-    );
-    return linkView(link, minor, true);
+    const accepted = await acceptLegacyCoGuardianInvite(ctx, invite);
+    return linkView(accepted.link, accepted.minor, true);
   }
 
-  // linkExisting: the REDEEMER consents to become the issuer's invited minor.
-  const issuer = await profileOf(ctx.deps, invite.userId);
-  if (!issuer) throw new ApiError('CODE_INVALID');
-  if (invite.userId === ctx.callerId) throw new ApiError('VALIDATION', 'that is your own invite');
-  if (await getItem<LinkItem>(ctx.deps, K.link(ctx.callerId, invite.userId))) {
-    throw new ApiError('CONFLICT', 'already linked');
-  }
-  if ((await minorsOf(ctx.deps, invite.userId)).length >= LIMITS.maxChildrenPerGuardian) {
-    throw new ApiError('LIMIT_EXCEEDED');
-  }
-  const link = linkItem(invite.userId, ctx.callerId, 'invited', now);
-  await guardedWrite(
-    ctx,
-    [ctx.callerId, invite.userId],
-    [
-      {
-        Put: {
-          TableName: ctx.deps.table,
-          Item: link,
-          ConditionExpression: 'attribute_not_exists(pk)',
-        },
-      },
-      ...familyInviteDeleteOperations(ctx, invite),
-    ],
-    async () => {
-      const [currentInvite, currentLink] = await Promise.all([
-        getConsistent<CodeItem>(ctx, K.codeG(code)),
-        getConsistent<LinkItem>(ctx, K.link(ctx.callerId, invite.userId)),
-      ]);
-      if (!currentInvite || currentInvite.kind !== 'linkExisting') {
-        throw new ApiError('CODE_INVALID');
-      }
-      if (currentInvite.expiresAt <= ctx.deps.now()) throw new ApiError('CODE_EXPIRED');
-      if (currentLink) throw new ApiError('CONFLICT', 'already linked');
-      if (!sameCode(currentInvite, invite)) return;
-    },
-  );
-  // The redeemer sees the GUARDIAN on the other end of this new link.
-  return linkView(link, issuer, false);
+  const pending = await acceptLegacyLinkExistingInvite(ctx, invite);
+  return linkView(pending.link, pending.issuer, false);
 }
 
 export async function revokeFamilyInvite(ctx: Ctx, code: string): Promise<void> {
@@ -726,7 +550,19 @@ export async function revokeFamilyInvite(ctx: Ctx, code: string): Promise<void> 
 
 // ── Guardian oversight of a minor's friendships ─────────────────────────────
 
+async function hasV2MinorCoverage(ctx: Ctx, minorId: string): Promise<boolean> {
+  const coverage = await getConsistent<CoverageAssignmentItem>(ctx, FK.familyCoverage(minorId));
+  return coverage?.entityType === 'CoverageAssignment' &&
+    coverage.accountId === minorId &&
+    coverage.seatType === 'minor' &&
+    typeof coverage.householdId === 'string';
+}
+
 export async function listChildFriends(ctx: Ctx, minorId: string): Promise<FriendsResponse> {
+  if (await hasV2MinorCoverage(ctx, minorId)) {
+    await requireMinorFriendOversight(ctx, minorId);
+    return friendsOf(ctx, minorId);
+  }
   await requireGuardianOf(ctx, minorId);
   return friendsOf(ctx, minorId);
 }
@@ -736,6 +572,11 @@ export async function removeChildFriendship(
   minorId: string,
   friendshipId: string,
 ): Promise<void> {
+  if (await hasV2MinorCoverage(ctx, minorId)) {
+    await requireMinorFriendOversight(ctx, minorId);
+    await revokeMinorFriendship(ctx, friendshipId);
+    return;
+  }
   const guardianLink = await requireGuardianOf(ctx, minorId);
   await removeFriendshipAs(ctx, minorId, friendshipId, guardianLink);
 }

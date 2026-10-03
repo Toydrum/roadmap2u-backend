@@ -56,6 +56,9 @@ const copies = contractFiles.map((relativePath) => ({
   destination: join(backendRoot, 'shared', relativePath),
 }));
 
+// Validate the source lock before mutating any vendored contract.
+const sourceSha = committedFrontendSha();
+
 for (const { source } of copies) {
   if (!existsSync(source)) {
     throw new Error(
@@ -78,7 +81,7 @@ const lockContents = `${JSON.stringify(
   {
     schemaVersion: 1,
     repository: 'Toydrum/RoadMap2U',
-    commitSha: committedFrontendSha(),
+    commitSha: sourceSha,
     contractHash: contractHash(join(backendRoot, 'shared')),
   },
   null,

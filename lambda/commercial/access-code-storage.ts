@@ -9,6 +9,7 @@ import { accessCodeAttemptKey, accessCodeKey } from './access-codes';
 import type { RedemptionCommitProposal } from './access-code-redemption';
 import type { AuditWriter } from './audit';
 import type { SponsoredAccessBrokerProposal } from './sponsored-access-broker';
+import { paidSourceGuards } from './paid-source-guards';
 
 type TransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
 
@@ -140,6 +141,7 @@ export function buildRedemptionTransaction(
         },
       },
       accessPut(tableName, proposal.access, proposal.expectedAccessRevision),
+      ...paidSourceGuards(tableName, proposal.ownerSub, proposal.paidSources ?? {}),
       auditWriter.transactPut(proposal.audit),
     ],
   };
@@ -207,6 +209,7 @@ export function buildBrokerTransaction(
     TransactItems: [
       profileCondition(tableName, proposal.ownerSub),
       closureCondition(tableName, proposal.ownerSub),
+      ...paidSourceGuards(tableName, proposal.ownerSub, proposal.paidSources ?? {}),
       {
         Put: {
           TableName: tableName,

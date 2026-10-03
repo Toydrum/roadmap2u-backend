@@ -1,6 +1,15 @@
 ﻿import { ApiError, PublicProfile } from '@app/api/contracts';
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import { accountClosureKey } from './account-closure';
+import { FK } from './family/keys';
+import type { CoverageAssignmentItem, HouseholdSnapshot } from './family/model';
+import { readHouseholdSnapshot } from './family/repository';
+import {
+  authorizeForestVisit,
+  type ForestRelationship,
+  type SocialPolicyPerson,
+} from './social/policy';
+import { SK, type FriendshipItem as CanonicalFriendshipItem } from './social/model';
 import {
   Deps,
   FriendItem,
@@ -20,6 +29,8 @@ import {
 export interface Ctx {
   callerId: string;
   caller: ProfileItem;
+  /** Cognito auth_time normalized to epoch milliseconds; absent fails reinforced actions closed. */
+  authenticatedAt?: number;
   deps: Deps;
 }
 
@@ -59,10 +70,14 @@ export function writableOwnerConditionChecks(deps: Deps, ownerId: string): Trans
 }
 
 /** Resolve the caller or 401 — a live token for a deleted account is not a user. */
-export async function resolveCaller(deps: Deps, callerId: string): Promise<Ctx> {
+export async function resolveCaller(
+  deps: Deps,
+  callerId: string,
+  authenticatedAt?: number,
+): Promise<Ctx> {
   const caller = await getItem<ProfileItem>(deps, K.profile(callerId));
   if (!caller) throw new ApiError('UNAUTHENTICATED');
-  return { callerId, caller, deps };
+  return { callerId, caller, ...(authenticatedAt === undefined ? {} : { authenticatedAt }), deps };
 }
 
 export async function profileOf(deps: Deps, userId: string): Promise<ProfileItem | null> {
@@ -149,21 +164,141 @@ export async function friendshipBetween(
   return getItem<FriendItem>(deps, K.friend(a, b));
 }
 
-export type Relationship = 'self' | 'guardian' | 'minor' | 'friend' | null;
+export type ResolvedRelationship = ForestRelationship | null;
+type ActiveCanonicalFriendship = CanonicalFriendshipItem & { readonly state: 'active' };
 
-/** How the caller relates to `targetId` — drives forest detail per the matrix. */
-export async function relationshipTo(ctx: Ctx, targetId: string): Promise<Relationship> {
-  if (ctx.callerId === targetId) return 'self';
-  if (await guardianLink(ctx.deps, ctx.callerId, targetId)) return 'guardian';
-  if (await guardianLink(ctx.deps, targetId, ctx.callerId)) return 'minor';
-  const friends = await friendshipBetween(ctx.deps, ctx.callerId, targetId);
-  if (friends) {
-    // Friend visits require socialEnabled on BOTH sides.
-    const target = await profileOf(ctx.deps, targetId);
-    if (ctx.caller.socialEnabled && target?.socialEnabled) return 'friend';
-    return null;
+function socialPolicyPerson(profile: ProfileItem): SocialPolicyPerson {
+  return {
+    accountId: profile.userId,
+    accountType: profile.accountType,
+    socialEnabled: profile.socialEnabled,
+    status: profile.status ?? 'active',
+    ...(profile.majorityAt === undefined ? {} : { majorityAt: profile.majorityAt }),
+  };
+}
+
+function exactProfile(profile: ProfileItem | null, accountId: string): profile is ProfileItem {
+  const expected = K.profile(accountId);
+  return Boolean(
+    profile &&
+      profile.pk === expected.pk &&
+      profile.sk === expected.sk &&
+      profile.userId === accountId,
+  );
+}
+
+async function canonicalFriendshipBetween(
+  deps: Deps,
+  leftAccountId: string,
+  rightAccountId: string,
+): Promise<ActiveCanonicalFriendship | undefined> {
+  let key: ReturnType<typeof SK.friendship>;
+  try {
+    key = SK.friendship(leftAccountId, rightAccountId);
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) return undefined;
+    throw error;
   }
-  return null;
+  const result = await deps.ddb.send(
+    new GetCommand({
+      TableName: deps.table,
+      Key: key,
+      ConsistentRead: true,
+    }),
+  );
+  const friendship = result.Item as CanonicalFriendshipItem | undefined;
+  if (
+    !friendship ||
+    friendship.pk !== key.pk ||
+    friendship.sk !== key.sk ||
+    friendship.entityType !== 'Friendship' ||
+    friendship.state !== 'active' ||
+    !Number.isSafeInteger(friendship.revision) ||
+    friendship.revision < 1 ||
+    !Number.isSafeInteger(friendship.activatedAt) ||
+    (friendship.activatedAt ?? -1) < 0 ||
+    friendship.endedAt !== null
+  ) {
+    return undefined;
+  }
+  return friendship as ActiveCanonicalFriendship;
+}
+
+async function householdForMinor(
+  deps: Deps,
+  minorId: string,
+): Promise<HouseholdSnapshot | undefined> {
+  let coverageKey: ReturnType<typeof FK.familyCoverage>;
+  try {
+    coverageKey = FK.familyCoverage(minorId);
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) return undefined;
+    throw error;
+  }
+  const result = await deps.ddb.send(
+    new GetCommand({
+      TableName: deps.table,
+      Key: coverageKey,
+      ConsistentRead: true,
+    }),
+  );
+  const coverage = result.Item as CoverageAssignmentItem | undefined;
+  if (
+    !coverage ||
+    coverage.pk !== coverageKey.pk ||
+    coverage.sk !== coverageKey.sk ||
+    coverage.entityType !== 'CoverageAssignment' ||
+    coverage.accountId !== minorId ||
+    coverage.seatType !== 'minor' ||
+    typeof coverage.householdId !== 'string'
+  ) {
+    return undefined;
+  }
+  return (
+    (await readHouseholdSnapshot(
+      { ddb: deps.ddb, tableName: deps.table, now: deps.now },
+      coverage.householdId,
+    )) ?? undefined
+  );
+}
+
+async function currentRelationshipProfile(ctx: Ctx, accountId: string): Promise<ProfileItem | null> {
+  try {
+    return await requireWritableOwner(ctx, accountId);
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'CONFLICT') return null;
+    throw error;
+  }
+}
+
+/** Resolve the canonical relationship used to authorize forest access. */
+export async function resolveRelationship(
+  ctx: Ctx,
+  targetId: string,
+): Promise<ResolvedRelationship> {
+  if (ctx.callerId === targetId) return 'self';
+  const [actor, target] = await Promise.all([
+    currentRelationshipProfile(ctx, ctx.callerId),
+    currentRelationshipProfile(ctx, targetId),
+  ]);
+  if (!exactProfile(actor, ctx.callerId) || !exactProfile(target, targetId)) return null;
+
+  const compatibleFriendPair = actor.accountType === target.accountType;
+  const friendship = compatibleFriendPair
+    ? await canonicalFriendshipBetween(ctx.deps, actor.userId, target.userId)
+    : undefined;
+  const household =
+    actor.accountType === 'adult' && target.accountType === 'minor'
+      ? await householdForMinor(ctx.deps, target.userId)
+      : undefined;
+  const decision = authorizeForestVisit({
+    actor: socialPolicyPerson(actor),
+    target: socialPolicyPerson(target),
+    ...(friendship === undefined ? {} : { friendship }),
+    ...(household === undefined ? {} : { household }),
+    now: ctx.deps.now(),
+  });
+  return decision.allowed ? decision.relationship : null;
 }
 
 /** Guardian gate for /family/children/:id/* — 404-shaped, never an oracle. */

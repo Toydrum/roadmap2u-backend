@@ -7,6 +7,7 @@ import {
   CognitoIdentityProviderClient,
 } from '@aws-sdk/client-cognito-identity-provider';
 import {
+  BatchGetCommand,
   BatchWriteCommand,
   DynamoDBDocumentClient,
   GetCommand,
@@ -17,6 +18,7 @@ import {
 import { AuditWriter } from '../lambda/commercial/audit';
 import type { Ctx } from '../lambda/authz';
 import { K, type CodeItem, type Deps, type LinkItem, type ProfileItem } from '../lambda/db';
+import { FK } from '../lambda/family/keys';
 import {
   processAccountClosureMessage,
   type AccountClosureItem,
@@ -25,11 +27,14 @@ import * as closureHandler from '../lambda/account-closure-handler';
 import {
   createFamilyInvite,
   deleteChild,
+  exportChild,
+  patchChild,
   resetChildPassword,
   revokeFamilyInvite,
 } from '../lambda/handlers/family';
 import { getMe } from '../lambda/handlers/me';
 import { exactCodeOperation, sameCode } from '../lambda/handlers/guarded-mutation';
+import { familyV2Fixture } from './support/family-v2-fixture';
 
 const NOW = 1_800_000_000_000;
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -116,6 +121,7 @@ function guardianClosure(overrides: Partial<AccountClosureItem> = {}): AccountCl
     nextAttemptAt: NOW,
     gsi1pk: 'ACCOUNT_CLOSURE#OPEN',
     gsi1sk: `NEXT#${NOW}#minor-1`,
+    familyCleanupVersion: 1,
     checkpoint: { phase: 'friendMirrors' },
     ...overrides,
   };
@@ -380,6 +386,134 @@ describe('family delegates child deletion to the durable closure', () => {
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+
+  it('lets the current v2 primary delete a minor even when the legacy compatibility link is only invited', async () => {
+    const home = familyV2Fixture({
+      now: NOW,
+      primaryId: 'primary-1',
+      minorIds: ['minor-1'],
+    });
+    const primary = profile('primary-1', 'adult', { familyFenceVersion: 1 });
+    const minor = profile('minor-1', 'minor');
+    const compatibilityLink: LinkItem = {
+      ...createdLink('primary-1', 'minor-1'),
+      kind: 'invited',
+    };
+    const enqueue = vi.fn(async () => undefined);
+    const deps = closureDeps(enqueue);
+    const ctx: Ctx = { callerId: primary.userId, caller: primary, deps };
+
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      if (key.pk === 'ACCOUNT_CLOSURE#minor-1') return {};
+      if (key.pk === 'ACCOUNT_CLOSURE#primary-1') return {};
+      if (key.pk === K.user('primary-1') && key.sk === 'PROFILE') return { Item: primary };
+      if (key.pk === K.user('minor-1') && key.sk === 'PROFILE') return { Item: minor };
+      if (key.pk === compatibilityLink.pk && key.sk === compatibilityLink.sk) {
+        return { Item: compatibilityLink };
+      }
+      const coverage = home.coverages.find((item) => item.pk === key.pk && item.sk === key.sk);
+      return coverage ? { Item: coverage } : {};
+    });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      const values = input.ExpressionAttributeValues as Record<string, string> | undefined;
+      const pk = values?.[':pk'];
+      const prefix = values?.[':prefix'] ?? '';
+      if (pk === home.household.pk) return { Items: [home.household, ...home.seats] };
+      if (pk === K.user('minor-1')) {
+        return {
+          Items: home.supervisionLinks.filter(
+            (item) => item.pk === pk && item.sk.startsWith(prefix),
+          ),
+        };
+      }
+      return { Items: [] };
+    });
+    ddbMock.on(BatchGetCommand).resolves({
+      Responses: { 'roadmap-dev': home.coverages },
+    });
+    ddbMock.on(TransactWriteCommand).resolves({});
+
+    await expect(deleteChild(ctx, 'minor-1', deps)).resolves.toBeUndefined();
+
+    expect(enqueue).toHaveBeenCalledWith({ sub: 'minor-1', closureId: 'minor-closure-1' });
+    const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
+    const checks = items.flatMap((item) => (item.ConditionCheck ? [item.ConditionCheck] : []));
+    expect(checks.map((check) => check.Key)).toEqual(expect.arrayContaining([
+      FK.household(home.household.householdId),
+      FK.minorSeat(home.household.householdId, 1),
+      FK.supervision('minor-1', 'primary-1'),
+    ]));
+    expect(checks.some((check) => check.ConditionExpression?.includes('#kind = :created'))).toBe(false);
+  });
+
+  it.each([
+    ['reset credentials', async (ctx: Ctx, deps: ReturnType<typeof closureDeps>) => {
+      await resetChildPassword(ctx, 'minor-1', () => 'identity-lease-1');
+    }],
+    ['patch identity', async (ctx: Ctx) => {
+      await patchChild(ctx, 'minor-1', { displayName: 'Changed' });
+    }],
+    ['export data', async (ctx: Ctx) => {
+      await exportChild(ctx, 'minor-1');
+    }],
+    ['delete the account', async (ctx: Ctx, deps: ReturnType<typeof closureDeps>) => {
+      await deleteChild(ctx, 'minor-1', deps);
+    }],
+  ])('never lets an additional responsible %s through a stale created legacy link', async (_label, operation) => {
+    const home = familyV2Fixture({
+      now: NOW,
+      primaryId: 'primary-1',
+      minorIds: ['minor-1'],
+      additionalResponsibleSeat: 1,
+      additionalId: 'additional-1',
+      additionalScope: ['minor-1'],
+    });
+    const additional = profile('additional-1', 'adult', {
+      familyFenceVersion: 1,
+      createdMinorIds: new Set(['minor-1']),
+    });
+    const minor = profile('minor-1', 'minor');
+    const staleLegacyLink = createdLink('additional-1', 'minor-1');
+    const deps = closureDeps();
+    const ctx: Ctx = { callerId: additional.userId, caller: additional, deps };
+
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      if (key.pk === 'ACCOUNT_CLOSURE#minor-1') return {};
+      if (key.pk === 'ACCOUNT_CLOSURE#additional-1') return {};
+      if (key.pk === K.user('additional-1') && key.sk === 'PROFILE') return { Item: additional };
+      if (key.pk === K.user('minor-1') && key.sk === 'PROFILE') return { Item: minor };
+      if (key.pk === staleLegacyLink.pk && key.sk === staleLegacyLink.sk) {
+        return { Item: staleLegacyLink };
+      }
+      const coverage = home.coverages.find((item) => item.pk === key.pk && item.sk === key.sk);
+      return coverage ? { Item: coverage } : {};
+    });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      const values = input.ExpressionAttributeValues as Record<string, string> | undefined;
+      const pk = values?.[':pk'];
+      const prefix = values?.[':prefix'] ?? '';
+      if (pk === home.household.pk) return { Items: [home.household, ...home.seats] };
+      if (pk === K.user('minor-1')) {
+        return {
+          Items: home.supervisionLinks.filter(
+            (item) => item.pk === pk && item.sk.startsWith(prefix),
+          ),
+        };
+      }
+      return { Items: [] };
+    });
+    ddbMock.on(BatchGetCommand).callsFake(() => ({
+      Responses: { 'roadmap-dev': home.coverages },
+    }));
+    ddbMock.on(TransactWriteCommand).resolves({});
+    cognitoMock.on(AdminSetUserPasswordCommand).resolves({});
+
+    await expect(operation(ctx, deps)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(cognitoMock.commandCalls(AdminSetUserPasswordCommand)).toHaveLength(0);
+    expect(deps.queue.enqueue).not.toHaveBeenCalled();
   });
 });
 

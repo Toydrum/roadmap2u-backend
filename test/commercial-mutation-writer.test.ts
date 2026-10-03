@@ -4,7 +4,8 @@ import type { ProfileItem } from '../lambda/db';
 import { K } from '../lambda/db';
 import { accountClosureKey } from '../lambda/account-closure';
 import { deriveAccessItem } from '../lambda/commercial/access-resolver';
-import type { CommercialConfigResult, CommercialFlags } from '../lambda/commercial/flags';
+import { createCoverageAssignment } from '../lambda/family/model';
+import { FAMILY_BILLING_FLAG_DEFAULTS, type CommercialConfigResult, type CommercialFlags } from '../lambda/commercial/flags';
 import type { UsageMutationDelta } from '../lambda/commercial/usage';
 import {
   CommercialMutationWriter,
@@ -44,6 +45,7 @@ function flags(overrides: Partial<CommercialFlags> = {}): CommercialConfigResult
     freshness: 'fresh',
     loadedAt: NOW,
     flags: {
+      ...FAMILY_BILLING_FLAG_DEFAULTS,
       revision: 1,
       quotaMode: 'off',
       capabilityMode: 'off',
@@ -752,6 +754,19 @@ describe('CommercialMutationWriter', () => {
       },
     });
     expect(items.some((item) => item.ConditionCheck?.Key?.['sk'] === 'ACCESS')).toBe(false);
+  });
+
+  it('preserves and fences family coverage when sync first materializes ACCESS', async () => {
+    const coverage = createCoverageAssignment({ accountId: OWNER, householdId: 'household-a', seatType: 'minor', now: NOW, paidThrough: NOW + 60_000 });
+    const h = harness([snapshot({ access: undefined, coverage, deltas: [neutralEdit()] })]);
+    await h.writer.write({ ownerSub: OWNER, mutationId: 'missing-family-access' });
+    const items = h.commits[0]!.items;
+    expect(items.find((item) => item.Put?.Item?.sk === 'ACCESS')!.Put!.Item).toMatchObject({
+      capabilities: { family: true }, activeSources: [expect.objectContaining({ scope: 'family_member', householdId: 'household-a' })],
+    });
+    expect(items.find((item) => item.ConditionCheck?.Key?.sk === 'COVERAGE#FAMILY')!.ConditionCheck!.ExpressionAttributeValues).toMatchObject({
+      ':revision': coverage.revision, ':paidThrough': coverage.paidThrough, ':state': 'active',
+    });
   });
 
   it('re-reads and re-evaluates when a missing ACCESS Put loses to backfill', async () => {

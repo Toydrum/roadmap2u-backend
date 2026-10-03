@@ -26,6 +26,18 @@ La identidad no usa email como login porque eso rompería la paridad con el clie
 
 ## Perfiles, familia y amistades
 
+### Household v2 en implementación local
+
+El bloque familiar nuevo usa `GET /family/household`: responsable principal, responsable adicional con alcance explícito, hasta dos lugares para menores y cobertura independiente de supervisión. Los adapters legacy de abajo no son autoridad para conceder roles v2. La creación declarada usa `POST /family/minors`; transferir la responsabilidad es una propuesta y una aceptación separadas, no un cambio unilateral.
+
+`GET /family/inbox?cursor=...` descubre solicitudes y avisos **solo de la cuenta autenticada**, aunque todavía no pertenezca a un hogar. Consulta su partición `USER#...` con prefijo `FAMILY_INBOX#`, lectura fuerte y páginas de hasta 50 referencias; no hace scan ni expande la familia. El cursor opaco nunca permite elegir otra partición. Cada referencia se vuelve a autorizar contra el aviso/propuesta canónico con lectura fuerte. La respuesta contiene exclusivamente ID de aviso, tipo, hogar, estado, fechas y revisión: nunca códigos portadores, perfiles ni listas de participantes. Los pendientes vencidos se muestran como expirados sin mutar datos.
+
+Los productores guardan las referencias en la **misma transacción** que el aviso y comprueban perfil activo y ausencia de cierre de **cada destinatario**. El cierre de la cuenta elimina sus referencias junto con su partición; no se pueden recrear después del borrado. Se revalida también el cierre antes y después de leer la bandeja. Si un ambiente ya tuviera avisos v2 anteriores a esta incorporación, sus referencias necesitarían backfill verificado antes del despliegue: esta implementación no los descubre mediante scans en runtime.
+
+La consulta de bandeja y las acciones de reducción/privacidad no dependen del pago. En las acciones sociales expansivas, `billingEnforcementMode` y `capabilityMode` usan el modo más estricto; `observe` registra `wouldDeny`, y `enforce` deniega crear/aceptar/visitar cuando la cuenta no conserva capacidad por ninguna fuente válida. No se integra Stripe ni se habilita cobro con este bloque. Las futuras llaves sensibles usarán **SSM Parameter Store SecureString por ambiente**.
+
+### Referencia de compatibilidad legacy
+
 Existen dos tipos de cuenta, `adult` y `minor`; “teen” es un estado de producto, no otro tipo. En menores, `socialEnabled=false` significa child y oculta/bloquea toda superficie de amistad; `true` habilita amistades y visitas bajo supervisión. Adultos siempre son sociales.
 
 Un vínculo de guardián puede ser:

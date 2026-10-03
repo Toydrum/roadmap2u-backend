@@ -19,6 +19,7 @@ import {
   parseAccessCodeSecret,
 } from '../lambda/commercial/access-code-storage';
 import type { SponsoredAccessBrokerProposal } from '../lambda/commercial/sponsored-access-broker';
+import { createCoverageAssignment } from '../lambda/family/model';
 
 const NOW = Date.parse('2026-08-22T18:30:00.000Z');
 const OWNER = 'sub-adult';
@@ -76,6 +77,25 @@ function redemptionProposal(): RedemptionCommitProposal {
 describe('access-code secret parsing and DynamoDB transaction builders', () => {
   beforeEach(() => ddbMock.reset());
 
+  it.each(['redemption', 'extend-grant', 'revoke-grant'] as const)('fences every captured coverage field during %s', (kind) => {
+    const coverage = createCoverageAssignment({ accountId: OWNER, householdId: 'household-a', seatType: 'primary_responsible', now: NOW, paidThrough: NOW + 60_000 });
+    const proposal = { ...redemptionProposal(), paidSources: { coverage } };
+    const transaction = kind === 'redemption' ? buildRedemptionTransaction(proposal, 'roadmap-dev', auditWriter()) :
+      buildBrokerTransaction({ ...proposal, kind, expectedAccessRevision: 1, expectedGrantRevision: 1,
+        commandItem: { pk: 'ADMIN#SPONSORED', sk: 'COMMAND#test', commandId: 'test', action: kind,
+          requestHash: 'a'.repeat(64), actor: 'operator', reason: 'test', status: 'committed', result: {}, createdAt: NOW },
+      }, 'roadmap-dev', auditWriter());
+    const guard = transaction.TransactItems!.find((item) => item.ConditionCheck?.Key?.sk === 'COVERAGE#FAMILY')!.ConditionCheck!;
+    for (const [field, value] of Object.entries(coverage)) {
+      expect(guard.ExpressionAttributeNames).toHaveProperty(`#${field}`, field);
+      expect(guard.ExpressionAttributeValues).toHaveProperty(`:${field}`, value);
+      expect(guard.ConditionExpression).toContain(`#${field} = :${field}`);
+    }
+    const keys = transaction.TransactItems!.map((item) => item.ConditionCheck?.Key ?? item.Put?.Item ?? item.Update?.Key);
+    expect(new Set(keys.map((key) => `${key!.pk}|${key!.sk}`)).size).toBe(keys.length);
+    expect(transaction.TransactItems!.every((item) => !item.Delete)).toBe(true);
+  });
+
   it('reads only an allowlisted active/versioned key with at least 256 bits', () => {
     const secretString = JSON.stringify({
       activeVersion: 'v2',
@@ -99,14 +119,20 @@ describe('access-code secret parsing and DynamoDB transaction builders', () => {
     );
   });
 
-  it('builds one six-part atomic redemption with lifecycle, CAS and append-only guards', () => {
+  it('builds one atomic redemption with lifecycle, paid source, CAS and append-only guards', () => {
     const transaction = buildRedemptionTransaction(
       redemptionProposal(),
       'roadmap-dev',
       auditWriter(),
     );
 
-    expect(transaction.TransactItems).toHaveLength(6);
+    expect(transaction.TransactItems).toHaveLength(8);
+    for (const sk of ['SUBSCRIPTION#INDIVIDUAL', 'COVERAGE#FAMILY']) {
+      expect(transaction.TransactItems).toContainEqual({ ConditionCheck: {
+        TableName: 'roadmap-dev', Key: { pk: `USER#${OWNER}`, sk },
+        ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+      } });
+    }
     const serialized = JSON.stringify(transaction);
     expect(serialized).toContain('#status = :issued');
     expect(serialized).toContain('redeemBy > :redeemedAt');

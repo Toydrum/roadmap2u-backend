@@ -1,4 +1,5 @@
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
+import { ApiError, LIMITS } from '@app/api/contracts';
 import {
   Ctx,
   WRITABLE_PROFILE_CONDITION,
@@ -173,6 +174,7 @@ export function exactCodeOperation(
   deps: Deps,
   item: CodeItem,
   operation: 'check' | 'delete',
+  validAt?: number,
 ): TransactItem {
   const expression = [
     'attribute_exists(pk)',
@@ -185,6 +187,7 @@ export function exactCodeOperation(
     item.closureMirrorVersion === undefined
       ? 'attribute_not_exists(#closureMirrorVersion)'
       : '#closureMirrorVersion = :closureMirrorVersion',
+    ...(validAt === undefined ? [] : ['expiresAt > :now']),
   ].join(' AND ');
   const common = {
     TableName: deps.table,
@@ -204,6 +207,7 @@ export function exactCodeOperation(
       ':userId': item.userId,
       ':expiresAt': item.expiresAt,
       ':ttl': item.ttl,
+      ...(validAt === undefined ? {} : { ':now': validAt }),
       ...(item.minorId === undefined ? {} : { ':minorId': item.minorId }),
       ...(item.closureMirrorVersion === undefined
         ? {}
@@ -217,12 +221,14 @@ export function exactRequestOperation(
   deps: Deps,
   item: FriendRequestItem,
   operation: 'check' | 'delete',
+  validAt?: number,
 ): TransactItem {
   const common = {
     TableName: deps.table,
     Key: { pk: item.pk, sk: item.sk },
     ConditionExpression:
-      'attribute_exists(pk) AND gsi1pk = :gsi1pk AND gsi1sk = :gsi1sk AND requestId = :requestId AND fromId = :fromId AND toId = :toId AND createdAt = :createdAt AND expiresAt = :expiresAt AND #ttl = :ttl',
+      'attribute_exists(pk) AND gsi1pk = :gsi1pk AND gsi1sk = :gsi1sk AND requestId = :requestId AND fromId = :fromId AND toId = :toId AND createdAt = :createdAt AND expiresAt = :expiresAt AND #ttl = :ttl' +
+      (validAt === undefined ? '' : ' AND expiresAt > :now'),
     ExpressionAttributeNames: { '#ttl': 'ttl' },
     ExpressionAttributeValues: {
       ':requestId': item.requestId,
@@ -233,6 +239,7 @@ export function exactRequestOperation(
       ':createdAt': item.createdAt,
       ':expiresAt': item.expiresAt,
       ':ttl': item.ttl,
+      ...(validAt === undefined ? {} : { ':now': validAt }),
     },
   };
   return operation === 'check' ? { ConditionCheck: common } : { Delete: common };
@@ -318,20 +325,30 @@ export function sameCode(a: CodeItem, b: CodeItem): boolean {
   );
 }
 
-export async function recordBadAttempt(ctx: Ctx): Promise<void> {
+/** Atomically reserves one shared code lookup before any bearer-code read. */
+export async function reserveCodeAttempt(ctx: Ctx): Promise<void> {
   const bucket = Math.floor(ctx.deps.now() / 3_600_000);
-  await guardedWrite(ctx, [ctx.callerId], [
-    {
-      Update: {
-        TableName: ctx.deps.table,
-        Key: K.rate(ctx.callerId, bucket),
-        UpdateExpression: 'ADD #count :one SET #ttl = :ttl',
-        ExpressionAttributeNames: { '#count': 'count', '#ttl': 'ttl' },
-        ExpressionAttributeValues: {
-          ':one': 1,
-          ':ttl': Math.ceil(ctx.deps.now() / 1_000) + 7_200,
+  await guardedWrite(
+    ctx,
+    [ctx.callerId],
+    [
+      {
+        Update: {
+          TableName: ctx.deps.table,
+          Key: K.rate(ctx.callerId, bucket),
+          UpdateExpression: 'ADD #count :one SET #ttl = :ttl',
+          ConditionExpression: 'attribute_not_exists(#count) OR #count < :limit',
+          ExpressionAttributeNames: { '#count': 'count', '#ttl': 'ttl' },
+          ExpressionAttributeValues: {
+            ':one': 1,
+            ':limit': LIMITS.codeAttemptsPerHour,
+            ':ttl': Math.ceil(ctx.deps.now() / 1_000) + 7_200,
+          },
         },
       },
+    ],
+    async () => {
+      throw new ApiError('RATE_LIMITED');
     },
-  ]);
+  );
 }

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
@@ -30,6 +31,7 @@ import type {
   ProfileItem,
 } from '../lambda/db';
 import { K } from '../lambda/db';
+import { FK } from '../lambda/family/keys';
 import {
   acceptFamilyInvite,
   cancelChildRequest,
@@ -51,10 +53,18 @@ import {
   rotateFriendCode,
 } from '../lambda/handlers/friends';
 import { guardedWrite } from '../lambda/handlers/guarded-mutation';
+import { acceptAdultFriendRequest } from '../lambda/handlers/social';
+import { getForest } from '../lambda/handlers/forests';
+import { createActiveAdultFriendship, SK } from '../lambda/social/model';
+import { familyV2Fixture, type FamilyV2Fixture } from './support/family-v2-fixture';
 
 const NOW = 1_800_000_000_000;
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
+const ADULT_ACCEPTORS = [
+  { name: 'legacy adapter', accept: acceptFriendRequest },
+  { name: 'v2 endpoint', accept: acceptAdultFriendRequest },
+];
 
 function deps(): Deps {
   return {
@@ -80,7 +90,7 @@ function profile(userId: string, over: Partial<ProfileItem> = {}): ProfileItem {
 }
 
 function ctxOf(caller: ProfileItem): Ctx {
-  return { callerId: caller.userId, caller, deps: deps() };
+  return { callerId: caller.userId, caller, authenticatedAt: NOW - 60_000, deps: deps() };
 }
 
 function link(guardianId: string, minorId: string, kind: LinkItem['kind'] = 'created'): LinkItem {
@@ -122,6 +132,61 @@ function invite(code: string, over: Partial<CodeItem> = {}): CodeItem {
     ttl: Math.ceil((NOW + 60_000) / 1_000),
     ...over,
   };
+}
+
+function familyGetResponse(
+  key: { pk: string; sk: string },
+  families: readonly FamilyV2Fixture[],
+): { Item: unknown } | null {
+  for (const current of families) {
+    const coverage = current.coverages.find((item) => item.pk === key.pk && item.sk === key.sk);
+    if (coverage) return { Item: coverage };
+    const entitlementKey = FK.familyEntitlement(current.household.householdId);
+    if (key.pk === entitlementKey.pk && key.sk === entitlementKey.sk) {
+      return { Item: current.entitlement };
+    }
+  }
+  return null;
+}
+
+function familyQueryResponse(
+  input: ConstructorParameters<typeof QueryCommand>[0],
+  families: readonly FamilyV2Fixture[],
+): { Items: unknown[] } | null {
+  const values = input.ExpressionAttributeValues as Record<string, string> | undefined;
+  const pk = values?.[':pk'];
+  const prefix = values?.[':prefix'] ?? '';
+  for (const current of families) {
+    if (pk === FK.household(current.household.householdId).pk) {
+      return { Items: [current.household, ...current.seats] };
+    }
+  }
+  if (typeof pk === 'string' && pk.startsWith('USER#')) {
+    return {
+      Items: families
+        .flatMap((current) => current.supervisionLinks)
+        .filter((item) => item.pk === pk && item.sk.startsWith(prefix)),
+    };
+  }
+  return null;
+}
+
+function installFamilyCoverageReads(families: readonly FamilyV2Fixture[]): void {
+  ddbMock.on(BatchGetCommand).callsFake((input) => {
+    const keys = (input.RequestItems?.['roadmap']?.Keys ?? []) as Array<{
+      pk: string;
+      sk: string;
+    }>;
+    return {
+      Responses: {
+        roadmap: families
+          .flatMap((current) => current.coverages)
+          .filter((coverage) =>
+            keys.some((key) => key.pk === coverage.pk && key.sk === coverage.sk),
+          ),
+      },
+    };
+  });
 }
 
 function transactionInput(index = 0) {
@@ -201,6 +266,20 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const call of ddbMock.commandCalls(TransactWriteCommand)) {
+    const items = call.args[0].input.TransactItems ?? [];
+    for (const item of items) {
+      const friendship = item.Put?.Item;
+      if (friendship?.entityType !== 'Friendship' || friendship.state !== 'active') continue;
+      expect(friendship.friendshipClass).toBe('adult_adult');
+      for (const userId of [friendship.userA, friendship.userB]) {
+        const profileGuard = items.find((candidate) =>
+          candidate.ConditionCheck?.Key?.pk === K.user(userId) &&
+          candidate.ConditionCheck?.Key?.sk === 'PROFILE',
+        )?.ConditionCheck;
+        expect(profileGuard?.ConditionExpression).toContain('#accountType = :adult');
+        expect(profileGuard?.ExpressionAttributeValues?.[':adult']).toBe('adult');
+      }
+    }
     const addressed = (call.args[0].input.TransactItems ?? []).map((item) => {
       if (item.Put) {
         return JSON.stringify([item.Put.TableName, item.Put.Item?.['pk'], item.Put.Item?.['sk']]);
@@ -319,6 +398,81 @@ describe('guarded transaction composition', () => {
 });
 
 describe('friend mutations serialize with account closure', () => {
+  it.each(ADULT_ACCEPTORS)(
+    '$name cannot activate an adult friendship concurrently with sender closure',
+    async ({ accept }) => {
+      const request = friendRequest('ambar', 'rocio');
+      let closing = false;
+      ddbMock.on(GetCommand).callsFake((input) => {
+        const key = input.Key as { pk: string; sk: string };
+        if (key.pk === request.pk && key.sk === request.sk) return { Item: request };
+        if (key.sk === 'PROFILE') {
+          const userId = key.pk.slice('USER#'.length);
+          return { Item: profile(userId, { status: closing && userId === 'ambar' ? 'closing' : 'active' }) };
+        }
+        if (closing && key.pk === accountClosureKey('ambar').pk) return { Item: { ...key, state: 'requested' } };
+        return commercialGet(key);
+      });
+      ddbMock.on(TransactWriteCommand).callsFake(() => {
+        closing = true;
+        throw transactionCanceled();
+      });
+
+      await expect(accept(ctxOf(profile('rocio')), request.requestId))
+        .rejects.toMatchObject({ code: 'CONFLICT' });
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+      expectOwnerGuards(['rocio', 'ambar']);
+    },
+  );
+
+  it.each(ADULT_ACCEPTORS)(
+    '$name keeps an incompatible historical request removable but never activates it',
+    async ({ accept }) => {
+      const request = friendRequest('minor-a', 'rocio');
+      ddbMock.on(GetCommand).callsFake((input) => {
+        const key = input.Key as { pk: string; sk: string };
+        if (key.pk === request.pk && key.sk === request.sk) return { Item: request };
+        if (key.pk === K.user('minor-a') && key.sk === 'PROFILE') {
+          return { Item: profile('minor-a', { accountType: 'minor', majorityAt: '2030-01-01' }) };
+        }
+        return commercialGet(key);
+      });
+      ddbMock.on(TransactWriteCommand).resolves({});
+      await expect(accept(ctxOf(profile('rocio')), request.requestId))
+        .rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+
+      await declineFriendRequest(ctxOf(profile('rocio')), request.requestId);
+      expect(transactionInput().TransactItems?.some((item) => item.Delete?.Key?.sk === request.sk)).toBe(true);
+      expect(transactionInput().TransactItems?.some((item) => item.Put?.Item?.state === 'active')).toBe(false);
+    },
+  );
+
+  it('legacy removal deletes the canonical edge so a later strong visit has no friendship', async () => {
+    const friendship = createActiveAdultFriendship({ leftAccountId: 'ambar', rightAccountId: 'rocio', now: NOW - 500 });
+    let present = true;
+    ddbMock.on(GetCommand).callsFake((input) => {
+      const key = input.Key as { pk: string; sk: string };
+      if (key.pk === friendship.pk && key.sk === friendship.sk) return { Item: present ? friendship : undefined };
+      if (key.sk === 'PROFILE') return { Item: profile(key.pk.slice('USER#'.length)) };
+      return commercialGet(key);
+    });
+    const ctx = ctxOf(profile('rocio'));
+    await expect(getForest(ctx, 'ambar')).resolves.toMatchObject({ detail: 'stripped' });
+    ddbMock.on(TransactWriteCommand).callsFake((input) => {
+      present = !input.TransactItems?.some((item: { Delete?: { Key?: { pk?: string; sk?: string } } }) =>
+        item.Delete?.Key?.pk === friendship.pk && item.Delete?.Key?.sk === friendship.sk,
+      );
+      return {};
+    });
+    await removeFriend(ctx, friendship.friendshipId);
+    const deletes = transactionInput().TransactItems?.flatMap((item) => item.Delete ? [item.Delete.Key] : []);
+    expect(deletes).toEqual(expect.arrayContaining([
+      SK.friendship('ambar', 'rocio'), K.friend('ambar', 'rocio'), K.friend('rocio', 'ambar'),
+    ]));
+    await expect(getForest(ctx, 'ambar')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
   it('mints a friend code and updates its pointer in one guarded transaction', async () => {
     ddbMock.on(TransactWriteCommand).resolves({});
 
@@ -388,8 +542,8 @@ describe('friend mutations serialize with account closure', () => {
     await createFriendRequest(ctxOf(profile('rocio')), { code });
 
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
-    expectOwnerGuards(['rocio', 'ambar']);
-    const checks = transactionInput().TransactItems?.flatMap((item) =>
+    expectOwnerGuards(['rocio', 'ambar'], 1);
+    const checks = transactionInput(1).TransactItems?.flatMap((item) =>
       item.ConditionCheck ? [item.ConditionCheck] : [],
     );
     expect(checks).toContainEqual(expect.objectContaining({ Key: K.codeF(code) }));
@@ -446,13 +600,17 @@ describe('friend mutations serialize with account closure', () => {
     }
   });
 
-  it('removes both friendship mirrors only while both accounts remain writable', async () => {
+  it('removes canonical friendship state and both mirrors while both accounts remain writable', async () => {
     ddbMock.on(TransactWriteCommand).resolves({});
 
     await removeFriend(ctxOf(profile('rocio')), 'ambar~rocio');
 
     expectOwnerGuards(['rocio', 'ambar']);
-    expect(transactionInput().TransactItems?.filter((item) => item.Delete)).toHaveLength(2);
+    const deletes = transactionInput().TransactItems?.flatMap((item) =>
+      item.Delete ? [item.Delete.Key] : [],
+    );
+    expect(deletes).toHaveLength(3);
+    expect(deletes).toContainEqual({ pk: 'FRIENDSHIP#ambar~rocio', sk: 'META' });
   });
 
   it('records a bad code attempt in the same transaction as the caller guards', async () => {
@@ -528,13 +686,18 @@ describe('family mutations serialize with account closure', () => {
   });
 
   it('creates the child profile/link only while the guardian remains writable', async () => {
+    const home = familyV2Fixture({ now: NOW, primaryId: 'rocio' });
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
-      return key.pk === K.profile('rocio').pk && key.sk === 'PROFILE'
-        ? { Item: profile('rocio', { status: 'active' }) }
-        : {};
+      if (key.pk === K.profile('rocio').pk && key.sk === 'PROFILE') {
+        return { Item: profile('rocio', { status: 'active' }) };
+      }
+      return familyGetResponse(key, [home]) ?? {};
     });
-    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      return familyQueryResponse(input, [home]) ?? { Items: [] };
+    });
+    installFamilyCoverageReads([home]);
     ddbMock.on(TransactWriteCommand).resolves({});
     cognitoMock.on(AdminCreateUserCommand).resolves({
       User: { Attributes: [{ Name: 'sub', Value: 'nico-sub' }] },
@@ -646,62 +809,93 @@ describe('family mutations serialize with account closure', () => {
   it('accepts a co-guardian invite with all three owners and both read artifacts guarded', async () => {
     const code = 'FAMILY12';
     const familyInvite = invite(code);
-    const issuerLink = link('rocio', 'nico');
+    const home = familyV2Fixture({
+      now: NOW,
+      primaryId: 'rocio',
+      minorIds: ['nico'],
+      additionalResponsibleSeat: 1,
+    });
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
-      if (key.pk === K.rate('abuela', Math.floor(NOW / 3_600_000)).pk) return {};
+      const rateKey = K.rate('abuela', Math.floor(NOW / 3_600_000));
+      if (key.pk === rateKey.pk && key.sk === rateKey.sk) return {};
       if (key.pk === familyInvite.pk && key.sk === familyInvite.sk) return { Item: familyInvite };
-      if (key.pk === issuerLink.pk && key.sk === issuerLink.sk) return { Item: issuerLink };
       if (key.pk === K.profile('nico').pk && key.sk === 'PROFILE') {
         return { Item: profile('nico', { accountType: 'minor' }) };
       }
-      return {};
+      return familyGetResponse(key, [home]) ?? {};
     });
-    ddbMock.on(QueryCommand).resolves({ Items: [issuerLink] });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      return familyQueryResponse(input, [home]) ?? { Items: [] };
+    });
+    installFamilyCoverageReads([home]);
     ddbMock.on(TransactWriteCommand).resolves({});
 
     await acceptFamilyInvite(ctxOf(profile('abuela')), { code });
 
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
-    expect(conditionKeys()).toEqual(
+    expect(conditionKeys(1)).toEqual(
       expect.arrayContaining([
         accountClosureKey('abuela'),
+        K.profile('abuela'),
         K.profile('rocio'),
         accountClosureKey('rocio'),
         K.profile('nico'),
         accountClosureKey('nico'),
       ]),
     );
-    expect(conditionKeys()).not.toContainEqual(K.profile('abuela'));
-    const coGuardianFence = transactionInput().TransactItems?.find(
-      (item) => item.Update?.Key?.['pk'] === K.profile('abuela').pk,
+    const additionalSeat = transactionInput(1).TransactItems?.find(
+      (item) => item.Update?.Key?.['sk'] === 'SEAT#ADDITIONAL',
     )?.Update;
-    expect(coGuardianFence?.UpdateExpression).toBe('ADD createdMinorIds :createdMinorIds');
-    expect(coGuardianFence?.ExpressionAttributeValues).toMatchObject({
-      ':createdMinorIds': new Set(['nico']),
-      ':familyFenceVersion': 1,
+    expect(additionalSeat?.ExpressionAttributeValues).toMatchObject({
+      ':accountId': 'abuela',
+      ':assigned': 'assigned',
     });
-    expect(conditionKeys()).toContainEqual(K.link('nico', 'rocio'));
-    const inviteDelete = transactionInput().TransactItems?.find(
+    expect(transactionInput(1).TransactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({
+            entityType: 'SupervisionLink',
+            role: 'additional_responsible',
+            adultId: 'abuela',
+            minorId: 'nico',
+          }),
+        }),
+      }),
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({ kind: 'invited', guardianId: 'abuela' }),
+        }),
+      }),
+    ]));
+    expect(conditionKeys(1)).toContainEqual(FK.supervision('nico', 'rocio'));
+    const inviteDelete = transactionInput(1).TransactItems?.find(
       (item) => item.Delete?.Key?.['pk'] === familyInvite.pk,
     )?.Delete;
     expect(inviteDelete?.ConditionExpression).toContain('expiresAt = :expiresAt');
+    expect(inviteDelete?.ConditionExpression).toContain('expiresAt > :now');
   });
 
   it('accepts linkExisting with caller and issuer guards plus an exact single-use invite delete', async () => {
     const code = 'LINK1234';
     const familyInvite = invite(code, { kind: 'linkExisting', minorId: undefined });
+    const source = familyV2Fixture({ now: NOW, primaryId: 'mara', minorIds: ['nico'] });
+    const target = familyV2Fixture({ now: NOW, primaryId: 'rocio' });
     ddbMock.on(GetCommand).callsFake((input) => {
       const key = input.Key as { pk: string; sk: string };
-      if (key.pk === K.rate('nico', Math.floor(NOW / 3_600_000)).pk) return {};
+      const rateKey = K.rate('nico', Math.floor(NOW / 3_600_000));
+      if (key.pk === rateKey.pk && key.sk === rateKey.sk) return {};
       if (key.pk === familyInvite.pk && key.sk === familyInvite.sk) return { Item: familyInvite };
       if (key.pk === K.profile('rocio').pk && key.sk === 'PROFILE') {
         return { Item: profile('rocio') };
       }
-      return {};
+      return familyGetResponse(key, [source, target]) ?? {};
     });
-    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      return familyQueryResponse(input, [source, target]) ?? { Items: [] };
+    });
+    installFamilyCoverageReads([source, target]);
     ddbMock.on(TransactWriteCommand).resolves({});
 
     await acceptFamilyInvite(
@@ -709,15 +903,30 @@ describe('family mutations serialize with account closure', () => {
       { code },
     );
 
-    expectOwnerGuards(['nico', 'rocio']);
-    const linkPut = transactionInput().TransactItems?.find(
+    expectOwnerGuards(['nico', 'rocio', 'mara'], 1);
+    const linkPut = transactionInput(1).TransactItems?.find(
       (item) => item.Put?.Item?.['linkId'] === 'rocio~nico',
     )?.Put;
-    expect(linkPut?.ConditionExpression).toBe('attribute_not_exists(pk)');
-    const inviteDelete = transactionInput().TransactItems?.find(
+    expect(linkPut).toBeUndefined();
+    const noticePut = transactionInput(1).TransactItems?.find(
+      (item) => item.Put?.Item?.['entityType'] === 'FamilyNotice',
+    )?.Put;
+    expect(noticePut?.Item).toMatchObject({
+      kind: 'minor_link_request',
+      state: 'pending',
+      householdId: target.household.householdId,
+      sourceHouseholdId: source.household.householdId,
+      sourcePrimaryId: 'mara',
+      minorId: 'nico',
+    });
+    expect(transactionInput(1).TransactItems?.some(
+      (item) => item.Put?.Item?.['entityType'] === 'SupervisionLink',
+    )).toBe(false);
+    const inviteDelete = transactionInput(1).TransactItems?.find(
       (item) => item.Delete?.Key?.['pk'] === familyInvite.pk,
     )?.Delete;
-    expect(inviteDelete?.ConditionExpression).toContain('attribute_not_exists(#minorId)');
+    expect(inviteDelete?.ConditionExpression).toContain('attribute_not_exists(minorId)');
+    expect(inviteDelete?.ConditionExpression).toContain('expiresAt > :now');
   });
 
   it('deletes a family link only while both owners and the exact link still match', async () => {

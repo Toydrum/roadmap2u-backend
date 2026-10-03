@@ -12,13 +12,13 @@
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import { SCHEMA_VERSION, SyncBase, type Tree, type TreeNode } from '@app/db/schema';
 import { createHash } from 'node:crypto';
+import { Ctx, requireWritableOwner } from '../authz';
 import {
-  Ctx,
-  requireGuardianOf,
-  requireGuardianOfConsistent,
-  requireWritableOwner,
-  writableOwnerConditionChecks,
-} from '../authz';
+  requireForestWriteAuthority,
+  recheckForestWriteAuthority,
+  withForestWriteAuthority,
+  type ForestWriteAuthority,
+} from '../family/forest-authority';
 import { accountClosureKey } from '../account-closure';
 import {
   createDynamoAccessResolver,
@@ -40,7 +40,6 @@ import {
 import {
   GetCommand,
   K,
-  LinkItem,
   ProfileItem,
   QueryCommand,
   RecordItem,
@@ -102,45 +101,6 @@ interface CommercialGroupRequest {
   readonly legacyClient: boolean;
 }
 
-function guardianLinkCondition(ctx: Ctx, link: LinkItem): TransactItem {
-  return {
-    ConditionCheck: {
-      TableName: ctx.deps.table,
-      Key: K.link(link.minorId, link.guardianId),
-      ConditionExpression:
-        'attribute_exists(pk) AND linkId = :linkId AND guardianId = :guardianId AND minorId = :minorId AND #kind = :kind AND createdAt = :createdAt',
-      ExpressionAttributeNames: { '#kind': 'kind' },
-      ExpressionAttributeValues: {
-        ':linkId': link.linkId,
-        ':guardianId': link.guardianId,
-        ':minorId': link.minorId,
-        ':kind': link.kind,
-        ':createdAt': link.createdAt,
-      },
-    },
-  };
-}
-
-function exactWritableOwnerConditionChecks(ctx: Ctx, ownerId: string): TransactItem[] {
-  const [profile, closure] = writableOwnerConditionChecks(ctx.deps, ownerId);
-  if (!profile?.ConditionCheck || !closure) {
-    throw new ApiError('CONFLICT', 'writable-owner guards are incomplete');
-  }
-  return [
-    {
-      ConditionCheck: {
-        ...profile.ConditionCheck,
-        ConditionExpression: `${profile.ConditionCheck.ConditionExpression} AND userId = :ownerSub`,
-        ExpressionAttributeValues: {
-          ...profile.ConditionCheck.ExpressionAttributeValues,
-          ':ownerSub': ownerId,
-        },
-      },
-    },
-    closure,
-  ];
-}
-
 interface TransactionCancellationClassification {
   recheckGuards: boolean;
 }
@@ -169,31 +129,17 @@ function classifyTransactionCancellation(
   };
 }
 
-function sameGuardianLink(expected: LinkItem, current: LinkItem): boolean {
-  return (
-    expected.linkId === current.linkId &&
-    expected.guardianId === current.guardianId &&
-    expected.minorId === current.minorId &&
-    expected.kind === current.kind &&
-    expected.createdAt === current.createdAt
-  );
-}
-
 async function recheckWriteGuards(
   ctx: Ctx,
   ownerId: string,
-  expectedLink?: LinkItem,
+  expectedAuthority?: ForestWriteAuthority,
 ): Promise<void> {
+  if (ownerId !== ctx.callerId) {
+    if (!expectedAuthority || expectedAuthority.minorId !== ownerId) throw new ApiError('NOT_FOUND');
+    return recheckForestWriteAuthority(ctx, expectedAuthority);
+  }
   const caller = await requireWritableOwner(ctx, ctx.callerId);
   if (caller.userId !== ctx.callerId) throw new ApiError('CONFLICT');
-  if (ownerId !== ctx.callerId) {
-    const owner = await requireWritableOwner(ctx, ownerId);
-    if (owner.userId !== ownerId) throw new ApiError('CONFLICT');
-  }
-  if (expectedLink) {
-    const currentLink = await requireGuardianOfConsistent(ctx, ownerId);
-    if (!sameGuardianLink(expectedLink, currentLink)) throw new ApiError('NOT_FOUND');
-  }
 }
 
 function isValidWinner(
@@ -453,7 +399,9 @@ function assertMutationTransaction(
   items: readonly TransactItem[],
   guardianWrite: boolean,
 ): void {
-  const maximum = guardianWrite ? 49 : 46;
+  // Two paid-source guards; supervised coverage shares a key with the scope guard.
+  // Up to six Household v2 facts plus the responsible's profile and closure.
+  const maximum = guardianWrite ? 55 : 48;
   if (items.length > maximum || items.length > 100) {
     throw new ApiError('LIMIT_EXCEEDED', 'mutation transaction is too large');
   }
@@ -760,6 +708,8 @@ async function readCommercialGroupSnapshot(
     closure,
     access: accessSnapshot.access,
     grants: accessSnapshot.grants,
+    subscription: accessSnapshot.subscription,
+    coverage: accessSnapshot.coverage,
     flags,
     usage,
     usageByTree,
@@ -772,7 +722,7 @@ async function applyV2Group(
   ctx: Ctx,
   ownerId: string,
   group: ParsedMutationGroup,
-  expectedGuardianLink?: LinkItem,
+  expectedAuthority?: ForestWriteAuthority,
   legacyClient = false,
 ): Promise<SyncPushResponse> {
   const request: CommercialGroupRequest = {
@@ -790,7 +740,7 @@ async function applyV2Group(
     if (!isCanonicalMarker(existingMarker, request)) {
       throw new ApiError('MUTATION_GROUP_INVALID');
     }
-    await recheckWriteGuards(ctx, ownerId, expectedGuardianLink);
+    await recheckWriteGuards(ctx, ownerId, expectedAuthority);
     return {
       applied: group.records.map((entry) => validateRecord(entry).id),
       rejected: [],
@@ -810,22 +760,19 @@ async function applyV2Group(
       (await accessResolver.resolveFresh(ownerSub)).access,
     commit: async (current, proposal: MutationCommitProposal) => {
       const guardianWrite = current.ownerSub !== ctx.callerId;
-      if (guardianWrite && !expectedGuardianLink) throw new ApiError('NOT_FOUND');
-      const items: TransactItem[] = [
+      if (guardianWrite && (!expectedAuthority || expectedAuthority.minorId !== current.ownerSub)) {
+        throw new ApiError('NOT_FOUND');
+      }
+      const baseItems: TransactItem[] = [
         markerPut(ctx.deps.table, current),
         ...current.group.records.map((entry) =>
           recordPut(ctx.deps.table, current.ownerSub, entry, current.syncedAt),
         ),
         ...proposal.items,
-        ...(guardianWrite
-          ? [
-              ...exactWritableOwnerConditionChecks(ctx, ctx.callerId),
-              ...(expectedGuardianLink
-                ? [guardianLinkCondition(ctx, expectedGuardianLink)]
-                : []),
-            ]
-          : []),
       ];
+      const items = guardianWrite && expectedAuthority
+        ? withForestWriteAuthority(ctx, expectedAuthority, baseItems)
+        : baseItems;
       assertMutationTransaction(items, guardianWrite);
       try {
         await ctx.deps.ddb.send(
@@ -845,10 +792,10 @@ async function applyV2Group(
           if (!isCanonicalMarker(concurrentMarker, current)) {
             throw new ApiError('MUTATION_GROUP_INVALID');
           }
-          await recheckWriteGuards(ctx, current.ownerSub, expectedGuardianLink);
+          await recheckWriteGuards(ctx, current.ownerSub, expectedAuthority);
           return 'committed';
         }
-        await recheckWriteGuards(ctx, current.ownerSub, expectedGuardianLink);
+        await recheckWriteGuards(ctx, current.ownerSub, expectedAuthority);
         return 'conflict';
       }
     },
@@ -864,7 +811,7 @@ async function applyV2Group(
       }),
     );
     if (ownerId !== ctx.callerId) {
-      await recheckWriteGuards(ctx, ownerId, expectedGuardianLink);
+      await recheckWriteGuards(ctx, ownerId, expectedAuthority);
     }
     const serverRecords: SyncRecord[] = [];
     result.deltas.forEach((delta, index) => {
@@ -903,7 +850,7 @@ async function pushInto(
   ctx: Ctx,
   ownerId: string,
   req: SyncPushPayload,
-  expectedGuardianLink?: LinkItem,
+  expectedAuthority?: ForestWriteAuthority,
 ): Promise<SyncPushResponse> {
   if (typeof req !== 'object' || req === null || Array.isArray(req)) {
     throw new ApiError('VALIDATION');
@@ -959,7 +906,7 @@ async function pushInto(
     }
     const response: SyncPushResponse = { applied: [], rejected: [], serverRecords: [] };
     for (const group of req.mutationGroups) {
-      const result = await applyV2Group(ctx, ownerId, group, expectedGuardianLink);
+      const result = await applyV2Group(ctx, ownerId, group, expectedAuthority);
       response.applied.push(...result.applied);
       response.rejected.push(...result.rejected);
       response.serverRecords.push(...result.serverRecords);
@@ -969,7 +916,7 @@ async function pushInto(
   if (!Array.isArray(req.records)) throw new ApiError('VALIDATION');
   if (req.records.length > LIMITS.syncPushMax) throw new ApiError('LIMIT_EXCEEDED', `max ${LIMITS.syncPushMax} records per push`);
   if (req.records.length === 0) {
-    await recheckWriteGuards(ctx, ownerId, expectedGuardianLink);
+    await recheckWriteGuards(ctx, ownerId, expectedAuthority);
     return { applied: [], rejected: [], serverRecords: [] };
   }
 
@@ -994,7 +941,7 @@ async function pushInto(
       ctx,
       ownerId,
       legacyMutationGroup(ownerId, entry),
-      expectedGuardianLink,
+      expectedAuthority,
       true,
     );
     results.set(`${entry.store}\u0000${record.id}`, result);
@@ -1015,14 +962,14 @@ export async function pushSync(ctx: Ctx, body: SyncPushPayload): Promise<SyncPus
   return pushInto(ctx, ctx.callerId, body);
 }
 
-/** Guardian write-through (co-gardening) — either link kind may edit. */
+/** Co-gardening requires current primary or exact additional supervision. */
 export async function pushSyncFor(
   ctx: Ctx,
   minorId: string,
   body: SyncPushPayload,
 ): Promise<SyncPushResponse> {
-  const link = await requireGuardianOf(ctx, minorId);
-  return pushInto(ctx, minorId, body, link);
+  const authority = await requireForestWriteAuthority(ctx, minorId);
+  return pushInto(ctx, minorId, body, authority);
 }
 
 export async function getSyncChanges(ctx: Ctx, cursor?: string): Promise<SyncChangesResponse> {

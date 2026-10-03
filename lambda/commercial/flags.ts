@@ -2,7 +2,30 @@ import { ApiError, type ApiErrorCode } from '@app/api/contracts';
 
 export type CommercialMode = 'off' | 'observe' | 'enforce';
 
-export interface CommercialFlags {
+export interface FamilyBillingFlags {
+  readonly familyCreationEnabled: boolean;
+  readonly minorLinkingEnabled: boolean;
+  readonly minorSocialEnabled: boolean;
+  readonly familyCatalogEnabled: boolean;
+  readonly checkoutEnabled: boolean;
+  readonly subscriptionChangesEnabled: boolean;
+  readonly billingEnforcementMode: CommercialMode;
+}
+
+export const FAMILY_BILLING_FLAG_DEFAULTS: FamilyBillingFlags = Object.freeze({
+  familyCreationEnabled: false,
+  minorLinkingEnabled: false,
+  minorSocialEnabled: false,
+  familyCatalogEnabled: false,
+  checkoutEnabled: false,
+  subscriptionChangesEnabled: false,
+  billingEnforcementMode: 'off',
+});
+export const FAMILY_BILLING_FLAG_NAMES = Object.freeze(
+  Object.keys(FAMILY_BILLING_FLAG_DEFAULTS) as (keyof FamilyBillingFlags)[],
+);
+
+export interface CommercialFlags extends FamilyBillingFlags {
   readonly revision: number;
   readonly quotaMode: CommercialMode;
   readonly capabilityMode: CommercialMode;
@@ -33,22 +56,13 @@ export type CommercialOperation =
   | {
       readonly kind: 'social';
       readonly action:
-        | 'create'
-        | 'accept'
-        | 'visit'
-        | 'decline'
-        | 'cancel'
-        | 'remove'
-        | 'privacy'
-        | 'export';
+        'create' | 'accept' | 'visit' | 'decline' | 'cancel' | 'remove' | 'privacy' | 'export';
     };
 
 export type CommercialSwitch = 'issuance' | 'redemption' | 'payments';
 
 export type CommercialMetricName =
-  | 'ConfigurationDrift'
-  | 'CommercialConfigurationUnavailable'
-  | 'CommercialConfigurationStale';
+  'ConfigurationDrift' | 'CommercialConfigurationUnavailable' | 'CommercialConfigurationStale';
 
 export interface CommercialFlagsResolverDeps {
   /** Reads COMMERCIAL#CONFIG / FLAGS with a consistent Get in the adapter. */
@@ -72,7 +86,7 @@ interface GoodSnapshot {
 const CACHE_TTL_MS = 30_000;
 const LAST_KNOWN_GOOD_TTL_MS = 15 * 60_000;
 const MODES = new Set<CommercialMode>(['off', 'observe', 'enforce']);
-const ITEM_KEYS = new Set([
+const LEGACY_ITEM_ATTRIBUTES = [
   'pk',
   'sk',
   'revision',
@@ -84,7 +98,13 @@ const ITEM_KEYS = new Set([
   'updatedAt',
   'updatedBy',
   'reason',
-]);
+] as const;
+export const COMMERCIAL_FLAGS_ATTRIBUTES = [
+  ...LEGACY_ITEM_ATTRIBUTES,
+  ...FAMILY_BILLING_FLAG_NAMES,
+] as const;
+const LEGACY_ITEM_KEYS = new Set<string>(LEGACY_ITEM_ATTRIBUTES);
+const ITEM_KEYS = new Set<string>(COMMERCIAL_FLAGS_ATTRIBUTES);
 const SAFE_SOCIAL_ACTIONS = new Set<Extract<CommercialOperation, { kind: 'social' }>['action']>([
   'decline',
   'cancel',
@@ -92,8 +112,7 @@ const SAFE_SOCIAL_ACTIONS = new Set<Extract<CommercialOperation, { kind: 'social
   'privacy',
   'export',
 ]);
-const CONFIGURATION_UNAVAILABLE_CODE =
-  'COMMERCIAL_CONFIGURATION_UNAVAILABLE' as ApiErrorCode;
+const CONFIGURATION_UNAVAILABLE_CODE = 'COMMERCIAL_CONFIGURATION_UNAVAILABLE' as ApiErrorCode;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -101,7 +120,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function hasExactKeys(value: Record<string, unknown>): boolean {
   const keys = Object.keys(value);
-  return keys.length === ITEM_KEYS.size && keys.every((key) => ITEM_KEYS.has(key));
+  // Existing deployments keep their exact legacy shape until the next CAS write.
+  return (
+    (keys.length === ITEM_KEYS.size && keys.every((key) => ITEM_KEYS.has(key))) ||
+    (keys.length === LEGACY_ITEM_KEYS.size && keys.every((key) => LEGACY_ITEM_KEYS.has(key)))
+  );
 }
 
 function isPositiveInteger(value: unknown): value is number {
@@ -131,8 +154,24 @@ function parseFlagsItem(value: unknown): ParsedFlags | null {
   if (!isTimestamp(value['updatedAt'])) return null;
   if (!isNonBlank(value['updatedBy']) || !isNonBlank(value['reason'])) return null;
 
+  let family: FamilyBillingFlags = FAMILY_BILLING_FLAG_DEFAULTS;
+  if (Object.hasOwn(value, 'familyCreationEnabled')) {
+    for (const field of FAMILY_BILLING_FLAG_NAMES) {
+      if (
+        field === 'billingEnforcementMode'
+          ? !isMode(value[field])
+          : typeof value[field] !== 'boolean'
+      )
+        return null;
+    }
+    family = Object.fromEntries(
+      FAMILY_BILLING_FLAG_NAMES.map((field) => [field, value[field]]),
+    ) as unknown as FamilyBillingFlags;
+  }
+
   return {
     flags: Object.freeze({
+      ...family,
       revision: value['revision'],
       quotaMode: value['quotaMode'],
       capabilityMode: value['capabilityMode'],
@@ -155,6 +194,7 @@ function sameFlags(left: CommercialFlags, right: CommercialFlags): boolean {
     left.accessCodeIssuanceEnabled === right.accessCodeIssuanceEnabled &&
     left.accessCodeRedemptionEnabled === right.accessCodeRedemptionEnabled &&
     left.premiumPaymentsEnabled === right.premiumPaymentsEnabled &&
+    FAMILY_BILLING_FLAG_NAMES.every((field) => left[field] === right[field]) &&
     left.updatedAt === right.updatedAt &&
     left.updatedBy === right.updatedBy &&
     left.reason === right.reason
@@ -168,9 +208,7 @@ function sameFlags(left: CommercialFlags, right: CommercialFlags): boolean {
  */
 export class CommercialFlagsResolver {
   private lastGood: GoodSnapshot | undefined;
-  private lastAttempt:
-    | { readonly at: number; readonly result: CommercialConfigResult }
-    | undefined;
+  private lastAttempt: { readonly at: number; readonly result: CommercialConfigResult } | undefined;
 
   constructor(private readonly deps: CommercialFlagsResolverDeps) {}
 
@@ -186,10 +224,7 @@ export class CommercialFlagsResolver {
   }
 
   private resolveCached(now: number): CommercialConfigResult {
-    if (
-      this.lastGood &&
-      now - this.lastGood.loadedAt > LAST_KNOWN_GOOD_TTL_MS
-    ) {
+    if (this.lastGood && now - this.lastGood.loadedAt > LAST_KNOWN_GOOD_TTL_MS) {
       const expired: CommercialConfigResult = { status: 'unavailable', reason: 'expired' };
       if (
         this.lastAttempt?.result.status !== 'unavailable' ||
@@ -254,7 +289,10 @@ export class CommercialFlagsResolver {
     return result;
   }
 
-  private useFallback(now: number, reason: Exclude<UnavailableReason, 'expired'>): CommercialConfigResult {
+  private useFallback(
+    now: number,
+    reason: Exclude<UnavailableReason, 'expired'>,
+  ): CommercialConfigResult {
     if (this.lastGood && now - this.lastGood.loadedAt <= LAST_KNOWN_GOOD_TTL_MS) {
       const stale: CommercialConfigResult = {
         status: 'available',

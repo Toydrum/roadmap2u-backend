@@ -30,7 +30,7 @@ describe('GitHub OIDC bootstrap', () => {
   it('reuses the existing GitHub provider and trusts immutable repo identities', () => {
     const template = bootstrapTemplate();
     template.resourceCountIs('AWS::IAM::OIDCProvider', 0);
-    template.resourceCountIs('AWS::IAM::Role', 23);
+    template.resourceCountIs('AWS::IAM::Role', 26);
 
     const rendered = JSON.stringify(template.toJSON());
     for (const stage of ['dev', 'test', 'prod']) {
@@ -543,19 +543,37 @@ describe('GitHub OIDC bootstrap', () => {
           const primaryTableArn = `table/roadmap-${stage}`;
           const safeProjection = [
             'accountType',
+            'accountId',
+            'adultId',
+            'assignedAt',
+            'country',
             'createdAt',
             'createdMinorIds',
+            'entityType',
             'familyFenceVersion',
             'gsi1pk',
             'gsi1sk',
+            'gsi2pk',
+            'gsi2sk',
             'guardianId',
+            'householdId',
             'kind',
             'linkId',
+            'majorityAt',
             'minorId',
             'pk',
+            'primaryResponsibleId',
+            'revision',
+            'role',
+            'seatNumber',
+            'seatType',
             'sk',
+            'state',
             'status',
+            'updatedAt',
             'userId',
+            'validFrom',
+            'validUntil',
           ];
           const scan = statements.find(
             (statement: any) => statement.Sid === 'ScanOnlyFamilyFenceProjection',

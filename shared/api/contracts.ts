@@ -150,7 +150,7 @@ export interface AccessSource {
   validUntil: number | null;
   scope?: 'individual' | 'family_member';
   householdId?: string;
-  seatType?: SeatType;
+  seatType?: SeatType | 'primary_responsible';
 }
 
 export interface AccessSummary {
@@ -303,11 +303,36 @@ export interface HouseholdView {
   state: HouseholdState;
   myRole: SupervisionRole | null;
   primaryResponsible: PublicProfile;
+  /** Pilot or subscription coverage of the household's primary account. */
+  familyCoverage?: {
+    source: 'sponsored_pilot' | 'subscription_projection' | 'test_seed';
+    state: CoverageState;
+  } | null;
   additionalResponsible: HouseholdAdditionalResponsibleView | null;
   minors: HouseholdMinorView[];
   availableMinorSeats: 0 | 1 | 2;
   additionalResponsibleSeatAvailable: boolean;
   revision: number;
+}
+
+/** Account-private inbox. A pointer never grants authority; commands reauthorize. */
+export interface FamilyInboxEntry {
+  noticeId: string;
+  kind: 'minor_link_request' | 'additional_responsible_invitation' | 'primary_transfer';
+  householdId: string;
+  /** Revision of the household named by this notice when it was created. */
+  expectedHouseholdRevision: number;
+  state: 'pending' | 'approved' | 'accepted' | 'rejected' | 'revoked' | 'expired';
+  createdAt: number;
+  expiresAt: number;
+  revision: number;
+}
+
+export interface FamilyInboxView {
+  contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
+  entries: FamilyInboxEntry[];
+  /** Opaque cursor scoped to the authenticated account, never a user selector. */
+  nextCursor: string | null;
 }
 
 export const MINOR_FRIEND_REQUEST_STATES = Object.freeze([
@@ -404,6 +429,7 @@ export interface CreateMinorResponse {
 export const MINOR_LINK_REQUEST_STATES = Object.freeze([
   'pending',
   'approved',
+  'accepted',
   'rejected',
   'expired',
 ] as const);
@@ -423,7 +449,21 @@ export interface CreateMinorLinkRequest extends FamilyCommandBase {
   code: string;
 }
 
+/** Source primary issues a single-use code for one already supervised minor. */
+export interface CreateMinorLinkCodeRequest {
+  minorId: string;
+}
+
 export interface ApproveMinorLinkRequest extends FamilyCommandBase {}
+
+export const CURRENT_MINOR_LINK_RESPONSIBILITY_VERSION =
+  'minor-link-responsibility-v1' as const;
+export const CURRENT_MINOR_LINK_PRIVACY_VERSION = 'minor-link-privacy-v1' as const;
+
+export interface AcceptMinorLinkRequest extends FamilyCommandBase {
+  responsibilityVersion: typeof CURRENT_MINOR_LINK_RESPONSIBILITY_VERSION;
+  privacyVersion: typeof CURRENT_MINOR_LINK_PRIVACY_VERSION;
+}
 
 export const ADDITIONAL_RESPONSIBLE_INVITATION_STATES = Object.freeze([
   'pending',
@@ -438,6 +478,7 @@ export interface AdditionalResponsibleInvitationView {
   contractVersion: typeof FAMILY_BILLING_CONTRACT_VERSION;
   invitationId: string;
   householdId: string;
+  intendedAdultId: string;
   minorIds: string[];
   state: AdditionalResponsibleInvitationState;
   expiresAt: number;
@@ -445,6 +486,7 @@ export interface AdditionalResponsibleInvitationView {
 }
 
 export interface CreateAdditionalResponsibleInvitationRequest extends FamilyCommandBase {
+  intendedAdultId: string;
   minorIds: string[];
 }
 
@@ -809,9 +851,15 @@ export interface RoadmapApi {
 
   // family v2 (additive while legacy routes remain available)
   getHousehold(): Promise<HouseholdView>;
+  getFamilyInbox(cursor?: string): Promise<FamilyInboxView>;
   createMinor(req: CreateMinorRequest): Promise<CreateMinorResponse>;
+  createMinorLinkCode(req: CreateMinorLinkCodeRequest): Promise<CodeGrant>;
   createMinorLinkRequest(req: CreateMinorLinkRequest): Promise<MinorLinkRequestView>;
-  approveMinorLinkRequest(requestId: string, req: ApproveMinorLinkRequest): Promise<HouseholdView>;
+  approveMinorLinkRequest(
+    requestId: string,
+    req: ApproveMinorLinkRequest,
+  ): Promise<MinorLinkRequestView>;
+  acceptMinorLinkRequest(requestId: string, req: AcceptMinorLinkRequest): Promise<HouseholdView>;
   createAdditionalResponsibleInvitation(
     req: CreateAdditionalResponsibleInvitationRequest,
   ): Promise<AdditionalResponsibleInvitationView>;
@@ -846,6 +894,8 @@ export interface RoadmapApi {
   removeSocialFriendship(friendshipId: string): Promise<void>;
   createMinorInviteCode(req: CreateMinorInviteCodeRequest): Promise<CodeGrant>;
   createMinorFriendRequest(req: CreateMinorFriendRequestRequest): Promise<MinorFriendRequestView>;
+  /** Pending four-consent requests visible to the minor or an authorized responsible. */
+  getMinorFriendRequests(minorId: string): Promise<MinorFriendRequestView[]>;
   acceptMinorFriendRequest(
     requestId: string,
     req: MinorFriendActionRequest,
@@ -893,9 +943,12 @@ export const API_PATHS = Object.freeze({
   familyInvitesAccept: '/family/invites/accept',
   familyInvite: (code: string) => `/family/invites/${code}`,
   familyHousehold: '/family/household',
+  familyInbox: '/family/inbox',
   familyMinors: '/family/minors',
   familyMinorLinkRequests: '/family/minor-link-requests',
+  familyMinorLinkCodes: '/family/minor-link-codes',
   familyMinorLinkRequestApprove: (id: string) => `/family/minor-link-requests/${id}/approve`,
+  familyMinorLinkRequestAccept: (id: string) => `/family/minor-link-requests/${id}/accept`,
   familyAdditionalResponsibleInvitations: '/family/additional-responsible-invitations',
   familyAdditionalResponsibleInvitationAccept: (id: string) =>
     `/family/additional-responsible-invitations/${id}/accept`,
@@ -915,6 +968,7 @@ export const API_PATHS = Object.freeze({
   socialFriendship: (id: string) => `/social/friendships/${id}`,
   socialMinorInviteCodes: '/social/minor-invite-codes',
   socialMinorFriendRequests: '/social/minor-friend-requests',
+  socialMinorFriendRequestsFor: (minorId: string) => `/social/minor-friend-requests/${minorId}`,
   socialMinorFriendRequestAccept: (id: string) =>
     `/social/minor-friend-requests/${id}/minor-accept`,
   socialMinorFriendRequestResponsibleApprove: (id: string) =>

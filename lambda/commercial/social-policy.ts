@@ -97,10 +97,15 @@ export async function resolveSocialCapability(
     ] as const),
   );
   const accesses = new Map(entries);
+  // Billing and the existing capability rollout are independent gates. Turning
+  // either off must not weaken the other. The resolver combines sources for the
+  // exact beneficiary (never the payer), so a remaining grant/individual plan
+  // preserves social access when family coverage ends. Supervision is untouched.
+  const modes = [flags.capabilityMode, flags.billingEnforcementMode];
   const decision: SocialCapabilityDecision = {
     kind: 'social',
     action,
-    mode: flags.capabilityMode,
+    mode: modes.includes('enforce') ? 'enforce' : modes.includes('observe') ? 'observe' : 'off',
     wouldDeny: entries.some(([, access]) => !access.capabilities.social),
   };
   emitDecision(decision);

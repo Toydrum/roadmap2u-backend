@@ -6,7 +6,10 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  type TransactWriteCommandInput,
+} from '@aws-sdk/lib-dynamodb';
 import type { Context, SQSBatchResponse, SQSEvent } from 'aws-lambda';
 import {
   GetCommand,
@@ -26,8 +29,23 @@ import {
   guardianInviteFromMirror,
   type GuardianInviteMirrorItem,
 } from './guardian-invites';
+import {
+  adultFamilyClosureBlockReason,
+  adultFamilyClosureConditionChecks,
+  discoverAdultFamilyClosure,
+} from './family/account-closure';
+import { SK } from './social/model';
+import { FK, supervisionLinkId } from './family/keys';
+import type {
+  CoverageAssignmentItem,
+  FamilyEntitlementItem,
+  SeatAssignmentItem,
+  SupervisionLinkItem,
+} from './family/model';
+import { readHouseholdSnapshot } from './family/repository';
 
 export const ACCOUNT_CLOSURE_OPEN_GSI_PK = 'ACCOUNT_CLOSURE#OPEN';
+type AccountClosureTransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
 
 export type AccountClosureState =
   | 'requested'
@@ -39,6 +57,9 @@ export type AccountClosureState =
 export type AccountClosureKind = 'self_adult' | 'guardian_minor';
 
 export type AccountClosurePhase =
+  | 'familyMembership'
+  | 'ownedHousehold'
+  | 'familySupervisionLinks'
   | 'inboundGuardianLinks'
   | 'friendMirrors'
   | 'outgoingFriendRequests'
@@ -72,10 +93,12 @@ export interface AccountClosureItem {
   readonly gsi1pk?: string;
   readonly gsi1sk?: string;
   readonly checkpoint?: AccountClosureCheckpoint;
+  /** Absent on records created before Household v2 cleanup became mandatory. */
+  readonly familyCleanupVersion?: typeof ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION;
   readonly purgeCompleteAt?: number;
   readonly completedAt?: number;
   readonly blockedAt?: number;
-  readonly blockReason?: 'created_family_link';
+  readonly blockReason?: AccountClosureBlockReason;
   readonly ttl?: number;
   readonly leaseOwner?: string;
   readonly leaseUntil?: number;
@@ -112,8 +135,15 @@ export interface AccountClosureDeps extends Deps {
   readonly queue: AccountClosureQueue;
   readonly nextClosureId: () => string;
   readonly nextWorkerId: () => string;
-  readonly recordBlocked?: (reason: 'created_family_link') => void | Promise<void>;
+  readonly recordBlocked?: (reason: AccountClosureBlockReason) => void | Promise<void>;
 }
+
+export const ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION = 1 as const;
+export type AccountClosureBlockReason =
+  | 'created_family_link'
+  | 'active_primary_minors'
+  | 'active_additional_responsibility'
+  | 'incomplete_family_state';
 
 export function accountClosureKey(sub: string): { pk: string; sk: 'STATE' } {
   return { pk: `ACCOUNT_CLOSURE#${sub}`, sk: 'STATE' };
@@ -273,7 +303,7 @@ async function saveClosureCheckpoint(
       TableName: deps.table,
       Key: accountClosureKey(closure.sub),
       UpdateExpression:
-        'SET checkpoint = :checkpoint, revision = :nextRevision, updatedAt = :now, nextAttemptAt = :nextAttemptAt, gsi1sk = :gsi1sk REMOVE leaseOwner, leaseUntil',
+        'SET checkpoint = :checkpoint, familyCleanupVersion = :familyCleanupVersion, revision = :nextRevision, updatedAt = :now, nextAttemptAt = :nextAttemptAt, gsi1sk = :gsi1sk REMOVE leaseOwner, leaseUntil',
       ConditionExpression:
         'closureId = :closureId AND revision = :expectedRevision AND #state = :state AND leaseOwner = :leaseOwner',
       ExpressionAttributeNames: { '#state': 'state' },
@@ -283,6 +313,7 @@ async function saveClosureCheckpoint(
         ':state': 'purging',
         ':leaseOwner': closure.leaseOwner,
         ':checkpoint': checkpoint,
+        ':familyCleanupVersion': ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION,
         ':nextRevision': closure.revision + 1,
         ':now': now,
         ':nextAttemptAt': nextAttemptAt,
@@ -292,10 +323,11 @@ async function saveClosureCheckpoint(
   );
 }
 
-async function blockClosureOnCreatedLink(
+async function blockClosure(
   deps: AccountClosureDeps,
   closure: AccountClosureItem,
-  link: LinkItem,
+  reason: AccountClosureBlockReason,
+  guards: readonly AccountClosureTransactItem[] = [],
 ): Promise<void> {
   const now = deps.now();
   await deps.ddb.send(
@@ -318,11 +350,11 @@ async function blockClosureOnCreatedLink(
               ':nextState': 'blocked',
               ':nextRevision': closure.revision + 1,
               ':now': now,
-              ':blockReason': 'created_family_link',
+              ':blockReason': reason,
             },
           },
         },
-        exactLinkCheck(deps, link),
+        ...guards,
         deps.auditWriter.transactPut({
           targetKind: 'USER',
           targetId: closure.sub,
@@ -333,7 +365,7 @@ async function blockClosureOnCreatedLink(
           subject: closure.sub,
           details: {
             closureId: closure.closureId,
-            reason: 'created_family_link',
+            reason,
             from: 'purging',
             to: 'blocked',
           },
@@ -341,7 +373,560 @@ async function blockClosureOnCreatedLink(
       ],
     }),
   );
-  await Promise.resolve(deps.recordBlocked?.('created_family_link')).catch(() => undefined);
+  await Promise.resolve(deps.recordBlocked?.(reason)).catch(() => undefined);
+}
+
+async function blockClosureOnCreatedLink(
+  deps: AccountClosureDeps,
+  closure: AccountClosureItem,
+  link: LinkItem,
+): Promise<void> {
+  await blockClosure(deps, closure, 'created_family_link', [exactLinkCheck(deps, link)]);
+}
+
+async function readFamilyCoverage(
+  deps: AccountClosureDeps,
+  accountId: string,
+): Promise<CoverageAssignmentItem | null> {
+  const result = await deps.ddb.send(
+    new GetCommand({
+      TableName: deps.table,
+      Key: FK.familyCoverage(accountId),
+      ConsistentRead: true,
+    }),
+  );
+  const item = result.Item as Partial<CoverageAssignmentItem> | undefined;
+  return item?.entityType === 'CoverageAssignment' &&
+    item.pk === FK.familyCoverage(accountId).pk &&
+    item.sk === FK.familyCoverage(accountId).sk
+    ? item as CoverageAssignmentItem
+    : null;
+}
+
+function exactSupervisionDelete(
+  deps: AccountClosureDeps,
+  link: SupervisionLinkItem,
+): AccountClosureTransactItem {
+  return {
+    Delete: {
+      TableName: deps.table,
+      Key: { pk: link.pk, sk: link.sk },
+      ConditionExpression:
+        'attribute_exists(pk) AND entityType = :entityType AND gsi1pk = :gsi1pk AND gsi1sk = :gsi1sk AND linkId = :linkId AND householdId = :householdId AND adultId = :adultId AND minorId = :minorId AND #role = :role AND #state = :state AND revision = :revision AND validFrom = :validFrom AND validUntil = :validUntil',
+      ExpressionAttributeNames: { '#role': 'role', '#state': 'state' },
+      ExpressionAttributeValues: {
+        ':entityType': 'SupervisionLink',
+        ':gsi1pk': link.gsi1pk,
+        ':gsi1sk': link.gsi1sk,
+        ':linkId': link.linkId,
+        ':householdId': link.householdId,
+        ':adultId': link.adultId,
+        ':minorId': link.minorId,
+        ':role': link.role,
+        ':state': link.state,
+        ':revision': link.revision,
+        ':validFrom': link.validFrom,
+        ':validUntil': link.validUntil,
+      },
+    },
+  };
+}
+
+function exactSupervisionCheck(
+  deps: AccountClosureDeps,
+  link: SupervisionLinkItem,
+): AccountClosureTransactItem {
+  const deletion = exactSupervisionDelete(deps, link).Delete!;
+  return {
+    ConditionCheck: {
+      ...deletion,
+      ConditionExpression: deletion.ConditionExpression!,
+    },
+  };
+}
+
+function exactCoverageDelete(
+  deps: AccountClosureDeps,
+  coverage: CoverageAssignmentItem,
+): AccountClosureTransactItem {
+  return {
+    Delete: {
+      TableName: deps.table,
+      Key: FK.familyCoverage(coverage.accountId),
+      ConditionExpression:
+        'attribute_exists(pk) AND entityType = :entityType AND accountId = :accountId AND householdId = :householdId AND seatType = :seatType AND #state = :state AND revision = :revision',
+      ExpressionAttributeNames: { '#state': 'state' },
+      ExpressionAttributeValues: {
+        ':entityType': 'CoverageAssignment',
+        ':accountId': coverage.accountId,
+        ':householdId': coverage.householdId,
+        ':seatType': coverage.seatType,
+        ':state': coverage.state,
+        ':revision': coverage.revision,
+      },
+    },
+  };
+}
+
+function exactSeatCheck(
+  deps: AccountClosureDeps,
+  seat: SeatAssignmentItem,
+): AccountClosureTransactItem {
+  return {
+    ConditionCheck: {
+      TableName: deps.table,
+      Key: { pk: seat.pk, sk: seat.sk },
+      ConditionExpression:
+        'attribute_exists(pk) AND entityType = :entityType AND householdId = :householdId AND seatType = :seatType AND #state = :state AND accountId = :accountId AND revision = :revision',
+      ExpressionAttributeNames: { '#state': 'state' },
+      ExpressionAttributeValues: {
+        ':entityType': 'SeatAssignment',
+        ':householdId': seat.householdId,
+        ':seatType': seat.seatType,
+        ':state': seat.state,
+        ':accountId': seat.accountId,
+        ':revision': seat.revision,
+      },
+    },
+  };
+}
+
+async function purgeFamilyMembership(
+  deps: AccountClosureDeps,
+  closure: AccountClosureItem,
+): Promise<'continue' | 'blocked'> {
+  if ((closure.kind ?? 'self_adult') === 'self_adult') {
+    const discovery = await discoverAdultFamilyClosure(deps, closure.sub);
+    const reason = adultFamilyClosureBlockReason(discovery);
+    if (reason) {
+      await blockClosure(
+        deps,
+        closure,
+        reason,
+        adultFamilyClosureConditionChecks(deps.table, discovery),
+      );
+      return 'blocked';
+    }
+    await saveClosureCheckpoint(deps, closure, { phase: 'ownedHousehold' });
+    return 'continue';
+  }
+
+  const coverage = await readFamilyCoverage(deps, closure.sub);
+  if (!coverage) {
+    await saveClosureCheckpoint(deps, closure, { phase: 'familySupervisionLinks' });
+    return 'continue';
+  }
+  if (coverage.accountId !== closure.sub || coverage.seatType !== 'minor') {
+    throw new Error('minor closure has a non-minor family coverage');
+  }
+  const snapshot = await readHouseholdSnapshot(
+    { ddb: deps.ddb, tableName: deps.table, now: deps.now },
+    coverage.householdId,
+  );
+  const seat = snapshot?.seats.find(
+    (candidate) =>
+      candidate.seatType === 'minor' &&
+      candidate.state === 'assigned' &&
+      candidate.accountId === closure.sub,
+  );
+  if (
+    !snapshot ||
+    !seat ||
+    snapshot.household.state !== 'active' ||
+    snapshot.household.primaryResponsibleId !== closure.actorSub
+  ) {
+    throw new Error('minor closure family authority changed before detach');
+  }
+  const links = snapshot.supervisionLinks.filter(
+    (link) =>
+      link.householdId === coverage.householdId &&
+      link.minorId === closure.sub &&
+      link.state === 'active',
+  );
+  const additionalSeat = snapshot.seats.find(
+    (candidate) => candidate.seatType === 'additional_responsible',
+  );
+  const additionalId = additionalSeat?.state === 'assigned'
+    ? additionalSeat.accountId
+    : null;
+  const releasesAdditional =
+    additionalId !== null &&
+    links.some(
+      (link) =>
+        link.adultId === additionalId &&
+        link.role === 'additional_responsible' &&
+        link.state === 'active',
+    ) &&
+    !snapshot.supervisionLinks.some(
+      (link) =>
+        link.adultId === additionalId &&
+        link.minorId !== closure.sub &&
+        link.role === 'additional_responsible' &&
+        link.state === 'active',
+    );
+  const additionalCoverage = releasesAdditional
+    ? snapshot.coverages.find((item) => item.accountId === additionalId) ?? null
+    : null;
+  const now = deps.now();
+  await deps.ddb.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        exactClosureLeaseCheck(deps, closure),
+        {
+          Update: {
+            TableName: deps.table,
+            Key: FK.household(snapshot.household.householdId),
+            UpdateExpression: 'SET revision = :nextRevision, updatedAt = :now',
+            ConditionExpression:
+              'entityType = :entityType AND householdId = :householdId AND primaryResponsibleId = :primaryResponsibleId AND #state = :active AND revision = :expectedRevision',
+            ExpressionAttributeNames: { '#state': 'state' },
+            ExpressionAttributeValues: {
+              ':entityType': 'Household',
+              ':householdId': snapshot.household.householdId,
+              ':primaryResponsibleId': closure.actorSub,
+              ':active': 'active',
+              ':expectedRevision': snapshot.household.revision,
+              ':nextRevision': snapshot.household.revision + 1,
+              ':now': now,
+            },
+          },
+        },
+        {
+          Update: {
+            TableName: deps.table,
+            Key: { pk: seat.pk, sk: seat.sk },
+            UpdateExpression:
+              'SET #state = :empty, accountId = :emptyAccountId, assignedAt = :emptyAssignedAt, updatedAt = :now, revision = :nextRevision',
+            ConditionExpression:
+              'entityType = :entityType AND householdId = :householdId AND seatType = :minor AND #state = :assigned AND accountId = :minorId AND revision = :expectedRevision',
+            ExpressionAttributeNames: { '#state': 'state' },
+            ExpressionAttributeValues: {
+              ':entityType': 'SeatAssignment',
+              ':householdId': snapshot.household.householdId,
+              ':minor': 'minor',
+              ':assigned': 'assigned',
+              ':empty': 'empty',
+              ':minorId': closure.sub,
+              ':emptyAccountId': null,
+              ':emptyAssignedAt': null,
+              ':expectedRevision': seat.revision,
+              ':nextRevision': seat.revision + 1,
+              ':now': now,
+            },
+          },
+        },
+        ...(releasesAdditional && additionalSeat && additionalId
+          ? [
+              {
+                Update: {
+                  TableName: deps.table,
+                  Key: FK.additionalSeat(snapshot.household.householdId),
+                  UpdateExpression:
+                    'SET #state = :empty, accountId = :emptyAccountId, assignedAt = :emptyAssignedAt, updatedAt = :now, revision = :nextRevision',
+                  ConditionExpression:
+                    'entityType = :entityType AND householdId = :householdId AND seatType = :seatType AND #state = :assigned AND accountId = :additionalId AND revision = :expectedRevision',
+                  ExpressionAttributeNames: { '#state': 'state' },
+                  ExpressionAttributeValues: {
+                    ':entityType': 'SeatAssignment',
+                    ':householdId': snapshot.household.householdId,
+                    ':seatType': 'additional_responsible',
+                    ':assigned': 'assigned',
+                    ':empty': 'empty',
+                    ':additionalId': additionalId,
+                    ':emptyAccountId': null,
+                    ':emptyAssignedAt': null,
+                    ':expectedRevision': additionalSeat.revision,
+                    ':nextRevision': additionalSeat.revision + 1,
+                    ':now': now,
+                  },
+                },
+              } satisfies AccountClosureTransactItem,
+            ]
+          : []),
+        ...(additionalCoverage && additionalCoverage.state !== 'ended'
+          ? [
+              {
+                Update: {
+                  TableName: deps.table,
+                  Key: FK.familyCoverage(additionalCoverage.accountId),
+                  UpdateExpression:
+                    'SET #state = :ended, revision = :nextRevision, updatedAt = :now',
+                  ConditionExpression:
+                    'entityType = :entityType AND accountId = :accountId AND householdId = :householdId AND seatType = :seatType AND #state = :expectedState AND revision = :expectedRevision',
+                  ExpressionAttributeNames: { '#state': 'state' },
+                  ExpressionAttributeValues: {
+                    ':entityType': 'CoverageAssignment',
+                    ':accountId': additionalCoverage.accountId,
+                    ':householdId': snapshot.household.householdId,
+                    ':seatType': 'additional_responsible',
+                    ':expectedState': additionalCoverage.state,
+                    ':ended': 'ended',
+                    ':expectedRevision': additionalCoverage.revision,
+                    ':nextRevision': additionalCoverage.revision + 1,
+                    ':now': now,
+                  },
+                },
+              } satisfies AccountClosureTransactItem,
+            ]
+          : []),
+        exactCoverageDelete(deps, coverage),
+        ...links.map((link) => exactSupervisionDelete(deps, link)),
+        deps.auditWriter.transactPut({
+          targetKind: 'USER',
+          targetId: closure.sub,
+          timestamp: now,
+          requestId: `${closure.closureId}-family-detached-${snapshot.household.revision + 1}`,
+          action: 'account_closure.family_detached',
+          actor: 'system:account-closure-worker',
+          subject: closure.sub,
+          details: {
+            closureId: closure.closureId,
+            householdId: snapshot.household.householdId,
+            from: 'assigned',
+            to: 'detached',
+          },
+        }),
+      ],
+    }),
+  );
+  await saveClosureCheckpoint(deps, closure, { phase: 'familySupervisionLinks' });
+  return 'continue';
+}
+
+async function familyEntitlementOf(
+  deps: AccountClosureDeps,
+  householdId: string,
+): Promise<FamilyEntitlementItem | null> {
+  const result = await deps.ddb.send(
+    new GetCommand({
+      TableName: deps.table,
+      Key: FK.familyEntitlement(householdId),
+      ConsistentRead: true,
+    }),
+  );
+  const item = result.Item as Partial<FamilyEntitlementItem> | undefined;
+  return item?.entityType === 'FamilyEntitlement' && item.householdId === householdId
+    ? item as FamilyEntitlementItem
+    : null;
+}
+
+function exactInactiveEntitlementCheck(
+  deps: AccountClosureDeps,
+  householdId: string,
+  entitlement: FamilyEntitlementItem | null,
+): AccountClosureTransactItem {
+  if (!entitlement) {
+    return {
+      ConditionCheck: {
+        TableName: deps.table,
+        Key: FK.familyEntitlement(householdId),
+        ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+      },
+    };
+  }
+  return {
+    ConditionCheck: {
+      TableName: deps.table,
+      Key: FK.familyEntitlement(householdId),
+      ConditionExpression:
+        'attribute_exists(pk) AND entityType = :entityType AND householdId = :householdId AND #state = :ended AND revision = :revision',
+      ExpressionAttributeNames: { '#state': 'state' },
+      ExpressionAttributeValues: {
+        ':entityType': 'FamilyEntitlement',
+        ':householdId': householdId,
+        ':ended': 'ended',
+        ':revision': entitlement.revision,
+      },
+    },
+  };
+}
+
+async function closeOwnedHousehold(
+  deps: AccountClosureDeps,
+  closure: AccountClosureItem,
+): Promise<'continue' | 'blocked'> {
+  if ((closure.kind ?? 'self_adult') !== 'self_adult') {
+    await saveClosureCheckpoint(deps, closure, { phase: 'familySupervisionLinks' });
+    return 'continue';
+  }
+  const discovery = await discoverAdultFamilyClosure(deps, closure.sub);
+  const reason = adultFamilyClosureBlockReason(discovery);
+  if (reason) {
+    await blockClosure(
+      deps,
+      closure,
+      reason,
+      adultFamilyClosureConditionChecks(deps.table, discovery),
+    );
+    return 'blocked';
+  }
+  const owned = [...discovery.snapshots]
+    .filter(
+      (snapshot) =>
+        snapshot.household.primaryResponsibleId === closure.sub &&
+        snapshot.household.state === 'active',
+    )
+    .sort((left, right) =>
+      left.household.householdId.localeCompare(right.household.householdId),
+    )[0];
+  if (!owned) {
+    await saveClosureCheckpoint(deps, closure, { phase: 'familySupervisionLinks' });
+    return 'continue';
+  }
+  if (owned.seats.some((seat) => seat.state !== 'empty' || seat.accountId !== null)) {
+    await blockClosure(
+      deps,
+      closure,
+      'incomplete_family_state',
+      [
+        ...owned.seats.map((seat) => exactSeatCheck(deps, seat)),
+      ],
+    );
+    return 'blocked';
+  }
+  const entitlement = await familyEntitlementOf(deps, owned.household.householdId);
+  const now = deps.now();
+  await deps.ddb.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        exactClosureLeaseCheck(deps, closure),
+        {
+          Update: {
+            TableName: deps.table,
+            Key: FK.household(owned.household.householdId),
+            UpdateExpression:
+              'SET #state = :closed, revision = :nextRevision, updatedAt = :now',
+            ConditionExpression:
+              'entityType = :entityType AND householdId = :householdId AND primaryResponsibleId = :primaryResponsibleId AND #state = :active AND revision = :expectedRevision',
+            ExpressionAttributeNames: { '#state': 'state' },
+            ExpressionAttributeValues: {
+              ':entityType': 'Household',
+              ':householdId': owned.household.householdId,
+              ':primaryResponsibleId': closure.sub,
+              ':active': 'active',
+              ':closed': 'closed',
+              ':expectedRevision': owned.household.revision,
+              ':nextRevision': owned.household.revision + 1,
+              ':now': now,
+            },
+          },
+        },
+        ...owned.seats.map((seat) => exactSeatCheck(deps, seat)),
+        ...(entitlement && entitlement.state !== 'ended'
+          ? [
+              {
+                Update: {
+                  TableName: deps.table,
+                  Key: FK.familyEntitlement(owned.household.householdId),
+                  UpdateExpression:
+                    'SET #state = :ended, revision = :nextRevision, updatedAt = :now',
+                  ConditionExpression:
+                    'entityType = :entityType AND householdId = :householdId AND #state = :expectedState AND revision = :expectedRevision',
+                  ExpressionAttributeNames: { '#state': 'state' },
+                  ExpressionAttributeValues: {
+                    ':entityType': 'FamilyEntitlement',
+                    ':householdId': owned.household.householdId,
+                    ':expectedState': entitlement.state,
+                    ':ended': 'ended',
+                    ':expectedRevision': entitlement.revision,
+                    ':nextRevision': entitlement.revision + 1,
+                    ':now': now,
+                  },
+                },
+              } satisfies AccountClosureTransactItem,
+            ]
+          : [exactInactiveEntitlementCheck(deps, owned.household.householdId, entitlement)]),
+        deps.auditWriter.transactPut({
+          targetKind: 'USER',
+          targetId: closure.sub,
+          timestamp: now,
+          requestId: `${closure.closureId}-household-closed-${owned.household.revision + 1}`,
+          action: 'account_closure.household_closed',
+          actor: 'system:account-closure-worker',
+          subject: closure.sub,
+          details: {
+            closureId: closure.closureId,
+            householdId: owned.household.householdId,
+            from: 'active',
+            to: 'closed',
+          },
+        }),
+      ],
+    }),
+  );
+  await saveClosureCheckpoint(deps, closure, { phase: 'ownedHousehold' });
+  return 'continue';
+}
+
+function isCanonicalSupervisionForAdult(link: SupervisionLinkItem, adultId: string): boolean {
+  const expected = FK.supervision(link.minorId, adultId);
+  const expectedIndex = FK.supervisionByAdult(adultId, link.minorId);
+  return (
+    link.entityType === 'SupervisionLink' &&
+    link.pk === expected.pk &&
+    link.sk === expected.sk &&
+    link.gsi1pk === expectedIndex.gsi1pk &&
+    link.gsi1sk === expectedIndex.gsi1sk &&
+    link.adultId === adultId &&
+    link.linkId === supervisionLinkId(link.householdId, link.minorId, adultId)
+  );
+}
+
+async function purgeFamilySupervisionLink(
+  deps: AccountClosureDeps,
+  closure: AccountClosureItem,
+): Promise<{ delaySeconds?: number; blocked?: true }> {
+  if ((closure.kind ?? 'self_adult') !== 'self_adult') {
+    await saveClosureCheckpoint(deps, closure, { phase: 'inboundGuardianLinks' });
+    return {};
+  }
+  const page = await queryPrefixPage<SupervisionLinkItem>(
+    deps,
+    K.user(closure.sub),
+    'SUPERVISION#',
+    { index: 'gsi1', limit: 1 },
+  );
+  const link = page.items[0];
+  if (link) {
+    if (!isCanonicalSupervisionForAdult(link, closure.sub)) {
+      throw new Error('account closure discovered a non-canonical supervision link');
+    }
+    if (link.state === 'active') {
+      await blockClosure(
+        deps,
+        closure,
+        link.role === 'primary_responsible'
+          ? 'active_primary_minors'
+          : 'active_additional_responsibility',
+        [exactSupervisionCheck(deps, link)],
+      );
+      return { blocked: true };
+    }
+    await deps.ddb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          exactClosureLeaseCheck(deps, closure),
+          exactSupervisionDelete(deps, link),
+        ],
+      }),
+    );
+    await saveClosureCheckpoint(deps, closure, {
+      phase: 'familySupervisionLinks',
+      quietPasses: 0,
+    });
+    return {};
+  }
+  if ((closure.checkpoint?.quietPasses ?? 0) < 1) {
+    await saveClosureCheckpoint(
+      deps,
+      closure,
+      { phase: 'familySupervisionLinks', quietPasses: 1 },
+      GSI_STABILITY_DELAY_MS,
+    );
+    return { delaySeconds: GSI_STABILITY_DELAY_MS / 1000 };
+  }
+  await saveClosureCheckpoint(deps, closure, { phase: 'inboundGuardianLinks' });
+  return {};
 }
 
 /**
@@ -539,9 +1124,22 @@ async function purgeDirectMirrors(
   deps: AccountClosureDeps,
   closure: AccountClosureItem,
 ): Promise<void> {
+  let minorInviteKeys: Array<{ pk: string; sk: string }> = [];
+  if (closure.kind === 'guardian_minor' && closure.friendCode) {
+    try {
+      minorInviteKeys = [SK.minorInviteCode(closure.friendCode)];
+    } catch {
+      // Legacy friend codes used a wider alphabet and only have CODE#F mirrors.
+    }
+  }
   const keys = [
     K.uniqUsername(closure.username),
-    ...(closure.friendCode ? [K.codeF(closure.friendCode)] : []),
+    ...(closure.friendCode
+      ? [
+          K.codeF(closure.friendCode),
+          ...minorInviteKeys,
+        ]
+      : []),
   ];
   await batchWriteAll(
     deps,
@@ -678,6 +1276,57 @@ async function deleteIdentityAndComplete(
   );
 }
 
+async function reopenLegacyPurgeCompleteForFamilyCleanup(
+  deps: AccountClosureDeps,
+  closure: AccountClosureItem,
+): Promise<void> {
+  const now = deps.now();
+  await deps.ddb.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Update: {
+            TableName: deps.table,
+            Key: accountClosureKey(closure.sub),
+            UpdateExpression:
+              'SET #state = :nextState, revision = :nextRevision, updatedAt = :now, nextAttemptAt = :now, gsi1pk = :gsi1pk, gsi1sk = :gsi1sk, checkpoint = :checkpoint, familyCleanupVersion = :familyCleanupVersion REMOVE purgeCompleteAt, leaseOwner, leaseUntil',
+            ConditionExpression:
+              'closureId = :closureId AND revision = :expectedRevision AND #state = :expectedState AND attribute_not_exists(familyCleanupVersion)',
+            ExpressionAttributeNames: { '#state': 'state' },
+            ExpressionAttributeValues: {
+              ':closureId': closure.closureId,
+              ':expectedRevision': closure.revision,
+              ':expectedState': 'purgeComplete',
+              ':nextState': 'purging',
+              ':nextRevision': closure.revision + 1,
+              ':now': now,
+              ':gsi1pk': ACCOUNT_CLOSURE_OPEN_GSI_PK,
+              ':gsi1sk': closureOpenSortKey(now, closure.sub),
+              ':checkpoint': { phase: 'familyMembership' },
+              ':familyCleanupVersion': ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION,
+            },
+          },
+        },
+        deps.auditWriter.transactPut({
+          targetKind: 'USER',
+          targetId: closure.sub,
+          timestamp: now,
+          requestId: `${closure.closureId}-familyCleanup-${closure.revision + 1}`,
+          action: 'account_closure.family_cleanup_reopened',
+          actor: 'system:account-closure-worker',
+          subject: closure.sub,
+          details: {
+            closureId: closure.closureId,
+            from: 'purgeComplete',
+            to: 'purging',
+            familyCleanupVersion: ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION,
+          },
+        }),
+      ],
+    }),
+  );
+}
+
 export async function processAccountClosureMessage(
   deps: AccountClosureDeps,
   message: AccountClosureMessage,
@@ -704,6 +1353,11 @@ export async function processAccountClosureMessage(
     return 'pending';
   }
   if (closure.state === 'purgeComplete') {
+    if (closure.familyCleanupVersion !== ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION) {
+      await reopenLegacyPurgeCompleteForFamilyCleanup(deps, closure);
+      await deps.queue.enqueue(message);
+      return 'pending';
+    }
     await deleteIdentityAndComplete(deps, closure);
     return 'completed';
   }
@@ -718,7 +1372,23 @@ export async function processAccountClosureMessage(
       throw error;
     }
     let continuationDelay: number | undefined;
-    switch (leased.checkpoint?.phase) {
+    const phase = leased.familyCleanupVersion === ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION
+      ? leased.checkpoint?.phase
+      : 'familyMembership';
+    switch (phase) {
+      case 'familyMembership':
+        if ((await purgeFamilyMembership(deps, leased)) === 'blocked') return 'pending';
+        break;
+      case 'ownedHousehold':
+        if ((await closeOwnedHousehold(deps, leased)) === 'blocked') return 'pending';
+        break;
+      case 'familySupervisionLinks':
+        {
+          const outcome = await purgeFamilySupervisionLink(deps, leased);
+          if (outcome.blocked) return 'pending';
+          continuationDelay = outcome.delaySeconds;
+        }
+        break;
       case 'inboundGuardianLinks':
         if ((await purgeInboundGuardianLink(deps, leased)) === 'blocked') return 'pending';
         break;
@@ -774,7 +1444,7 @@ export async function processAccountClosureMessage(
             TableName: deps.table,
             Key: accountClosureKey(message.sub),
             UpdateExpression:
-              'SET #state = :nextState, revision = :nextRevision, updatedAt = :now, nextAttemptAt = :now, gsi1sk = :gsi1sk, checkpoint = :checkpoint',
+              'SET #state = :nextState, revision = :nextRevision, updatedAt = :now, nextAttemptAt = :now, gsi1sk = :gsi1sk, checkpoint = :checkpoint, familyCleanupVersion = :familyCleanupVersion',
             ConditionExpression:
               'closureId = :closureId AND revision = :expectedRevision AND #state = :expectedState',
             ExpressionAttributeNames: { '#state': 'state' },
@@ -786,7 +1456,8 @@ export async function processAccountClosureMessage(
               ':nextRevision': closure.revision + 1,
               ':now': now,
               ':gsi1sk': closureOpenSortKey(now, closure.sub),
-              ':checkpoint': { phase: 'inboundGuardianLinks' },
+              ':checkpoint': { phase: 'familyMembership' },
+              ':familyCleanupVersion': ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION,
             },
           },
         },

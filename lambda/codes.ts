@@ -14,8 +14,30 @@ export function friendCode(length = 8): string {
   return code;
 }
 
-/** Meets PASSWORD_POLICY (upper + lower + digit, ≥8) with gentle words. */
+const PASSWORD_UPPER = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const PASSWORD_LOWER = 'abcdefghijkmnopqrstuvwxyz';
+const PASSWORD_DIGITS = '234679';
+const PASSWORD_ALPHABET = `${PASSWORD_UPPER}${PASSWORD_LOWER}${PASSWORD_DIGITS}`;
+
+function randomCharacter(alphabet: string): string {
+  return alphabet[randomInt(alphabet.length)]!;
+}
+
+/**
+ * Meets PASSWORD_POLICY while keeping at least 128 bits of effective entropy.
+ * Required classes are chosen independently and the remaining positions draw
+ * from the full alphabet before a crypto-random Fisher-Yates shuffle.
+ */
 export function tempPassword(): string {
-  const words = ['Brote', 'Rama', 'Hoja', 'Nube', 'Bosque', 'Semilla', 'Trebol', 'Musgo'];
-  return `${words[randomInt(words.length)]}${words[randomInt(words.length)].toLowerCase()}${randomInt(10, 100)}`;
+  const characters = [
+    randomCharacter(PASSWORD_UPPER),
+    randomCharacter(PASSWORD_LOWER),
+    randomCharacter(PASSWORD_DIGITS),
+    ...Array.from({ length: 21 }, () => randomCharacter(PASSWORD_ALPHABET)),
+  ];
+  for (let index = characters.length - 1; index > 0; index -= 1) {
+    const swapWith = randomInt(index + 1);
+    [characters[index], characters[swapWith]] = [characters[swapWith]!, characters[index]!];
+  }
+  return characters.join('');
 }

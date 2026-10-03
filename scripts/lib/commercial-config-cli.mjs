@@ -35,6 +35,13 @@ const COMMAND_OPTIONS = {
     'capability-mode',
     'access-code-issuance-enabled',
     'access-code-redemption-enabled',
+    'family-creation-enabled',
+    'minor-linking-enabled',
+    'minor-social-enabled',
+    'family-catalog-enabled',
+    'checkout-enabled',
+    'subscription-changes-enabled',
+    'billing-enforcement-mode',
   ]),
   'freeze-cutover': new Set(['cutover-at', 'inventory-manifest-hash']),
 };
@@ -297,6 +304,7 @@ function buildRequest(command, options) {
     for (const [optionName, fieldName] of [
       ['quota-mode', 'quotaMode'],
       ['capability-mode', 'capabilityMode'],
+      ['billing-enforcement-mode', 'billingEnforcementMode'],
     ]) {
       const value = options.get(optionName);
       if (value !== undefined) {
@@ -309,6 +317,12 @@ function buildRequest(command, options) {
     for (const [optionName, fieldName] of [
       ['access-code-issuance-enabled', 'accessCodeIssuanceEnabled'],
       ['access-code-redemption-enabled', 'accessCodeRedemptionEnabled'],
+      ['family-creation-enabled', 'familyCreationEnabled'],
+      ['minor-linking-enabled', 'minorLinkingEnabled'],
+      ['minor-social-enabled', 'minorSocialEnabled'],
+      ['family-catalog-enabled', 'familyCatalogEnabled'],
+      ['checkout-enabled', 'checkoutEnabled'],
+      ['subscription-changes-enabled', 'subscriptionChangesEnabled'],
     ]) {
       const value = options.get(optionName);
       if (value !== undefined) changes[fieldName] = parseBoolean(value, optionName);

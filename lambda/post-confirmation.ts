@@ -6,6 +6,12 @@ import { Deps, K, ProfileItem, TransactWriteCommand, realDeps } from './db';
 import { instrumentHandler } from './observability';
 import { accountClosureKey } from './account-closure';
 import { deriveAccessItem } from './commercial/access-resolver';
+import {
+  createEmptySeatAssignments,
+  createHousehold,
+  type HouseholdItem,
+  type SeatAssignmentItem,
+} from './family/model';
 
 /**
  * Cognito PostConfirmation → the DynamoDB profile item. Self-signup is always
@@ -61,13 +67,27 @@ function isSameSignupCancellation(
   };
   if (cancellation?.name !== 'TransactionCanceledException') return false;
   const reasons = cancellation.CancellationReasons ?? [];
-  if (reasons.length !== 5) return false;
-  const [profileReason, reservationReason, accessReason, usageReason, closureReason] = reasons;
+  if (reasons.length !== 9) return false;
+  const [
+    profileReason,
+    reservationReason,
+    accessReason,
+    usageReason,
+    householdReason,
+    minorSeat1Reason,
+    minorSeat2Reason,
+    additionalSeatReason,
+    closureReason,
+  ] = reasons;
   if (
     profileReason?.Code !== 'ConditionalCheckFailed' ||
     reservationReason?.Code !== 'ConditionalCheckFailed' ||
     accessReason?.Code !== 'ConditionalCheckFailed' ||
     usageReason?.Code !== 'ConditionalCheckFailed' ||
+    householdReason?.Code !== 'ConditionalCheckFailed' ||
+    minorSeat1Reason?.Code !== 'ConditionalCheckFailed' ||
+    minorSeat2Reason?.Code !== 'ConditionalCheckFailed' ||
+    additionalSeatReason?.Code !== 'ConditionalCheckFailed' ||
     closureReason?.Code !== 'None' ||
     closureReason.Item !== undefined
   ) {
@@ -80,6 +100,7 @@ function isSameSignupCancellation(
     return false;
   }
   const sub = expectedProfile.userId;
+  const family = createSignupFamily(sub, createdAt);
   return (
     isDeepStrictEqual(profile, { ...expectedProfile, createdAt }) &&
     isDeepStrictEqual(decodeItem(reservationReason.Item), {
@@ -95,8 +116,26 @@ function isSameSignupCancellation(
       sk: 'USAGE',
       state: 'active',
       activeTrees: 0,
-    })
+    }) &&
+    isDeepStrictEqual(decodeItem(householdReason.Item), family.household) &&
+    isDeepStrictEqual(decodeItem(minorSeat1Reason.Item), family.seats[0]) &&
+    isDeepStrictEqual(decodeItem(minorSeat2Reason.Item), family.seats[1]) &&
+    isDeepStrictEqual(decodeItem(additionalSeatReason.Item), family.seats[2])
   );
+}
+
+function createSignupFamily(
+  primaryResponsibleId: string,
+  createdAt: number,
+): {
+  household: HouseholdItem;
+  seats: readonly [SeatAssignmentItem, SeatAssignmentItem, SeatAssignmentItem];
+} {
+  const household = createHousehold({ primaryResponsibleId, now: createdAt });
+  return {
+    household,
+    seats: createEmptySeatAssignments(household.householdId, createdAt),
+  };
 }
 
 export async function handleEvent(
@@ -122,6 +161,7 @@ export async function handleEvent(
     familyFenceVersion: 1,
     ...(email ? { email } : {}),
   };
+  const family = createSignupFamily(sub, createdAt);
   try {
     await d.ddb.send(
       new TransactWriteCommand({
@@ -160,6 +200,22 @@ export async function handleEvent(
               ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
             },
           },
+          {
+            Put: {
+              TableName: d.table,
+              Item: family.household,
+              ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+              ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+            },
+          },
+          ...family.seats.map((seat) => ({
+            Put: {
+              TableName: d.table,
+              Item: seat,
+              ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+              ReturnValuesOnConditionCheckFailure: 'ALL_OLD' as const,
+            },
+          })),
           {
             ConditionCheck: {
               TableName: d.table,

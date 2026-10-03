@@ -204,6 +204,30 @@ function sponsoredAccessBrokerLogGroupArn(stack: Stack, stage: PolicyStage): str
   );
 }
 
+function familyPilotBrokerLogGroupArn(stack: Stack, stage: PolicyStage): string {
+  return Arn.format({
+    partition: Aws.PARTITION,
+    service: 'logs',
+    region: stack.region,
+    account: stack.account,
+    resource: 'log-group',
+    resourceName: `/aws/lambda/roadmap-family-pilot-broker-${stage}`,
+    arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+  }, stack);
+}
+
+function familyMajorityReconcilerLogGroupArn(stack: Stack, stage: PolicyStage): string {
+  return Arn.format({
+    partition: Aws.PARTITION,
+    service: 'logs',
+    region: stack.region,
+    account: stack.account,
+    resource: 'log-group',
+    resourceName: `/aws/lambda/roadmap-family-majority-reconciler-${stage}`,
+    arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+  }, stack);
+}
+
 function accessCodeSecretArn(stack: Stack, stage: PolicyStage): string {
   return Arn.format(
     {
@@ -296,6 +320,10 @@ function accountClosureQueueArns(stack: Stack, stage: PolicyStage): string[] {
 
 function accountClosureReconcileRuleArn(stack: Stack, stage: PolicyStage): string {
   return resourceArn(stack, 'events', 'rule', `roadmap-account-closure-reconciler-${stage}`);
+}
+
+function familyMajorityRuleArn(stack: Stack, stage: PolicyStage): string {
+  return resourceArn(stack, 'events', 'rule', `roadmap-family-majority-reconciler-${stage}`);
 }
 
 function userPoolArn(stack: Stack): string {
@@ -461,6 +489,7 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
           `${accessCodeRedeemerLogGroupArn(stack, stage)}:*`,
           `${commercialConfigBrokerLogGroupArn(stack, stage)}:*`,
           `${sponsoredAccessBrokerLogGroupArn(stack, stage)}:*`,
+          `${familyPilotBrokerLogGroupArn(stack, stage)}:*`,
         ],
       }),
       new iam.PolicyStatement({
@@ -1142,6 +1171,39 @@ function createCommercialAccessPolicy(stack: Stack, stage: PolicyStage): iam.Man
         resources: [functionArn(stack, stage, 'sponsored-access-broker')],
       }),
       new iam.PolicyStatement({
+        sid: 'ManageOnlyFamilyPilotBrokerFunctionUrl',
+        actions: [
+          ...standardFunctionActions,
+          'lambda:CreateFunctionUrlConfig',
+          'lambda:DeleteFunctionUrlConfig',
+          'lambda:GetFunctionUrlConfig',
+          'lambda:UpdateFunctionUrlConfig',
+        ],
+        resources: [functionArn(stack, stage, 'family-pilot-broker')],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyFamilyMajorityReconcilerFunction',
+        actions: standardFunctionActions,
+        resources: [functionArn(stack, stage, 'family-majority-reconciler')],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyFamilyMajorityReconcileRule',
+        actions: [
+          'events:DeleteRule',
+          'events:DescribeRule',
+          'events:DisableRule',
+          'events:EnableRule',
+          'events:ListTagsForResource',
+          'events:ListTargetsByRule',
+          'events:PutRule',
+          'events:PutTargets',
+          'events:RemoveTargets',
+          'events:TagResource',
+          'events:UntagResource',
+        ],
+        resources: [familyMajorityRuleArn(stack, stage)],
+      }),
+      new iam.PolicyStatement({
         sid: 'ManageOnlySponsoredAccessLogGroups',
         actions: [
           'logs:CreateLogGroup',
@@ -1152,6 +1214,8 @@ function createCommercialAccessPolicy(stack: Stack, stage: PolicyStage): iam.Man
         resources: [
           `${accessCodeRedeemerLogGroupArn(stack, stage)}:*`,
           `${sponsoredAccessBrokerLogGroupArn(stack, stage)}:*`,
+          `${familyPilotBrokerLogGroupArn(stack, stage)}:*`,
+          `${familyMajorityReconcilerLogGroupArn(stack, stage)}:*`,
         ],
       }),
       new iam.PolicyStatement({
@@ -1160,6 +1224,8 @@ function createCommercialAccessPolicy(stack: Stack, stage: PolicyStage): iam.Man
         resources: [
           accessCodeRedeemerLogGroupArn(stack, stage),
           sponsoredAccessBrokerLogGroupArn(stack, stage),
+          familyPilotBrokerLogGroupArn(stack, stage),
+          familyMajorityReconcilerLogGroupArn(stack, stage),
         ],
       }),
       new iam.PolicyStatement({

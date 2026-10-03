@@ -70,8 +70,11 @@ export function guardianInviteFromMirror(mirror: GuardianInviteMirrorItem): Code
         mirror.userId !== mirror.minorId &&
         (mirror.subjectId === mirror.userId || mirror.subjectId === mirror.minorId)
       : mirror.kind === 'linkExisting' &&
-        mirror.minorId === undefined &&
-        mirror.subjectId === mirror.userId);
+        (mirror.minorId === undefined
+          ? mirror.subjectId === mirror.userId
+          : typeof mirror.minorId === 'string' && Boolean(mirror.minorId) &&
+            mirror.userId !== mirror.minorId &&
+            (mirror.subjectId === mirror.userId || mirror.subjectId === mirror.minorId)));
   if (!structurallyValid) throw new Error('invalid guardian invite mirror');
   return {
     ...K.codeG(mirror.code),

@@ -113,6 +113,42 @@ describe('prepayment commercial catalog', () => {
     expect(ADMIN_GRANT_OFFERS.premium_demo).not.toHaveProperty('billingCadence');
     expect(ADMIN_GRANT_OFFERS.premium_demo).not.toHaveProperty('price');
   });
+
+  it.each([
+    'premium_individual',
+    'family_1_minor',
+    'family_2_minors',
+    'family_1_minor_1_additional_responsible',
+    'family_2_minors_1_additional_responsible',
+  ])('%s keeps seats and capabilities independent of its billing cadence', (offerKey) => {
+    const matches = PREPAYMENT_CATALOG.offers.filter((offer) => offer.offerKey === offerKey);
+    expect(matches).toHaveLength(1);
+    const offer = matches[0]!;
+    expect(Object.keys(offer).sort()).toEqual([
+      'additionalResponsibleSeat', 'minorSeats', 'offerKey', 'planKey', 'prices',
+    ]);
+    expect(offer.planKey).toBe('premium');
+    expect(Object.keys(offer.prices).sort()).toEqual(['month', 'year']);
+    for (const cadence of ['month', 'year'] as const) {
+      // A cadence supplies only the amount; it cannot override the offer's seats
+      // or plan capabilities. Family access still requires a current source.
+      expect(Object.keys(offer.prices[cadence])).toEqual(['amountMinor']);
+      expect(Number.isSafeInteger(offer.prices[cadence].amountMinor)).toBe(true);
+      expect(offer.prices[cadence].amountMinor).toBeGreaterThan(0);
+    }
+    expect(PREPAYMENT_CATALOG.plans[offer.planKey].capabilities).toEqual({
+      cloudSync: true, social: true, family: false,
+    });
+  });
+
+  it('keeps the shared public catalog deeply immutable', () => {
+    function assertFrozen(value: unknown): void {
+      if (value === null || typeof value !== 'object') return;
+      expect(Object.isFrozen(value)).toBe(true);
+      for (const child of Object.values(value)) assertFrozen(child);
+    }
+    assertFrozen(PREPAYMENT_CATALOG);
+  });
 });
 
 const NOW = Date.UTC(2026, 7, 19, 18, 0, 0);
@@ -486,6 +522,7 @@ describe('AccessResolver materialization', () => {
     });
     expect(harness.proposals).toEqual([
       {
+        paidSources: {},
         Put: {
           TableName: 'roadmap-dev',
           Item: result.access,
