@@ -570,6 +570,7 @@ function coverageConditionCheck(
   coverage: CoverageAssignmentItem,
   mustBeCurrent: boolean,
 ): TransactItem {
+  const pilot = coverage.source === 'sponsored_pilot';
   return {
     ConditionCheck: {
       TableName: ctx.deps.table,
@@ -580,20 +581,24 @@ function coverageConditionCheck(
         'accountId = :accountId',
         'householdId = :householdId',
         'seatType = :seatType',
+        '#source = :source',
         '#state = :state',
         'revision = :revision',
         'paidThrough = :paidThrough',
         'graceUntil = :graceUntil',
         ...(mustBeCurrent
-          ? ['(((#state = :active OR #state = :scheduledEnd) AND paidThrough > :now) OR (#state = :grace AND graceUntil > :now))']
+          ? [pilot
+              ? '(#state = :active OR #state = :scheduledEnd)'
+              : '(((#state = :active OR #state = :scheduledEnd) AND paidThrough > :now) OR (#state = :grace AND graceUntil > :now))']
           : []),
       ].join(' AND '),
-      ExpressionAttributeNames: { '#state': 'state' },
+      ExpressionAttributeNames: { '#state': 'state', '#source': 'source' },
       ExpressionAttributeValues: {
         ':entityType': 'CoverageAssignment',
         ':accountId': coverage.accountId,
         ':householdId': coverage.householdId,
         ':seatType': coverage.seatType,
+        ':source': coverage.source,
         ':state': coverage.state,
         ':revision': coverage.revision,
         ':paidThrough': coverage.paidThrough,
@@ -602,8 +607,7 @@ function coverageConditionCheck(
           ? {
               ':active': 'active',
               ':scheduledEnd': 'scheduled_end',
-              ':grace': 'grace',
-              ':now': ctx.deps.now(),
+              ...(!pilot ? { ':grace': 'grace', ':now': ctx.deps.now() } : {}),
             }
           : {}),
       },
