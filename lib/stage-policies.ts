@@ -3,6 +3,20 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 
 export type PolicyStage = 'dev' | 'test' | 'prod';
 
+// Append stages only after their SSM control-plane preparation is complete.
+// Keeping prior stages in this set makes the rollout monotonic.
+const ACCESS_CODE_SSM_STAGES: ReadonlySet<PolicyStage> = new Set(['dev', 'test']);
+// dev retains its migrated secret; prod still uses its legacy secret. test was initialized in SSM.
+const ACCESS_CODE_HMAC_SECRET_STAGES: ReadonlySet<PolicyStage> = new Set(['dev', 'prod']);
+
+export function usesAccessCodeSsm(stage: PolicyStage): boolean {
+  return ACCESS_CODE_SSM_STAGES.has(stage);
+}
+
+export function hasAccessCodeHmacSecret(stage: PolicyStage): boolean {
+  return ACCESS_CODE_HMAC_SECRET_STAGES.has(stage);
+}
+
 export interface StageManagedPolicies {
   readonly core: iam.ManagedPolicy;
   readonly api: iam.ManagedPolicy;
@@ -228,7 +242,22 @@ function familyMajorityReconcilerLogGroupArn(stack: Stack, stage: PolicyStage): 
   }, stack);
 }
 
-function accessCodeSecretArn(stack: Stack, stage: PolicyStage): string {
+function accessCodeParameterArn(stack: Stack, stage: PolicyStage): string {
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'ssm',
+      region: stack.region,
+      account: stack.account,
+      resource: 'parameter',
+      resourceName: `roadmap2u/${stage}/access-code-hmac/v1`,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    },
+    stack,
+  );
+}
+
+function retainedAccessCodeSecretArn(stack: Stack, stage: PolicyStage): string {
   return Arn.format(
     {
       partition: Aws.PARTITION,
@@ -512,11 +541,24 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         actions: ['dynamodb:PutItem'],
         resources: [auditTableArn(stack, stage)],
       }),
-      new iam.PolicyStatement({
-        sid: 'ReadOnlySponsoredAccessHmacSecret',
-        actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
-        resources: [accessCodeSecretArn(stack, stage)],
-      }),
+      ...(usesAccessCodeSsm(stage)
+        ? [
+            new iam.PolicyStatement({
+              sid: 'ReadOnlySponsoredAccessHmacParameter',
+              actions: ['ssm:GetParameter'],
+              resources: [accessCodeParameterArn(stack, stage)],
+            }),
+          ]
+        : []),
+      ...(hasAccessCodeHmacSecret(stage)
+        ? [
+            new iam.PolicyStatement({
+              sid: 'ReadOnlyRetainedSponsoredAccessHmacSecretDuringMigration',
+              actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
+              resources: [retainedAccessCodeSecretArn(stack, stage)],
+            }),
+          ]
+        : []),
       new iam.PolicyStatement({
         sid: 'UseOnlyAccountClosureQueues',
         actions: [
@@ -1228,29 +1270,33 @@ function createCommercialAccessPolicy(stack: Stack, stage: PolicyStage): iam.Man
           familyMajorityReconcilerLogGroupArn(stack, stage),
         ],
       }),
-      new iam.PolicyStatement({
-        sid: 'GenerateOnlySponsoredAccessSecretPassword',
-        actions: ['secretsmanager:GetRandomPassword'],
-        resources: ['*'],
-        conditions: {
-          StringEquals: { 'aws:RequestedRegion': stack.region },
-        },
-      }),
-      new iam.PolicyStatement({
-        sid: 'ManageOnlySponsoredAccessHmacSecret',
-        actions: [
-          'secretsmanager:CreateSecret',
-          'secretsmanager:DescribeSecret',
-          'secretsmanager:GetResourcePolicy',
-          'secretsmanager:GetSecretValue',
-          'secretsmanager:ListSecretVersionIds',
-          'secretsmanager:PutSecretValue',
-          'secretsmanager:TagResource',
-          'secretsmanager:UntagResource',
-          'secretsmanager:UpdateSecret',
-        ],
-        resources: [accessCodeSecretArn(stack, stage)],
-      }),
+      ...(!usesAccessCodeSsm(stage)
+        ? [
+            new iam.PolicyStatement({
+              sid: 'GenerateOnlySponsoredAccessSecretPassword',
+              actions: ['secretsmanager:GetRandomPassword'],
+              resources: ['*'],
+              conditions: {
+                StringEquals: { 'aws:RequestedRegion': stack.region },
+              },
+            }),
+            new iam.PolicyStatement({
+              sid: 'ManageOnlySponsoredAccessHmacSecret',
+              actions: [
+                'secretsmanager:CreateSecret',
+                'secretsmanager:DescribeSecret',
+                'secretsmanager:GetResourcePolicy',
+                'secretsmanager:GetSecretValue',
+                'secretsmanager:ListSecretVersionIds',
+                'secretsmanager:PutSecretValue',
+                'secretsmanager:TagResource',
+                'secretsmanager:UntagResource',
+                'secretsmanager:UpdateSecret',
+              ],
+              resources: [retainedAccessCodeSecretArn(stack, stage)],
+            }),
+          ]
+        : []),
     ],
   });
 }

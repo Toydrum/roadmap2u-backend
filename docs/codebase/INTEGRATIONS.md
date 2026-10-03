@@ -46,9 +46,15 @@ pipeline y valida el hash contractual antes de publicar.
   secretos, pero hacen que el bootstrap sea deliberadamente específico para
   una cuenta.
 - `.gitignore` excluye `.env` y `.env.*`.
-- Runtime recibe `TABLE_NAME` y `USER_POOL_ID`; no son secretos.
-- No se identificó un secrets manager porque el runtime no requiere secretos
-  de aplicación.
+- Runtime recibe nombres de recursos como `TABLE_NAME`, `USER_POOL_ID` y
+  `ACCESS_CODE_PARAMETER_NAME`; no recibe valores secretos por environment.
+- El keyring HMAC de accesos patrocinados vive en SSM Parameter Store como
+  Standard `SecureString`. Sólo broker y canjeador pueden ejecutar
+  `ssm:GetParameter` sobre el parámetro exacto de su stage. El CLI de migración
+  valida primero con STS la cuenta `765932874577` y rechaza keyrings mayores a
+  4 KiB antes de leer o escribir el destino Standard. `migrate` conserva el
+  secreto existente en cualquier stage; `initialize` sólo continúa en `test` o
+  `prod` después de comprobar con `DescribeSecret` que no hay origen previo.
 
 ## 4. Confiabilidad y fallos
 

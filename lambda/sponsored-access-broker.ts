@@ -1,6 +1,6 @@
 import { ApiError } from '@app/api/contracts';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { SSMClient } from '@aws-sdk/client-ssm';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
   createDynamoSponsoredAccessBroker,
@@ -221,10 +221,10 @@ function production(): (event: SponsoredAccessBrokerEvent) => Promise<HttpRespon
   });
   const options: AccessCodeDynamoOptions = {
     ddb,
-    secrets: new SecretsManagerClient({}),
+    ssm: new SSMClient({}),
     tableName: requiredEnvironment('TABLE_NAME'),
     auditTableName: requiredEnvironment('AUDIT_TABLE_NAME'),
-    secretId: requiredEnvironment('ACCESS_CODE_SECRET_ID'),
+    parameterName: requiredEnvironment('ACCESS_CODE_PARAMETER_NAME'),
     stage,
     now: Date.now,
   };

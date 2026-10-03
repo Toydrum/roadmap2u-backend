@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "accessCodeHmacStores": {
+    "dev": "ssm-secure-string-v1",
+    "test": "ssm-secure-string-v1",
+    "prod": "ssm-secure-string-v1"
+  }
+}
