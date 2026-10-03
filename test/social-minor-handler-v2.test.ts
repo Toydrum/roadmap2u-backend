@@ -162,6 +162,18 @@ function transaction(index: number) {
   return ddbMock.commandCalls(TransactWriteCommand)[index]?.args[0].input.TransactItems ?? [];
 }
 
+function pilotFamily(family: FamilyV2Fixture): FamilyV2Fixture {
+  return {
+    ...family,
+    coverages: family.coverages.map((coverage) => ({
+      ...coverage,
+      source: 'sponsored_pilot',
+      paidThrough: null,
+      graceUntil: null,
+    })),
+  };
+}
+
 beforeEach(() => {
   ddbMock.reset();
   vi.spyOn(console, 'info').mockImplementation(() => undefined);
@@ -560,7 +572,151 @@ describe('minor friendship handler v2', () => {
     )?.ConditionCheck;
     expect(payerCoverage?.ConditionExpression).toContain('paidThrough > :now');
     expect(payerCoverage?.ConditionExpression).toContain('graceUntil > :now');
+    expect(payerCoverage?.ConditionExpression).toContain('#source = :source');
+    expect(payerCoverage?.ExpressionAttributeValues?.[':source']).toBe('subscription_projection');
   });
+
+  it.each(['primary_responsible', 'additional_responsible'] as const)(
+    'builds a sponsored %s approval guard without a payment deadline while fencing the exact coverage',
+    async (role) => {
+      const primary = profile('adult-primary', 'adult');
+      const additional = profile('adult-additional', 'adult');
+      const actor = role === 'primary_responsible' ? primary : additional;
+      const requester = profile('minor-z');
+      const recipient = profile('minor-a');
+      const family = pilotFamily(familyV2Fixture({
+        now: NOW,
+        primaryId: primary.userId,
+        minorIds: [requester.userId],
+        ...(role === 'additional_responsible'
+          ? { additionalResponsibleSeat: 1, additionalId: additional.userId }
+          : {}),
+      }));
+      const pending = createPendingMinorFriendship({
+        requesterId: requester.userId,
+        recipientId: recipient.userId,
+        requestCycleId: 'pilot-cycle-1',
+        now: NOW - 1_000,
+        expiresAt: NOW + 60_000,
+      });
+      const requesterConsent = createMinorFriendConsent({
+        friendship: pending,
+        kind: 'requester_action',
+        actorId: requester.userId,
+        subjectMinorId: requester.userId,
+        policyVersion: MINOR_SOCIAL_POLICY_VERSION,
+        now: NOW - 900,
+      });
+      installReads(
+        [pending, primary, additional, requester, recipient, requesterConsent, flags(), access(requester.userId), access(recipient.userId)],
+        [family],
+      );
+
+      const view = await recordResponsibleApproval(ctxOf(actor), pending.requestId!, {
+        minorId: requester.userId,
+        commandId: 'pilot-responsible-approves',
+        policyVersion: MINOR_SOCIAL_POLICY_VERSION,
+      });
+
+      expect(view.state).toBe('pending');
+      const writes = ddbMock.commandCalls(TransactWriteCommand)
+        .map((call) => call.args[0].input.TransactItems ?? [])
+        .find((items) => items.some((item) => item.Put?.Item?.['kind'] === 'requester_responsible_approval')) ?? [];
+      expect(writes.find((item) => item.Put?.Item?.['kind'] === 'requester_responsible_approval')?.Put?.Item)
+        .toMatchObject({ actorId: actor.userId, subjectMinorId: requester.userId });
+      const coverage = family.coverages.find((item) => item.accountId === actor.userId)!;
+      const guard = writes.find(
+        (item) => item.ConditionCheck?.Key?.['pk'] === coverage.pk && item.ConditionCheck.Key['sk'] === coverage.sk,
+      )?.ConditionCheck;
+      expect(guard?.ConditionExpression).not.toContain('> :now');
+      expect(guard?.ExpressionAttributeValues).toMatchObject({
+        ':accountId': actor.userId,
+        ':householdId': family.household.householdId,
+        ':seatType': role,
+        ':source': 'sponsored_pilot',
+        ':state': 'active',
+        ':revision': coverage.revision,
+        ':paidThrough': null,
+        ':graceUntil': null,
+      });
+      expect(guard?.ConditionExpression).toContain('#source = :source');
+      expect(guard?.ConditionExpression).toContain('#state = :active');
+      expect(guard?.ExpressionAttributeValues).not.toHaveProperty(':now');
+    },
+  );
+
+  it('fences both sponsored households when the fourth consent activates the friendship', async () => {
+    const primaryA = profile('adult-primary-a', 'adult');
+    const primaryB = profile('adult-primary-b', 'adult');
+    const requester = profile('minor-z');
+    const recipient = profile('minor-a');
+    const familyA = pilotFamily(familyV2Fixture({ now: NOW, primaryId: primaryA.userId, minorIds: [requester.userId] }));
+    const familyB = pilotFamily(familyV2Fixture({ now: NOW, primaryId: primaryB.userId, minorIds: [recipient.userId] }));
+    const pending = {
+      ...createPendingMinorFriendship({ requesterId: requester.userId, recipientId: recipient.userId, requestCycleId: 'pilot-cycle-1', now: NOW - 1_000, expiresAt: NOW + 60_000 }),
+      revision: 4,
+    } satisfies FriendshipItem;
+    const existing = [
+      createMinorFriendConsent({ friendship: pending, kind: 'requester_action', actorId: requester.userId, subjectMinorId: requester.userId, policyVersion: MINOR_SOCIAL_POLICY_VERSION, now: NOW - 900 }),
+      createMinorFriendConsent({ friendship: pending, kind: 'recipient_acceptance', actorId: recipient.userId, subjectMinorId: recipient.userId, policyVersion: MINOR_SOCIAL_POLICY_VERSION, now: NOW - 800 }),
+      createMinorFriendConsent({ friendship: pending, kind: 'requester_responsible_approval', actorId: primaryA.userId, subjectMinorId: requester.userId, policyVersion: MINOR_SOCIAL_POLICY_VERSION, now: NOW - 700 }),
+    ];
+    installReads(
+      [pending, primaryA, primaryB, requester, recipient, ...existing, flags(), access(requester.userId), access(recipient.userId)],
+      [familyA, familyB],
+    );
+
+    const view = await recordResponsibleApproval(ctxOf(primaryB), pending.requestId!, {
+      minorId: recipient.userId,
+      commandId: 'pilot-fourth-consent',
+      policyVersion: MINOR_SOCIAL_POLICY_VERSION,
+    });
+
+    expect(view.state).toBe('active');
+    expect(view.consents).toHaveLength(4);
+    const activation = ddbMock.commandCalls(TransactWriteCommand)
+      .map((call) => call.args[0].input.TransactItems ?? [])
+      .find((items) => items.some((item) => item.Put?.Item?.['sk']?.startsWith('FRIEND#'))) ?? [];
+    for (const family of [familyA, familyB]) {
+      const guard = activation.find(
+        (item) => item.ConditionCheck?.Key?.['pk'] === K.user(family.household.primaryResponsibleId) && item.ConditionCheck.Key['sk'] === 'COVERAGE#FAMILY',
+      )?.ConditionCheck;
+      expect(guard?.ConditionExpression).not.toContain('> :now');
+      expect(guard?.ExpressionAttributeValues).toMatchObject({ ':source': 'sponsored_pilot', ':state': 'active', ':paidThrough': null, ':graceUntil': null });
+      expect(guard?.ConditionExpression).toContain('revision = :revision');
+    }
+    expect(activation.filter((item) => item.ConditionCheck?.Key?.['sk']?.startsWith('CONSENT#'))).toHaveLength(4);
+  });
+
+  it.each(['primary_responsible', 'additional_responsible'] as const)(
+    'denies approval from a %s after sponsored coverage is revoked',
+    async (role) => {
+      const primary = profile('adult-primary', 'adult');
+      const additional = profile('adult-additional', 'adult');
+      const actor = role === 'primary_responsible' ? primary : additional;
+      const requester = profile('minor-z');
+      const recipient = profile('minor-a');
+      const baseFamily = pilotFamily(familyV2Fixture({
+        now: NOW,
+        primaryId: primary.userId,
+        minorIds: [requester.userId],
+        ...(role === 'additional_responsible' ? { additionalResponsibleSeat: 1, additionalId: additional.userId } : {}),
+      }));
+      const family: FamilyV2Fixture = {
+        ...baseFamily,
+        coverages: baseFamily.coverages.map((coverage) => ({ ...coverage, state: 'ended' })),
+      };
+      const pending = createPendingMinorFriendship({ requesterId: requester.userId, recipientId: recipient.userId, requestCycleId: 'pilot-cycle-1', now: NOW - 1_000, expiresAt: NOW + 60_000 });
+      installReads([pending, primary, additional, requester, recipient], [family]);
+
+      await expect(recordResponsibleApproval(ctxOf(actor), pending.requestId!, {
+        minorId: requester.userId,
+        commandId: 'revoked-pilot-approval',
+        policyVersion: MINOR_SOCIAL_POLICY_VERSION,
+      })).rejects.toMatchObject({ code: 'PAYMENT_REQUIRED' });
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    },
+  );
 
   it('denies an additional responsible whose current scope does not include that minor', async () => {
     const primary = profile('adult-primary', 'adult');
