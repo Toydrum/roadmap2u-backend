@@ -186,6 +186,31 @@ const FAMILY_FENCE_SAFE_READ_ATTRIBUTES = [
   'validUntil',
 ] as const;
 
+const FAMILY_MODEL_SAFE_WRITE_ATTRIBUTES = [
+  'accountId',
+  'adultId',
+  'assignedAt',
+  'country',
+  'createdAt',
+  'entityType',
+  'gsi1pk',
+  'gsi1sk',
+  'householdId',
+  'linkId',
+  'minorId',
+  'pk',
+  'primaryResponsibleId',
+  'revision',
+  'role',
+  'seatNumber',
+  'seatType',
+  'sk',
+  'state',
+  'updatedAt',
+  'validFrom',
+  'validUntil',
+] as const;
+
 const COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES = [
   'accountType',
   'createdAt',
@@ -2002,6 +2027,21 @@ export class RoadmapCiBootstrapStack extends Stack {
                 'dynamodb:LeadingKeys': 'USER#*',
               },
               StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+            },
+          }),
+          new iam.PolicyStatement({
+            sid: 'TransactOnlyFamilyModelPuts',
+            actions: ['dynamodb:PutItem'],
+            resources: [tableArn],
+            conditions: {
+              'ForAllValues:StringLike': {
+                'dynamodb:LeadingKeys': ['HOUSEHOLD#*', 'USER#*'],
+              },
+              'ForAllValues:StringEquals': {
+                'dynamodb:Attributes': [...FAMILY_MODEL_SAFE_WRITE_ATTRIBUTES],
+              },
+              StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+              Null: { 'dynamodb:Attributes': 'false' },
             },
           }),
           new iam.PolicyStatement({
