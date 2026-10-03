@@ -11,6 +11,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import {
   AdminCreateUserCommand,
+  AdminDeleteUserCommand,
   CognitoIdentityProviderClient,
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { Ctx } from '../lambda/authz';
@@ -547,6 +548,34 @@ describe('family security controls', () => {
         }) }),
       }),
     ]));
+  });
+
+  it.each([true, false])('sends valid DynamoDB expression bindings when creating a minor (pilot=%s)', async (sponsoredPilot) => {
+    const family = fixture({ sponsoredPilot });
+    family.profiles.set('minor-new', profile('minor-new', 'minor'));
+    installReads(family);
+    cognitoMock.on(AdminCreateUserCommand).resolves({
+      User: { Attributes: [{ Name: 'sub', Value: 'minor-new' }] },
+    });
+    cognitoMock.on(AdminDeleteUserCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).callsFake((input: TransactWriteCommandInput) => {
+      for (const item of input.TransactItems ?? []) {
+        const operation = item.ConditionCheck ?? item.Put ?? item.Update ?? item.Delete;
+        if (!operation) throw new Error('missing transaction operation');
+        const expression = [operation.ConditionExpression,
+          'UpdateExpression' in operation ? operation.UpdateExpression : undefined].filter(Boolean).join(' ');
+        // DynamoDB rejects unused bindings as well as missing ones, before committing any rows.
+        const values = [...new Set(expression.match(/:[A-Za-z0-9_]+/g) ?? [])].sort();
+        const names = [...new Set(expression.match(/#[A-Za-z0-9_]+/g) ?? [])].sort();
+        expect(Object.keys(operation.ExpressionAttributeValues ?? {}).sort()).toEqual(values);
+        expect(Object.keys(operation.ExpressionAttributeNames ?? {}).sort()).toEqual(names);
+      }
+      return {};
+    });
+
+    await expect(createMinor(context(family), minorCommand(family.household.householdId)))
+      .resolves.toMatchObject({ minor: { accountType: 'minor', userId: 'minor-new' } });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
   it('rate-limits the sixth v2 minor-link code attempt before reading the code', async () => {
