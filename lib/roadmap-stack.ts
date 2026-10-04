@@ -811,6 +811,29 @@ export class RoadmapStack extends Stack {
     );
     accountClosureWorkerRole.addToPolicy(
       new iam.PolicyStatement({
+        sid: 'ReadAccountClosureWorkerFamilyCoverage',
+        actions: ['dynamodb:BatchGetItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' },
+        },
+      }),
+    );
+    accountClosureWorkerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyAccountClosureWorkerFamilyChecks',
+        actions: ['dynamodb:ConditionCheckItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*', 'ACCOUNT_CLOSURE#*'],
+          },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    accountClosureWorkerRole.addToPolicy(
+      new iam.PolicyStatement({
         sid: 'TransactOnlyAccountClosureAudit',
         actions: ['dynamodb:PutItem'],
         resources: [accessAuditTable.tableArn],
@@ -1261,6 +1284,51 @@ export class RoadmapStack extends Stack {
           'ForAllValues:StringLike': {
             'dynamodb:LeadingKeys': ['USER#*', 'ACCOUNT_CLOSURE#*'],
           },
+        },
+      }),
+    );
+    accountClosureRequestRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadAccountClosureRequestFamilyIndex',
+        actions: ['dynamodb:Query'],
+        resources: [`${table.tableArn}/index/gsi1`],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' },
+        },
+      }),
+    );
+    accountClosureRequestRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadAccountClosureRequestFamilyState',
+        actions: ['dynamodb:Query'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
+          },
+        },
+      }),
+    );
+    accountClosureRequestRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadAccountClosureRequestFamilyCoverage',
+        actions: ['dynamodb:BatchGetItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' },
+        },
+      }),
+    );
+    accountClosureRequestRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyAccountClosureRequestFamilyChecks',
+        actions: ['dynamodb:ConditionCheckItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
+          },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
         },
       }),
     );

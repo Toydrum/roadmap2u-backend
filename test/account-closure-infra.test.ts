@@ -5,9 +5,9 @@ import { RoadmapStack } from '../lib/roadmap-stack';
 
 const ACCOUNT = '123456789012';
 const HOSTED_ZONE_ID = 'Z0123456789ABCDEFGHIJ';
-const templates = new Map<'dev' | 'prod', Record<string, any>>();
+const templates = new Map<'dev' | 'test' | 'prod', Record<string, any>>();
 
-function backend(stage: 'dev' | 'prod' = 'dev'): Record<string, any> {
+function backend(stage: 'dev' | 'test' | 'prod' = 'dev'): Record<string, any> {
   const cached = templates.get(stage);
   if (cached) return cached;
   const app = new App();
@@ -51,6 +51,101 @@ function statementActions(statements: any[]): string[] {
 }
 
 describe('account closure infrastructure', () => {
+  it.each(['dev', 'test', 'prod'] as const)(
+    'lets the %s request boundary discover and fence family ownership with scoped permissions',
+    (stage) => {
+      const template = backend(stage);
+      const [, request] = lambdaByName(template, `roadmap-account-closure-request-${stage}`);
+      const statements = roleStatementsFor(template, request);
+      const tableId = resources(template, 'AWS::DynamoDB::Table').find(
+        ([, table]) => table.Properties.TableName === `roadmap-${stage}`,
+      )![0];
+      const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
+
+      const index = statements.find((statement) =>
+        statement.Sid === 'ReadAccountClosureRequestFamilyIndex',
+      );
+      expect(index).toMatchObject({
+        Effect: 'Allow',
+        Action: 'dynamodb:Query',
+        Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
+      });
+      expect(JSON.stringify(index?.Resource)).toContain('/index/gsi1');
+      expect(JSON.stringify(index?.Resource)).not.toContain('/index/*');
+
+      expect(statements.find((statement) =>
+        statement.Sid === 'ReadAccountClosureRequestFamilyState',
+      )).toEqual({
+        Sid: 'ReadAccountClosureRequestFamilyState',
+        Effect: 'Allow', Action: 'dynamodb:Query', Resource: tableArn,
+        Condition: { 'ForAllValues:StringLike': {
+          'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
+        } },
+      });
+      expect(statements.find((statement) =>
+        statement.Sid === 'ReadAccountClosureRequestFamilyCoverage',
+      )).toEqual({
+        Sid: 'ReadAccountClosureRequestFamilyCoverage',
+        Effect: 'Allow', Action: 'dynamodb:BatchGetItem', Resource: tableArn,
+        Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
+      });
+      expect(statements.find((statement) =>
+        statement.Sid === 'TransactOnlyAccountClosureRequestFamilyChecks',
+      )).toEqual({
+        Sid: 'TransactOnlyAccountClosureRequestFamilyChecks',
+        Effect: 'Allow', Action: 'dynamodb:ConditionCheckItem', Resource: tableArn,
+        Condition: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'] },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      });
+
+      const actions = statementActions(statements.filter((statement) => statement.Effect === 'Allow'));
+      for (const action of ['dynamodb:Scan', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem',
+        'cognito-idp:AdminDeleteUser', 'cognito-idp:AdminCreateUser']) {
+        expect(actions).not.toContain(action);
+      }
+      expect(statements.find((statement) =>
+        statement.Sid === 'TransactOnlyAccountClosureRequestState',
+      )?.Condition).toEqual({
+        'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['USER#*', 'ACCOUNT_CLOSURE#*'] },
+        StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+      });
+    }, 20_000,
+  );
+
+  it.each(['dev', 'test', 'prod'] as const)(
+    'lets the %s worker read coverage and use conditional family cleanup transactions',
+    (stage) => {
+      const template = backend(stage);
+      const [, worker] = lambdaByName(template, `roadmap-account-closure-worker-${stage}`);
+      const statements = roleStatementsFor(template, worker);
+      const tableId = resources(template, 'AWS::DynamoDB::Table').find(
+        ([, table]) => table.Properties.TableName === `roadmap-${stage}`,
+      )![0];
+      const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
+      expect(statements.find((statement) =>
+        statement.Sid === 'ReadAccountClosureWorkerFamilyCoverage',
+      )).toEqual({
+        Sid: 'ReadAccountClosureWorkerFamilyCoverage',
+        Effect: 'Allow', Action: 'dynamodb:BatchGetItem', Resource: tableArn,
+        Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
+      });
+      expect(statements.find((statement) =>
+        statement.Sid === 'TransactOnlyAccountClosureWorkerFamilyChecks',
+      )).toEqual({
+        Sid: 'TransactOnlyAccountClosureWorkerFamilyChecks',
+        Effect: 'Allow', Action: 'dynamodb:ConditionCheckItem', Resource: tableArn,
+        Condition: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*', 'ACCOUNT_CLOSURE#*'],
+          },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      });
+    }, 20_000,
+  );
+
   it('uses an encrypted source queue with a longer-lived DLQ and bounded retries', () => {
     const template = backend();
     const queues = resources(template, 'AWS::SQS::Queue');
