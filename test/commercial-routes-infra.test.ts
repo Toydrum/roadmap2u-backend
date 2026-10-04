@@ -202,6 +202,45 @@ describe('commercial route runtime isolation', () => {
       ACCOUNT_CLOSURE_QUEUE_URL: { Ref: expect.stringMatching(/^AccountClosureQueue/) },
     });
     expect(closure.Properties.Environment.Variables).not.toHaveProperty('USER_POOL_ID');
+    const tableArn = {
+      'Fn::GetAtt': [closure.Properties.Environment.Variables.TABLE_NAME.Ref, 'Arn'],
+    };
+    expect(bySid('ReadAccountClosureRequestFamilyIndex')).toEqual({
+      Sid: 'ReadAccountClosureRequestFamilyIndex',
+      Effect: 'Allow', Action: 'dynamodb:Query',
+      Resource: { 'Fn::Join': ['', [tableArn, '/index/gsi1']] },
+      Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
+    });
+    expect(bySid('ReadAccountClosureRequestFamilyState')).toEqual({
+      Sid: 'ReadAccountClosureRequestFamilyState',
+      Effect: 'Allow', Action: 'dynamodb:Query', Resource: tableArn,
+      Condition: { 'ForAllValues:StringLike': {
+        'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
+      } },
+    });
+    expect(bySid('ReadAccountClosureRequestFamilyCoverage')).toEqual({
+      Sid: 'ReadAccountClosureRequestFamilyCoverage',
+      Effect: 'Allow', Action: 'dynamodb:BatchGetItem', Resource: tableArn,
+      Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
+    });
+    expect(bySid('TransactOnlyAccountClosureRequestFamilyChecks')).toEqual({
+      Sid: 'TransactOnlyAccountClosureRequestFamilyChecks',
+      Effect: 'Allow', Action: 'dynamodb:ConditionCheckItem', Resource: tableArn,
+      Condition: {
+        'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'] },
+        StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+      },
+    });
+    const familyReads = statements.filter((statement) =>
+      [statement.Action].flat().some((action) =>
+        ['dynamodb:Query', 'dynamodb:BatchGetItem'].includes(action),
+      ),
+    );
+    expect(familyReads.map((statement) => statement.Sid).sort()).toEqual([
+      'ReadAccountClosureRequestFamilyCoverage',
+      'ReadAccountClosureRequestFamilyIndex',
+      'ReadAccountClosureRequestFamilyState',
+    ]);
     expect(bySid('ReadAccountClosureRequestState')).toMatchObject({
       Action: 'dynamodb:GetItem',
       Condition: {
@@ -232,7 +271,7 @@ describe('commercial route runtime isolation', () => {
 
     const serialized = JSON.stringify(statements);
     expect(serialized).not.toMatch(
-      /dynamodb:(?:Scan|DeleteItem|BatchGetItem|BatchWriteItem|DescribeTable|Query)/,
+      /dynamodb:(?:Scan|DeleteItem|BatchWriteItem|DescribeTable)/,
     );
     expect(serialized).not.toMatch(/ssm:|secretsmanager:|cognito-idp:/i);
   }, 20_000);
