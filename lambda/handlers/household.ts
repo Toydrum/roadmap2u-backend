@@ -2201,15 +2201,54 @@ export async function acceptAdditionalResponsible(
     throw new ApiError('MINOR_ALREADY_COVERED');
   }
   const assigned = assignSeat(seat, ctx.callerId, seat.revision, now);
-  const links = notice.minorIds.map((minorId) =>
-    createSupervisionLink({
-      householdId: snapshot.household.householdId,
-      adultId: ctx.callerId,
-      minorId,
-      role: 'additional_responsible',
-      now,
-    }),
-  );
+  const supervisionWrites = notice.minorIds.map<TransactItem>((minorId) => {
+    const historical = snapshot.supervisionLinks.find(
+      (link) => link.minorId === minorId && link.adultId === ctx.callerId,
+    );
+    if (historical) {
+      if (historical.state !== 'ended' && historical.state !== 'revoked') {
+        throw new ApiError('CONFLICT');
+      }
+      // A fresh accepted invitation starts a new interval without replacing an active link.
+      return {
+        Update: {
+          TableName: ctx.deps.table,
+          Key: FK.supervision(minorId, ctx.callerId),
+          UpdateExpression:
+            'SET #role = :additionalRole, #state = :active, validFrom = :now, validUntil = :noEnd, updatedAt = :now, revision = :nextRevision',
+          ConditionExpression:
+            'revision = :expectedRevision AND #state = :previousState AND #role = :previousRole AND householdId = :householdId AND adultId = :adultId AND minorId = :minorId',
+          ExpressionAttributeNames: { '#state': 'state', '#role': 'role' },
+          ExpressionAttributeValues: {
+            ':expectedRevision': historical.revision,
+            ':nextRevision': nextRevision(historical.revision, historical.revision),
+            ':previousState': historical.state,
+            ':previousRole': historical.role,
+            ':additionalRole': 'additional_responsible',
+            ':active': 'active',
+            ':householdId': snapshot.household.householdId,
+            ':adultId': ctx.callerId,
+            ':minorId': minorId,
+            ':now': now,
+            ':noEnd': null,
+          },
+        },
+      };
+    }
+    return {
+      Put: {
+        TableName: ctx.deps.table,
+        Item: createSupervisionLink({
+          householdId: snapshot.household.householdId,
+          adultId: ctx.callerId,
+          minorId,
+          role: 'additional_responsible',
+          now,
+        }),
+        ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+      },
+    };
+  });
   const coverage = inheritedCoverage(snapshot.household.householdId, ctx.callerId, 'additional_responsible', payerCoverage, now);
   const coverageWrite: TransactItem = previousCoverage
     ? {
@@ -2267,13 +2306,7 @@ export async function acceptAdditionalResponsible(
         },
       },
     },
-    ...links.map<TransactItem>((link) => ({
-      Put: {
-        TableName: ctx.deps.table,
-        Item: link,
-        ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
-      },
-    })),
+    ...supervisionWrites,
     coverageWrite,
     {
       Update: {

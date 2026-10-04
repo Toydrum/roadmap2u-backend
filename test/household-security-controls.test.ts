@@ -1145,6 +1145,99 @@ describe('family security controls', () => {
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
+  it.each([
+    ['ended', 'primary_responsible'],
+    ['revoked', 'additional_responsible'],
+  ] as const)('accepts a fresh invitation after a %s supervision link without resetting its revision', async (state, role) => {
+    const family = fixture({ minorIds: ['minor-a'], offerKey: 'family_1_minor_1_additional_responsible', sponsoredPilot: true });
+    family.profiles.set('adult-additional', profile('adult-additional'));
+    const historical = {
+      ...createSupervisionLink({ householdId: family.household.householdId, adultId: 'adult-additional',
+        minorId: 'minor-a', role, now: NOW - 4_000 }),
+      state, revision: 7, validUntil: NOW - 1_000, updatedAt: NOW - 1_000,
+    };
+    family.links.push(historical);
+    family.coverages.push({
+      ...createCoverageAssignment({ householdId: family.household.householdId, accountId: 'adult-additional',
+        seatType: role, source: 'sponsored_pilot', now: NOW - 4_000 }),
+      state: 'ended', revision: 9,
+    });
+    const notice = invitation(family);
+    installReads(family, { notice });
+    ddbMock.on(TransactWriteCommand).callsFake((input: TransactWriteCommandInput) => {
+      const key = FK.supervision('minor-a', 'adult-additional');
+      const write = input.TransactItems?.find((item) =>
+        item.Update?.Key?.pk === key.pk && item.Update.Key.sk === key.sk ||
+        item.Put?.Item?.['pk'] === key.pk && item.Put.Item['sk'] === key.sk);
+      // DynamoDB rejects an existence-only Put because the terminated row still exists.
+      if (write?.Put) throw Object.assign(new Error('supervision row already exists'), { name: 'TransactionCanceledException' });
+      expect(write?.Update).toMatchObject({
+        Key: key,
+        ConditionExpression: expect.stringContaining('revision = :expectedRevision'),
+        ExpressionAttributeValues: expect.objectContaining({ ':expectedRevision': 7, ':nextRevision': 8,
+          ':previousState': state, ':previousRole': role, ':active': 'active', ':additionalRole': 'additional_responsible',
+          ':householdId': historical.householdId, ':adultId': historical.adultId, ':minorId': historical.minorId,
+          ':now': NOW, ':noEnd': null }),
+      });
+      for (const predicate of ['#state = :previousState', '#role = :previousRole', 'householdId = :householdId',
+        'adultId = :adultId', 'minorId = :minorId']) expect(write?.Update?.ConditionExpression).toContain(predicate);
+      expect(write?.Update?.UpdateExpression).toContain('validFrom = :now');
+      expect(write?.Update?.UpdateExpression).toContain('validUntil = :noEnd');
+      expect(write?.Update?.UpdateExpression).not.toContain('createdAt');
+      const accepted = fixture({ minorIds: ['minor-a'], additionalId: 'adult-additional', additionalScope: ['minor-a'],
+        offerKey: 'family_1_minor_1_additional_responsible', sponsoredPilot: true });
+      accepted.household = { ...accepted.household, revision: 2 };
+      installReads(accepted, { notice: { ...notice, state: 'accepted', acceptedById: 'adult-additional',
+        acceptanceCommandId: COMMAND_ID, revision: 2 } });
+      return {};
+    });
+
+    await expect(acceptAdditionalResponsible(context(family, 'adult-additional'), notice.noticeId,
+      baseCommand(family.household.householdId))).resolves.toMatchObject({ revision: 2, myRole: 'additional_responsible' });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
+  it('rejects a concurrent change to a historical supervision link atomically', async () => {
+    const family = fixture({ minorIds: ['minor-a'], offerKey: 'family_1_minor_1_additional_responsible', sponsoredPilot: true });
+    family.profiles.set('adult-additional', profile('adult-additional'));
+    family.links.push({
+      ...createSupervisionLink({ householdId: family.household.householdId, adultId: 'adult-additional',
+        minorId: 'minor-a', role: 'primary_responsible', now: NOW - 4_000 }),
+      state: 'ended', revision: 7, validUntil: NOW - 1_000,
+    });
+    const notice = invitation(family);
+    installReads(family, { notice });
+    ddbMock.on(TransactWriteCommand).callsFake((input: TransactWriteCommandInput) => {
+      const update = input.TransactItems?.find((item) => item.Update?.Key?.sk === 'SUPERVISION#adult-additional')?.Update;
+      expect(update?.ExpressionAttributeValues?.[':expectedRevision']).toBe(7);
+      // Another writer advanced this row to revision 8 after the consistent snapshot.
+      throw Object.assign(new Error('conditional revision changed'), { name: 'TransactionCanceledException' });
+    });
+
+    await expect(acceptAdditionalResponsible(context(family, 'adult-additional'), notice.noticeId,
+      baseCommand(family.household.householdId))).rejects.toMatchObject({ code: 'STALE_REVISION' });
+    expect(family.household.revision).toBe(1);
+    expect(family.seats[2].state).toBe('empty');
+    expect(family.links[1].state).toBe('ended');
+    expect(notice.state).toBe('pending');
+  });
+
+  it('does not reactivate historical supervision with an already consumed invitation', async () => {
+    const family = fixture({ minorIds: ['minor-a'], offerKey: 'family_1_minor_1_additional_responsible', sponsoredPilot: true });
+    family.links.push({
+      ...createSupervisionLink({ householdId: family.household.householdId, adultId: 'adult-additional',
+        minorId: 'minor-a', role: 'additional_responsible', now: NOW - 4_000 }),
+      state: 'revoked', revision: 7, validUntil: NOW - 1_000,
+    });
+    const notice = { ...invitation(family), state: 'accepted', acceptedById: 'adult-additional',
+      acceptanceCommandId: '11111111-1111-4111-8111-111111111111', revision: 2 };
+    installReads(family, { notice });
+
+    await expect(acceptAdditionalResponsible(context(family, 'adult-additional'), notice.noticeId,
+      baseCommand(family.household.householdId))).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
   it('fences every newly authorized minor during additional scope replacement', async () => {
     const family = fixture({
       minorIds: ['minor-a', 'minor-b'],
