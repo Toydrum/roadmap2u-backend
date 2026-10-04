@@ -29,6 +29,36 @@ function bootstrapTemplate(): Template {
 }
 
 describe('GitHub OIDC bootstrap', () => {
+  it('allows MFA renewal for eight hours only on scoped operators with one-hour credentials', () => {
+    const roles = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::Role',
+    ) as any[];
+    const purposes = ['commercial-migration', 'commercial-flag-operator', 'family-pilot-operator', 'commercial-e2e-fixture'];
+    let operators = 0;
+    for (const role of roles) {
+      const name = role.Properties.RoleName as string;
+      const isOperator = purposes.some((purpose) => ['dev', 'test', 'prod'].some(
+        (stage) => name === `roadmap2u-${stage}-${purpose}`,
+      ));
+      expect(role.Properties.MaxSessionDuration, name).toBe(3_600);
+      if (isOperator) {
+        operators++;
+        const trust = role.Properties.AssumeRolePolicyDocument.Statement;
+        expect(trust).toHaveLength(1);
+        expect(trust[0].Principal.AWS).toBe(`arn:aws:iam::${ACCOUNT}:user/Hector-admin`);
+        expect(trust[0].Condition.Bool['aws:MultiFactorAuthPresent']).toBe('true');
+        expect(trust[0].Condition.NumericLessThanEquals['aws:MultiFactorAuthAge']).toBe('28800');
+      } else {
+        for (const trust of role.Properties.AssumeRolePolicyDocument.Statement) {
+          if (trust.Condition?.Bool?.['aws:MultiFactorAuthPresent'] === 'true') {
+            expect(trust.Condition.NumericLessThanEquals['aws:MultiFactorAuthAge'], name).toBe('3600');
+          }
+        }
+      }
+    }
+    expect(operators).toBe(11);
+    expect(roles.some((role) => role.Properties.RoleName === 'roadmap2u-prod-commercial-e2e-fixture')).toBe(false);
+  });
   it('reuses the existing GitHub provider and trusts immutable repo identities', () => {
     const template = bootstrapTemplate();
     template.resourceCountIs('AWS::IAM::OIDCProvider', 0);
