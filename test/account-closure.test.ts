@@ -17,6 +17,7 @@ import {
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { AuditWriter } from '../lambda/commercial/audit';
 import { accountClosureKey } from '../lambda/account-closure';
+import { createAccountClosureRequestHandler } from '../lambda/account-closure-request';
 import * as authz from '../lambda/authz';
 import type { Ctx } from '../lambda/authz';
 import { K, type Deps, type ProfileItem } from '../lambda/db';
@@ -108,28 +109,36 @@ function closureItem(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function installFamilyReads(family: FamilyV2Fixture, account: ProfileItem): void {
+function installFamilyReads(
+  family: FamilyV2Fixture,
+  account: ProfileItem,
+  otherFamilies: readonly FamilyV2Fixture[] = [],
+): void {
+  const families = [family, ...otherFamilies];
+  const coverages = families.flatMap((item) => item.coverages);
+  const supervisionLinks = families.flatMap((item) => item.supervisionLinks);
   ddbMock.on(GetCommand).callsFake((input) => {
     const key = input.Key as { pk: string; sk: string };
     if (key.pk === accountClosureKey(account.userId).pk) return {};
     if (key.pk === K.user(account.userId) && key.sk === 'PROFILE') return { Item: account };
-    const coverage = family.coverages.find((item) => item.pk === key.pk && item.sk === key.sk);
+    const coverage = coverages.find((item) => item.pk === key.pk && item.sk === key.sk);
     return coverage ? { Item: coverage } : {};
   });
   ddbMock.on(QueryCommand).callsFake((input) => {
     const values = input.ExpressionAttributeValues as Record<string, string> | undefined;
     const pk = values?.[':pk'];
     const prefix = values?.[':prefix'] ?? '';
-    if (pk === family.household.pk) return { Items: [family.household, ...family.seats] };
+    const household = families.find((item) => item.household.pk === pk);
+    if (household) return { Items: [household.household, ...household.seats] };
     if (input.IndexName === 'gsi1') {
       return {
-        Items: family.supervisionLinks.filter(
+        Items: supervisionLinks.filter(
           (item) => item.gsi1pk === pk && item.gsi1sk.startsWith(prefix),
         ),
       };
     }
     return {
-      Items: family.supervisionLinks.filter(
+      Items: supervisionLinks.filter(
         (item) => item.pk === pk && item.sk.startsWith(prefix),
       ),
     };
@@ -141,7 +150,7 @@ function installFamilyReads(family: FamilyV2Fixture, account: ProfileItem): void
     }>;
     return {
       Responses: {
-        'roadmap-dev': family.coverages.filter((coverage) =>
+        'roadmap-dev': coverages.filter((coverage) =>
           keys.some((key) => key.pk === coverage.pk && key.sk === coverage.sk),
         ),
       },
@@ -522,6 +531,49 @@ describe('account closure request', () => {
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
     expect(enqueue).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    'returns HTTP 409 for an invited additional adult with a personal empty household (index delayed: %s)',
+    async (indexDelayed) => {
+      const module = await loadHandlerModule();
+      const seeded = familyV2Fixture({
+        now: NOW, primaryId: 'primary-1', minorIds: ['minor-1', 'minor-2'],
+        additionalResponsibleSeat: 1, additionalId: 'adult-1',
+      });
+      const family: FamilyV2Fixture = {
+        ...seeded,
+        coverages: seeded.coverages.map((coverage) => ({
+          ...coverage, source: 'sponsored_pilot', paidThrough: null, graceUntil: null,
+        })),
+      };
+      const personal: FamilyV2Fixture = {
+        ...familyV2Fixture({ now: NOW, primaryId: 'adult-1', minorIds: [] }), coverages: [],
+      };
+      const enqueue = vi.fn(async () => undefined);
+      const deps = closureDeps(enqueue);
+      installFamilyReads(family, profile(), [personal]);
+      if (indexDelayed) ddbMock.on(QueryCommand, { IndexName: 'gsi1' }).resolves({ Items: [] });
+      const handler = createAccountClosureRequestHandler({
+        requestClosure: (sub, requestId) => module!.requestAccountClosure(deps, sub, requestId),
+      });
+      const request = {
+        requestContext: {
+          requestId: 'request-additional-with-personal-household',
+          authorizer: { jwt: { claims: { sub: 'adult-1' } } },
+        },
+      } as unknown as Parameters<typeof handler>[0];
+
+      const response = await handler(request);
+
+      expect(response.statusCode).toBe(409);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(JSON.parse(response.body)).toMatchObject({
+        error: { code: 'CONFLICT', message: 'additional family authority must be revoked before closure' },
+      });
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
 
   it('allows an additional responsible after revocation and fences the released family state', async () => {
     const module = await loadHandlerModule();

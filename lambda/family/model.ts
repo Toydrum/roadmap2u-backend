@@ -880,6 +880,9 @@ export function validateHouseholdSnapshot(snapshot: HouseholdSnapshot, now: numb
     invalidFamilyState('additional-responsible scope must contain one or two seated minors');
   }
 
+  const emptyPersonalHousehold =
+    household.householdId === householdIdForPrimary(household.primaryResponsibleId) &&
+    assignedAccounts.size === 0;
   const activeCoverageAccounts = new Set<string>();
   for (const coverage of snapshot.coverages) {
     assertCoverageShape(coverage, now);
@@ -890,6 +893,12 @@ export function validateHouseholdSnapshot(snapshot: HouseholdSnapshot, now: numb
     }
     activeCoverageAccounts.add(coverage.accountId);
     if (coverage.householdId !== household.householdId) {
+      // Adults keep an empty personal household while serving another household.
+      if (
+        emptyPersonalHousehold &&
+        coverage.accountId === household.primaryResponsibleId &&
+        (coverage.seatType === 'primary_responsible' || coverage.seatType === 'additional_responsible')
+      ) continue;
       invalidFamilyState('current family coverage belongs to another household');
     }
     if (coverage.accountId === household.primaryResponsibleId) {
