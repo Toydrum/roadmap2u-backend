@@ -25,6 +25,7 @@ import {
   type SupervisionLinkItem,
 } from '../lambda/family/model';
 import { FK, householdIdForPrimary } from '../lambda/family/keys';
+import { authorizeFamilyAction } from '../lambda/family/policy';
 import {
   buildAssignMinorTransaction,
   buildTransferPrimaryTransaction,
@@ -479,6 +480,98 @@ describe('family domain v2', () => {
       householdId: 'household-other',
       revision: 2,
     });
+
+    expect(() => assertValidHouseholdSnapshot(snapshot, NOW + 1)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_FAMILY_STATE' }),
+    );
+  });
+
+  it.each(['additional_responsible', 'primary_responsible'] as const)(
+    'accepts an empty personal household whose owner is %s in another household',
+    (seatType) => {
+      const snapshot = householdFixture({ minorIds: [] });
+      snapshot.coverages = [newCoverageAssignment({
+        householdId: 'household-other',
+        accountId: snapshot.household.primaryResponsibleId,
+        seatType,
+        source: 'sponsored_pilot',
+        now: NOW,
+      })];
+
+      expect(() => assertValidHouseholdSnapshot(snapshot, NOW + 1)).not.toThrow();
+      for (const action of ['create_minor', 'create_minor_link_request', 'invite_additional_responsible'] as const) {
+        expect(authorizeFamilyAction({
+          actor: { accountId: 'adult-a', accountType: 'adult', status: 'active', socialEnabled: true },
+          action, household: snapshot, now: NOW + 1,
+        })).toEqual({ allowed: false, code: 'PAYMENT_REQUIRED' });
+      }
+    },
+  );
+
+  it('rejects foreign primary coverage when the personal household still has an assigned minor', () => {
+    const snapshot = householdFixture();
+    snapshot.coverages.push(newCoverageAssignment({
+      householdId: 'household-other',
+      accountId: snapshot.household.primaryResponsibleId,
+      seatType: 'additional_responsible',
+      source: 'sponsored_pilot',
+      now: NOW,
+    }));
+
+    expect(() => assertValidHouseholdSnapshot(snapshot, NOW + 1)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_FAMILY_STATE' }),
+    );
+  });
+
+  it.each([
+    ['a different adult', 'adult-other', 'additional_responsible'],
+    ['minor coverage for the primary adult', 'adult-a', 'minor'],
+  ] as const)('rejects foreign coverage for %s in an empty personal household', (_label, accountId, seatType) => {
+    const snapshot = householdFixture({ minorIds: [] });
+    snapshot.coverages = [newCoverageAssignment({
+      householdId: 'household-other', accountId, seatType,
+      source: 'sponsored_pilot', now: NOW,
+    })];
+
+    expect(() => assertValidHouseholdSnapshot(snapshot, NOW + 1)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_FAMILY_STATE' }),
+    );
+  });
+
+  it('rejects two current coverages for the owner of an empty personal household', () => {
+    const snapshot = householdFixture({ minorIds: [] });
+    snapshot.coverages = ['household-other', snapshot.household.householdId].map((householdId) =>
+      newCoverageAssignment({
+        householdId, accountId: snapshot.household.primaryResponsibleId,
+        seatType: 'primary_responsible', source: 'sponsored_pilot', now: NOW,
+      }),
+    );
+
+    expect(() => assertValidHouseholdSnapshot(snapshot, NOW + 1)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_FAMILY_STATE' }),
+    );
+  });
+
+  it('rejects a seated minor whose only current coverage belongs to another household', () => {
+    const snapshot = householdFixture();
+    snapshot.coverages[0] = { ...snapshot.coverages[0], householdId: 'household-other' };
+
+    expect(() => assertValidHouseholdSnapshot(snapshot, NOW + 1)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_FAMILY_STATE' }),
+    );
+  });
+
+  it('rejects foreign coverage in an empty household that is not the primary adult personal household', () => {
+    const snapshot = householdFixture({ minorIds: [] });
+    snapshot.household = {
+      ...snapshot.household, ...FK.household('household-transferred'),
+      householdId: 'household-transferred',
+    };
+    snapshot.seats = newEmptySeatAssignments(snapshot.household.householdId, NOW);
+    snapshot.coverages = [newCoverageAssignment({
+      householdId: 'household-other', accountId: 'adult-a',
+      seatType: 'primary_responsible', source: 'sponsored_pilot', now: NOW,
+    })];
 
     expect(() => assertValidHouseholdSnapshot(snapshot, NOW + 1)).toThrowError(
       expect.objectContaining({ code: 'INVALID_FAMILY_STATE' }),
