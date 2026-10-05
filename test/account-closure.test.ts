@@ -1649,7 +1649,8 @@ describe('account closure worker', () => {
       ':ttl': Math.ceil((NOW + 30 * 24 * 60 * 60 * 1000) / 1000),
     });
     expect(completed?.UpdateExpression).toContain('completedAt = :now');
-    expect(completed?.UpdateExpression).toContain('ttl = :ttl');
+    expect(completed?.UpdateExpression).toContain('#ttl = :ttl');
+    expect(completed?.ExpressionAttributeNames?.['#ttl']).toBe('ttl');
     expect(completed?.UpdateExpression).toContain(
       'REMOVE gsi1pk, gsi1sk, nextAttemptAt, leaseOwner, leaseUntil, checkpoint',
     );
@@ -1749,6 +1750,86 @@ describe('account closure worker', () => {
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(1);
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
+
+  it.each(['self_adult', 'guardian_minor'] as const)(
+    'completes %s with service-valid TTL syntax after identity deletion and ignores replay',
+    async (kind) => {
+      const module = await loadClosureModule();
+      const processMessage = module?.['processAccountClosureMessage'];
+      const deps = closureDeps();
+      const sub = kind === 'guardian_minor' ? 'minor-1' : 'adult-1';
+      let stored: Record<string, unknown> = closureItem({
+        ...accountClosureKey(sub),
+        sub,
+        kind,
+        actorSub: 'adult-1',
+        state: 'purgeComplete',
+        revision: 26,
+        purgeCompleteAt: NOW - 100,
+        checkpoint: undefined,
+      });
+      const audits: Record<string, unknown>[] = [];
+      ddbMock.on(GetCommand).callsFake((input) => {
+        expect(input.Key).toEqual(accountClosureKey(sub));
+        expect(input.ConsistentRead).toBe(true);
+        return { Item: structuredClone(stored) };
+      });
+      const missing = new Error('identity was deleted before the completion transaction');
+      missing.name = 'UserNotFoundException';
+      cognitoMock.on(AdminDeleteUserCommand).rejects(missing);
+      ddbMock.on(TransactWriteCommand).callsFake((input: TransactWriteCommand['input']) => {
+        const update = input.TransactItems?.[0]?.Update;
+        expect(update?.Key).toEqual(accountClosureKey(sub));
+        const values = update?.ExpressionAttributeValues ?? {};
+        expect(values[':closureId']).toBe(stored.closureId);
+        expect(values[':expectedRevision']).toBe(stored.revision);
+        expect(values[':expectedState']).toBe(stored.state);
+        const [setClause, removeClause] = update!.UpdateExpression!.split(' REMOVE ');
+        const next = { ...stored };
+        for (const assignment of setClause!.replace(/^SET /, '').split(',')) {
+          const [name, value] = assignment.trim().split(' = ');
+          // DynamoDB reserves TTL; the permissive SDK mock otherwise misses this service error.
+          if (name!.toUpperCase() === 'TTL') {
+            const error = new Error(
+              'Invalid UpdateExpression: Attribute name is a reserved keyword; reserved keyword: ttl',
+            );
+            error.name = 'ValidationException';
+            throw error;
+          }
+          const attribute = name!.startsWith('#') ? update!.ExpressionAttributeNames?.[name!] : name;
+          expect(attribute).toBeDefined();
+          next[attribute!] = values[value!];
+        }
+        for (const name of removeClause!.split(',').map(value => value.trim())) delete next[name];
+        const audit = input.TransactItems?.[1]?.Put?.Item;
+        expect(audit).toMatchObject({ targetId: sub, action: 'account_closure.completed' });
+        stored = next;
+        audits.push(audit!);
+        return {};
+      });
+
+      const message = { sub, closureId: 'closure-1' };
+      await expect(processMessage(deps, message)).resolves.toBe('completed');
+      expect(stored).toMatchObject({
+        kind,
+        actorSub: 'adult-1',
+        state: 'completed',
+        revision: 27,
+        completedAt: NOW,
+        ttl: Math.ceil((NOW + 30 * 24 * 60 * 60 * 1000) / 1000),
+      });
+      for (const name of ['gsi1pk', 'gsi1sk', 'nextAttemptAt', 'leaseOwner', 'leaseUntil', 'checkpoint']) {
+        expect(stored).not.toHaveProperty(name);
+      }
+      await expect(processMessage(deps, message)).resolves.toBe('completed');
+      expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(1);
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+      expect(ddbMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
+      expect(audits).toHaveLength(1);
+      expect(deps.queue.enqueue).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps purgeComplete open when Cognito fails transiently', async () => {
     const module = await loadClosureModule();
