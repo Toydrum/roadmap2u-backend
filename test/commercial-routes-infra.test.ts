@@ -3,6 +3,8 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, it } from 'vitest';
 import { RoadmapStack } from '../lib/roadmap-stack';
 import { COMMERCIAL_FLAGS_ATTRIBUTES } from '../lambda/commercial/flags';
+import { createDynamoAccessReaderDeps, createAccessReader, type AccessReaderEvent } from '../lambda/access-reader';
+import { createCoverageAssignment } from '../lambda/family/model';
 
 const ACCOUNT = '123456789012';
 const HOSTED_ZONE_ID = 'Z0123456789ABCDEFGHIJ';
@@ -93,6 +95,79 @@ describe('commercial exact HTTP routes', () => {
 });
 
 describe('commercial route runtime isolation', () => {
+  it('allows the attributes requested by the real access reader for a sponsored minor', async () => {
+    const template = renderedBackend();
+    const [, access] = lambdaByName(template, 'roadmap-access-reader-dev');
+    const statements = roleStatements(template, access.Properties.Role['Fn::GetAtt'][0]);
+    const bySid = (sid: string) => statements.find((statement) => statement.Sid === sid);
+    const now = Date.parse('2026-10-05T02:18:00Z');
+    const ownerSub = 'synthetic-minor';
+    const profile = {
+      pk: `USER#${ownerSub}`, sk: 'PROFILE', userId: ownerSub,
+      status: 'active', accountType: 'minor', majorityAt: '2035-01-01',
+    };
+    const coverage = createCoverageAssignment({
+      householdId: 'synthetic-household', accountId: ownerSub, seatType: 'minor',
+      source: 'sponsored_pilot', now: now - 1_000,
+    });
+    const commands: any[] = [];
+    const item = (key: any) => key.sk === 'PROFILE' ? profile
+      : key.sk === 'COVERAGE#FAMILY' ? coverage : undefined;
+    const ddb = {
+      async send(command: any) {
+        commands.push(command);
+        if (command.constructor.name === 'TransactGetCommand') {
+          return { Responses: command.input.TransactItems.map(({ Get }: any) => {
+            const value = item(Get.Key);
+            return value ? { Item: value } : {};
+          }) };
+        }
+        if (command.constructor.name === 'GetCommand') {
+          const value = item(command.input.Key);
+          return value ? { Item: value } : {};
+        }
+        if (command.constructor.name === 'QueryCommand') return { Items: [] };
+        if (command.constructor.name === 'TransactWriteCommand') return {};
+        throw new Error(`unexpected command ${command.constructor.name}`);
+      },
+    };
+    const reader = createAccessReader(createDynamoAccessReaderDeps({
+      ddb: ddb as any, tableName: 'roadmap-dev', now: () => now,
+    }));
+    const response = await reader({ requestContext: {
+      authorizer: { jwt: { claims: { sub: ownerSub } } },
+    } } as unknown as AccessReaderEvent);
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body).effectivePlanKey).toBe('premium');
+
+    const attributes = (sid: string) => bySid(sid).Condition[
+      'ForAllValues:StringEquals'
+    ]['dynamodb:Attributes'];
+    const projected = (request: any) => Object.values(request.ExpressionAttributeNames ?? {});
+    for (const command of commands) {
+      const requests = command.constructor.name === 'TransactGetCommand'
+        ? command.input.TransactItems.map(({ Get }: any) => Get)
+        : [command.input];
+      if (['GetCommand', 'TransactGetCommand', 'QueryCommand'].includes(command.constructor.name)) {
+        const sid = command.constructor.name === 'QueryCommand'
+          ? 'QueryCommercialAccessGrants' : 'ReadCommercialAccessItems';
+        for (const request of requests) for (const attribute of projected(request)) {
+          expect(attributes(sid), `${sid} must allow projected ${attribute}`).toContain(attribute);
+        }
+      }
+    }
+    const transaction = commands.find((command) => command.constructor.name === 'TransactWriteCommand');
+    expect(transaction).toBeDefined();
+    for (const operation of transaction.input.TransactItems) {
+      const request = operation.ConditionCheck ?? operation.Put;
+      const required = operation.Put ? Object.keys(request.Item) : projected(request);
+      if (request.ConditionExpression?.includes('majorityAt')) required.push('majorityAt');
+      for (const attribute of required) {
+        expect(attributes('MaterializeCommercialAccess'), `materialization must allow ${attribute}`).toContain(attribute);
+      }
+    }
+  }, 20_000);
+
   it('gives the public catalog only projected GetItem on the config partition, without user data or writes', () => {
     const template = renderedBackend();
     const [, catalog] = lambdaByName(template, 'roadmap-catalog-dev');
