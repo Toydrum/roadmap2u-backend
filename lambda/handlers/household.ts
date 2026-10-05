@@ -496,7 +496,10 @@ async function validatedPrimaryTransferState(
 async function snapshotForCaller(ctx: Ctx): Promise<HouseholdSnapshot> {
   const deterministicId = householdIdForPrimary(ctx.callerId);
   const coverage = await coverageOfConsistent(ctx, ctx.callerId);
-  if (coverage) {
+  // Majority preserves ended minor coverage as history, alongside the adult's own household.
+  const endedMinorCoverage = ctx.caller.accountType === 'adult' &&
+    coverage?.seatType === 'minor' && coverage.state === 'ended';
+  if (coverage && !endedMinorCoverage) {
     const covered = await readHouseholdSnapshot(repoDeps(ctx), coverage.householdId);
     if (covered) return covered;
   }
