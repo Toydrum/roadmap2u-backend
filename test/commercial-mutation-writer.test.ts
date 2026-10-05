@@ -198,6 +198,8 @@ function harness(
   options: {
     commitOutcomes?: Array<'committed' | 'conflict'>;
     resolvedAccess?: ReturnType<typeof deriveAccessItem>[];
+    now?: MutationWriterDeps<Request>['now'];
+    resolveFreshAccess?: MutationWriterDeps<Request>['resolveFreshAccess'];
   } = {},
 ) {
   const reads: Array<{ request: Request; consistentRead: true }> = [];
@@ -209,7 +211,7 @@ function harness(
   const resolvedAccess = [...(options.resolvedAccess ?? [])];
   const deps: MutationWriterDeps<Request> = {
     tableName: 'roadmap-dev',
-    now: () => NOW,
+    now: options.now ?? (() => NOW),
     readSnapshot: async (request, options) => {
       reads.push({ request, ...options });
       const next = queue.shift();
@@ -218,6 +220,7 @@ function harness(
     },
     resolveFreshAccess: async (ownerSub) => {
       accessResolutions.push(ownerSub);
+      if (options.resolveFreshAccess) return options.resolveFreshAccess(ownerSub);
       return resolvedAccess.shift() ?? deriveAccessItem(OWNER, NOW, undefined, []);
     },
     commit: async (_request, proposal) => {
@@ -850,6 +853,67 @@ describe('CommercialMutationWriter', () => {
       h.commits[0].items.find((item) => item.ConditionCheck?.Key?.['sk'] === 'ACCESS')
         ?.ConditionCheck?.ExpressionAttributeValues,
     ).toMatchObject({ ':accessRevision': 2, ':nullType': 'NULL' });
+  });
+
+  it('accepts ACCESS materialized while its resolution advances the clock', async () => {
+    const previous = deriveAccessItem(OWNER, NOW - 100, undefined, []);
+    let clock = NOW;
+    const h = harness([snapshot({ access: previous, deltas: [neutralEdit()] })], {
+      now: () => clock,
+      resolveFreshAccess: async () => {
+        clock += 50;
+        const access = deriveAccessItem(OWNER, clock, previous, []);
+        clock += 25;
+        return {
+          ...access,
+          nextRecomputeAt: clock + 60_000,
+          offlineValidUntil: clock + 60_000,
+        };
+      },
+    });
+
+    await expect(
+      h.writer.write({ ownerSub: OWNER, mutationId: 'materialized-during-resolution' }),
+    ).resolves.toMatchObject({ outcome: 'committed', attempts: 1 });
+
+    expect(h.commits).toHaveLength(1);
+    const guard = h.commits[0].items.find(
+      (item) => item.ConditionCheck?.Key?.['sk'] === 'ACCESS',
+    )?.ConditionCheck;
+    expect(guard?.ExpressionAttributeValues).toMatchObject({
+      ':accessRevision': 2,
+      ':now': NOW + 75,
+      ':nextRecomputeAt': NOW + 75 + 60_000,
+    });
+  });
+
+  it.each([
+    {
+      label: 'recomputation boundary passes',
+      access: { ...deriveAccessItem(OWNER, NOW, undefined, []), nextRecomputeAt: NOW + 1, offlineValidUntil: NOW + 1 },
+    },
+    {
+      label: 'offline validity expires',
+      access: { ...deriveAccessItem(OWNER, NOW, undefined, []), offlineValidUntil: NOW + 1 },
+    },
+    {
+      label: 'updatedAt remains in the future',
+      access: deriveAccessItem(OWNER, NOW + 3, undefined, []),
+    },
+  ])('never commits when $label during ACCESS resolution', async ({ access }) => {
+    let clock = NOW;
+    const h = harness([snapshot({ deltas: [neutralEdit()] })], {
+      now: () => clock,
+      resolveFreshAccess: async () => {
+        clock += 2;
+        return access;
+      },
+    });
+
+    await expect(
+      h.writer.write({ ownerSub: OWNER, mutationId: 'invalid-after-resolution' }),
+    ).rejects.toMatchObject({ code: 'ACCESS_REVISION_CONFLICT' });
+    expect(h.commits).toEqual([]);
   });
 
   it('re-reads lifecycle state after a transaction conflict and never writes after closure wins', async () => {

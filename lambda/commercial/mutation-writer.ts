@@ -578,7 +578,8 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
       const access = snapshot.access
         ? await this.deps.resolveFreshAccess(request.ownerSub)
         : deriveAccessItem(request.ownerSub, now, undefined, snapshot.grants, snapshot);
-      assertCurrentAccess(access, request.ownerSub, now);
+      const accessCheckedAt = this.deps.now();
+      assertCurrentAccess(access, request.ownerSub, accessCheckedAt);
       const resolvedFlags = applyCapabilityPolicy(
         this.deps.emitDecision,
         snapshot.flags,
@@ -591,7 +592,7 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
         closureGuard(this.deps.tableName, request.ownerSub),
         currentMigrationGuard,
         ...(snapshot.access
-          ? [accessGuard(this.deps.tableName, access, now)]
+          ? [accessGuard(this.deps.tableName, access, accessCheckedAt)]
           : [createAccessPutProposal(this.deps.tableName, access, undefined),
             ...paidSourceGuards(this.deps.tableName, request.ownerSub, snapshot)]),
       ];
