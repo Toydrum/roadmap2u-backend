@@ -1246,10 +1246,10 @@ async function deleteIdentityAndComplete(
             TableName: deps.table,
             Key: accountClosureKey(closure.sub),
             UpdateExpression:
-              'SET #state = :nextState, revision = :nextRevision, updatedAt = :now, completedAt = :now, ttl = :ttl REMOVE gsi1pk, gsi1sk, nextAttemptAt, leaseOwner, leaseUntil, checkpoint',
+              'SET #state = :nextState, revision = :nextRevision, updatedAt = :now, completedAt = :now, #ttl = :ttl REMOVE gsi1pk, gsi1sk, nextAttemptAt, leaseOwner, leaseUntil, checkpoint',
             ConditionExpression:
               'closureId = :closureId AND revision = :expectedRevision AND #state = :expectedState',
-            ExpressionAttributeNames: { '#state': 'state' },
+            ExpressionAttributeNames: { '#state': 'state', '#ttl': 'ttl' },
             ExpressionAttributeValues: {
               ':closureId': closure.closureId,
               ':expectedRevision': closure.revision,
