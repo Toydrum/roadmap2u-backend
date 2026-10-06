@@ -936,6 +936,75 @@ describe('family security controls', () => {
     ]));
   });
 
+  it.each([
+    ['ended', 'primary_responsible'], ['revoked', 'primary_responsible'],
+    ['ended', 'additional_responsible'], ['revoked', 'additional_responsible'],
+  ] as const)('accepts a newly approved return link after a %s %s interval', async (state, role) => {
+    const source = fixture({ primaryId: 'adult-source', minorIds: ['minor-a'], sponsoredPilot: true });
+    const target = fixture({ primaryId: 'adult-target', minorIds: ['retained-minor'], sponsoredPilot: true });
+    const notice = minorLinkNotice(source, target, 'approved');
+    const historical = { ...createSupervisionLink({
+      householdId: role === 'primary_responsible' ? target.household.householdId : source.household.householdId,
+      adultId: 'adult-target', minorId: 'minor-a', role, now: NOW - 20_000,
+    }), state, revision: 7, validUntil: NOW - 10_000, updatedAt: NOW - 10_000 };
+    installLinkReads(source, target, notice);
+    ddbMock.on(GetCommand, { Key: FK.supervision('minor-a', 'adult-target') }).resolves({ Item: historical });
+    ddbMock.on(TransactWriteCommand).callsFake((input: TransactWriteCommandInput) => {
+      const staleInsert = input.TransactItems?.some(item => item.Put?.Item?.['pk'] === historical.pk && item.Put.Item['sk'] === historical.sk);
+      if (staleInsert) throw Object.assign(new Error('historical supervision already exists'), { name: 'TransactionCanceledException' });
+      return {};
+    });
+
+    await expect(acceptMinorLinkRequest(context(target, 'adult-target'), notice.noticeId, {
+      ...baseCommand(target.household.householdId), responsibilityVersion: 'minor-link-responsibility-v1', privacyVersion: 'minor-link-privacy-v1',
+    })).resolves.toMatchObject({ householdId: target.household.householdId });
+
+    const update = transaction().find(item => item.Update?.Key?.['pk'] === historical.pk && item.Update.Key['sk'] === historical.sk)?.Update;
+    expect(update?.ExpressionAttributeValues).toMatchObject({
+      ':expectedRevision': 7, ':nextRevision': 8, ':previousState': state, ':previousRole': role,
+      ':previousHouseholdId': historical.householdId, ':targetHouseholdId': target.household.householdId,
+      ':adultId': 'adult-target', ':minorId': 'minor-a', ':active': 'active', ':primaryRole': 'primary_responsible', ':now': NOW, ':noEnd': null,
+    });
+    expect(update?.ConditionExpression).toContain('revision = :expectedRevision');
+    expect(update?.ConditionExpression).toContain('#state = :previousState');
+    expect(update?.ConditionExpression).toContain('#role = :previousRole');
+    expect(update?.ConditionExpression).toContain('householdId = :previousHouseholdId');
+    expect(update?.ConditionExpression).toContain('adultId = :adultId');
+    expect(update?.ConditionExpression).toContain('minorId = :minorId');
+    expect(conditionKeys()).toContainEqual(FK.familyEntitlement(target.household.householdId));
+    expect(transaction()).toEqual(expect.arrayContaining([expect.objectContaining({ Put: expect.objectContaining({ Item: expect.objectContaining({
+      entityType: 'MinorLinkAcceptance', requestId: notice.noticeId, responsibilityVersion: 'minor-link-responsibility-v1', privacyVersion: 'minor-link-privacy-v1',
+    }) }) })]));
+  });
+
+  it('does not replace an already active recipient supervision during link acceptance', async () => {
+    const source = fixture({ primaryId: 'adult-source', minorIds: ['minor-a'], sponsoredPilot: true });
+    const target = fixture({ primaryId: 'adult-target', sponsoredPilot: true });
+    const notice = minorLinkNotice(source, target, 'approved');
+    installLinkReads(source, target, notice);
+    const active = createSupervisionLink({ householdId: target.household.householdId, adultId: 'adult-target', minorId: 'minor-a', role: 'primary_responsible', now: NOW - 5_000 });
+    ddbMock.on(GetCommand, { Key: FK.supervision('minor-a', 'adult-target') }).resolves({ Item: active });
+    await expect(acceptMinorLinkRequest(context(target, 'adult-target'), notice.noticeId, {
+      ...baseCommand(target.household.householdId), responsibilityVersion: 'minor-link-responsibility-v1', privacyVersion: 'minor-link-privacy-v1',
+    })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  it('keeps the entire return-link transfer atomic when the historical interval changes concurrently', async () => {
+    const source = fixture({ primaryId: 'adult-source', minorIds: ['minor-a'], sponsoredPilot: true });
+    const target = fixture({ primaryId: 'adult-target', sponsoredPilot: true });
+    const notice = minorLinkNotice(source, target, 'approved');
+    installLinkReads(source, target, notice);
+    const historical = { ...createSupervisionLink({ householdId: target.household.householdId, adultId: 'adult-target', minorId: 'minor-a', role: 'primary_responsible', now: NOW - 20_000 }), state: 'ended', revision: 7, validUntil: NOW - 10_000 };
+    ddbMock.on(GetCommand, { Key: FK.supervision('minor-a', 'adult-target') }).resolves({ Item: historical });
+    ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('revision changed to 8'), { name: 'TransactionCanceledException' }));
+    await expect(acceptMinorLinkRequest(context(target, 'adult-target'), notice.noticeId, {
+      ...baseCommand(target.household.householdId), responsibilityVersion: 'minor-link-responsibility-v1', privacyVersion: 'minor-link-privacy-v1',
+    })).rejects.toMatchObject({ code: 'STALE_REVISION' });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+    expect(transaction().find(item => item.Update?.Key?.['pk'] === historical.pk && item.Update.Key['sk'] === historical.sk)?.Update?.ExpressionAttributeValues?.[':expectedRevision']).toBe(7);
+  });
+
   it('returns the accepted household on an exact target retry without moving the minor again', async () => {
     const originalSource = fixture({ primaryId: 'adult-source', minorIds: ['minor-a'] });
     const originalTarget = fixture({ primaryId: 'adult-target' });
