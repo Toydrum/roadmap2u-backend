@@ -3,11 +3,11 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 
 export type PolicyStage = 'dev' | 'test' | 'prod';
 
-// Append stages only after their SSM control-plane preparation is complete.
+// The control plane must prepare each exact SSM parameter before deployment.
 // Keeping prior stages in this set makes the rollout monotonic.
-const ACCESS_CODE_SSM_STAGES: ReadonlySet<PolicyStage> = new Set(['dev', 'test']);
-// dev retains its migrated secret; prod still uses its legacy secret. test was initialized in SSM.
-const ACCESS_CODE_HMAC_SECRET_STAGES: ReadonlySet<PolicyStage> = new Set(['dev', 'prod']);
+const ACCESS_CODE_SSM_STAGES: ReadonlySet<PolicyStage> = new Set(['dev', 'test', 'prod']);
+// Only dev retains a migrated secret. TEST/PROD initialize directly in SSM.
+const ACCESS_CODE_HMAC_SECRET_STAGES: ReadonlySet<PolicyStage> = new Set(['dev']);
 
 export function usesAccessCodeSsm(stage: PolicyStage): boolean {
   return ACCESS_CODE_SSM_STAGES.has(stage);

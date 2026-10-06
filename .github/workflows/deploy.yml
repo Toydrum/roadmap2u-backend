@@ -201,8 +201,7 @@ jobs:
           set -euo pipefail
           CAPABILITIES="shared/backend-release-capabilities.json"
           case "$STAGE" in
-            dev|test) EXPECTED_STORE="ssm-secure-string-v1" ;;
-            prod) EXPECTED_STORE="secrets-manager-v1" ;;
+            dev|test|prod) EXPECTED_STORE="ssm-secure-string-v1" ;;
             *)
               echo "Unsupported deployment stage: ${STAGE}." >&2
               exit 1
@@ -389,7 +388,7 @@ jobs:
                 <<<"$RETAINED_SECRET_RESOURCE_POLICY" >/dev/null
               VALIDATOR_ARGS+=(--retained-secret-resource "$RETAINED_SECRET_ARN")
               ;;
-            test) ;;
+            test|prod) ;;
             *)
               echo "Unsupported SSM HMAC stage: ${STAGE}." >&2
               exit 1
