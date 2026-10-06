@@ -23,6 +23,14 @@ El deploy ordinario jamás realiza el corte de `roadmap2u.com`/`www`. Ese cambio
 
 Mantén separados los SHA de backend y frontend si sus repositorios no avanzan al mismo commit; registra la pareja exacta desplegada por ambiente.
 
+### Preparación HMAC de PROD
+
+Los artefactos actuales declaran `ssm-secure-string-v1` en los tres ambientes. Antes de promover a PROD, preparar `/roadmap2u/prod/access-code-hmac/v1` como SecureString Standard con `alias/aws/ssm`, tags de proyecto/ambiente/propósito y sin resource policies. El workflow inspecciona metadata y valida el boundary; no lee la clave. Solo DEV conserva lectura del secret que ya fue migrado.
+
+Inventariar los dos almacenes antes de elegir el modo del CLI. Si ambos están ausentes, usar `node scripts/migrate-access-code-hmac.mjs plan --stage prod --mode initialize`; si hay un secret de origen, usar `--mode migrate` para conservar su keyring. El `apply` se ejecuta en terminal interactiva con `--confirm-stage prod --confirm-hash <hash-del-plan-vigente>`, genera material solo en memoria y crea el parámetro sin sobrescribir. Conservar únicamente el recibo sanitizado y verificar metadata/boundary después. No copiar la clave a archivos, argumentos, logs o Git.
+
+El ajuste IAM y la preparación HMAC preceden al deploy. Mantener gates y flags familiares/pagos cerrados durante su preparación; esta operación no concede cobertura ni sustituye la aprobación legal del piloto.
+
 ## Validación local sin mutaciones
 
 Desde el backend:

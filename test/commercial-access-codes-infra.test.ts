@@ -311,21 +311,9 @@ describe('sponsored access code infrastructure', () => {
       const secretManagement = deployStatements.find(
         (statement: any) => statement.Sid === 'ManageOnlySponsoredAccessHmacSecret',
       );
-      if (stage !== 'prod') {
-        expect(randomPassword).toBeUndefined();
-        expect(secretManagement).toBeUndefined();
-        expect(JSON.stringify(deployStatements)).not.toMatch(/secretsmanager:/i);
-      } else {
-        expect(randomPassword).toMatchObject({
-          Action: 'secretsmanager:GetRandomPassword',
-          Effect: 'Allow',
-          Resource: '*',
-        });
-        expect(secretManagement.Action).toContain('secretsmanager:GetSecretValue');
-        expect(JSON.stringify(secretManagement.Resource)).toContain(
-          `:secret:roadmap2u/${stage}/access-code-hmac/v1-`,
-        );
-      }
+      expect(randomPassword).toBeUndefined();
+      expect(secretManagement).toBeUndefined();
+      expect(JSON.stringify(deployStatements)).not.toMatch(/secretsmanager:/i);
       expect(
         deployStatements
           .filter(
