@@ -1558,6 +1558,51 @@ export async function acceptMinorLinkRequest(
     role: 'primary_responsible',
     now,
   });
+  const historicalTargetLink = (await ctx.deps.ddb.send(new GetCommand({
+    TableName: ctx.deps.table,
+    Key: FK.supervision(notice.minorId, ctx.callerId),
+    ConsistentRead: true,
+  }))).Item as SupervisionLinkItem | undefined;
+  if (historicalTargetLink && (
+    (historicalTargetLink.state !== 'ended' && historicalTargetLink.state !== 'revoked') ||
+    historicalTargetLink.adultId !== ctx.callerId || historicalTargetLink.minorId !== notice.minorId ||
+    (historicalTargetLink.role !== 'primary_responsible' && historicalTargetLink.role !== 'additional_responsible')
+  )) throw new ApiError('CONFLICT');
+  // Returning to an earlier responsible adult starts a new accepted interval
+  // at the same key. Never overwrite an active interval or reset its revision.
+  const primaryWrite: TransactItem = historicalTargetLink ? {
+    Update: {
+      TableName: ctx.deps.table,
+      Key: FK.supervision(notice.minorId, ctx.callerId),
+      UpdateExpression:
+        'SET linkId = :linkId, householdId = :targetHouseholdId, #role = :primaryRole, #state = :active, validFrom = :now, validUntil = :noEnd, updatedAt = :now, revision = :nextRevision',
+      ConditionExpression:
+        'revision = :expectedRevision AND #state = :previousState AND #role = :previousRole AND householdId = :previousHouseholdId AND adultId = :adultId AND minorId = :minorId',
+      ExpressionAttributeNames: { '#state': 'state', '#role': 'role' },
+      ExpressionAttributeValues: {
+        ':expectedRevision': historicalTargetLink.revision,
+        ':nextRevision': nextRevision(historicalTargetLink.revision, historicalTargetLink.revision),
+        ':previousState': historicalTargetLink.state,
+        ':previousRole': historicalTargetLink.role,
+        ':previousHouseholdId': historicalTargetLink.householdId,
+        ':adultId': ctx.callerId,
+        ':minorId': notice.minorId,
+        ':targetHouseholdId': target.household.householdId,
+        ':linkId': newPrimary.linkId,
+        ':primaryRole': 'primary_responsible',
+        ':active': 'active',
+        ':now': now,
+        ':noEnd': null,
+      },
+      ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+    },
+  } : {
+    Put: {
+      TableName: ctx.deps.table,
+      Item: newPrimary,
+      ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+    },
+  };
   const acceptance = createMinorLinkAcceptance({
     requestId: notice.noticeId,
     minorId: notice.minorId,
@@ -1689,13 +1734,7 @@ export async function acceptMinorLinkRequest(
             : []),
         ]
       : []),
-    {
-      Put: {
-        TableName: ctx.deps.table,
-        Item: newPrimary,
-        ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
-      },
-    },
+    primaryWrite,
     oldCoverage
       ? {
           Update: {
