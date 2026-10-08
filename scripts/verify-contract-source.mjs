@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,8 @@ const contractFiles = [
   'api/contracts.ts',
   'db/schema.ts',
   'auth/auth-types.ts',
+  'i18n/es.ts',
+  'i18n/en.ts',
 ];
 
 function argument(name) {
@@ -56,10 +58,7 @@ function contractHash(root) {
   for (const relativePath of contractFiles) {
     hash.update(relativePath, 'utf8');
     hash.update('\0');
-    hash.update(
-      readFileSync(join(root, relativePath), 'utf8').replaceAll('\r\n', '\n'),
-      'utf8',
-    );
+    hash.update(readFileSync(join(root, relativePath), 'utf8').replaceAll('\r\n', '\n'), 'utf8');
     hash.update('\0');
   }
   return hash.digest('hex');
@@ -103,9 +102,19 @@ function verify(lock, frontendRoot) {
 }
 
 const command = process.argv[2];
-const lockPath = resolve(argument('--lock') ?? join(backendRoot, 'shared', 'contracts-source.json'));
+const lockPath = resolve(
+  argument('--lock') ?? join(backendRoot, 'shared', 'contracts-source.json'),
+);
 
 try {
+  if (
+    !argument('--lock') &&
+    existsSync(join(backendRoot, 'shared', 'contracts-working-tree.json'))
+  ) {
+    throw new Error(
+      'Local contract preview cannot be used for release; sync from the approved frontend commit first',
+    );
+  }
   const lock = loadLock(lockPath);
   if (command === 'resolve') {
     const githubOutput = argument('--github-output');

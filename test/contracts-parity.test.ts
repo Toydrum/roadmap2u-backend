@@ -22,6 +22,8 @@ const contractFiles = [
   'api/contracts.ts',
   'db/schema.ts',
   'auth/auth-types.ts',
+  'i18n/es.ts',
+  'i18n/en.ts',
 ] as const;
 
 const contractSourcePath = join(backendRoot, 'shared', 'contracts-source.json');
@@ -39,20 +41,18 @@ function contractHash(root: string): string {
   for (const relativePath of contractFiles) {
     hash.update(relativePath, 'utf8');
     hash.update('\0');
-    hash.update(
-      readFileSync(join(root, relativePath), 'utf8').replaceAll('\r\n', '\n'),
-      'utf8',
-    );
+    hash.update(readFileSync(join(root, relativePath), 'utf8').replaceAll('\r\n', '\n'), 'utf8');
     hash.update('\0');
   }
   return hash.digest('hex');
 }
 
 describe('vendored frontend contracts', () => {
-  it('pins the exact frontend repository, commit and vendored contract hash', () => {
-    expect(existsSync(contractSourcePath), `Missing contract source lock ${contractSourcePath}`).toBe(
-      true,
-    );
+  it('requires an immutable release lock or an explicitly fenced local preview', () => {
+    expect(
+      existsSync(contractSourcePath),
+      `Missing contract source lock ${contractSourcePath}`,
+    ).toBe(true);
     const lock = JSON.parse(readFileSync(contractSourcePath, 'utf8')) as Record<string, unknown>;
 
     expect(lock).toEqual({
@@ -61,11 +61,38 @@ describe('vendored frontend contracts', () => {
       commitSha: expect.stringMatching(/^[0-9a-f]{40}$/),
       contractHash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
-    expect(lock['commitSha']).toBe('cd2c7b3c966cab69f0cde30def5286469b7ca899');
-    expect(lock['contractHash']).toBe(
-      'de593ab903028f8812c6b6f616e509eff3f2102400a8b70738d82e7ae0f86485',
-    );
-    expect(lock['contractHash']).toBe(contractHash(join(backendRoot, 'shared')));
+    const previewPath = join(backendRoot, 'shared', 'contracts-working-tree.json');
+    if (existsSync(previewPath)) {
+      expect(process.env['CI']).toBeFalsy();
+      const preview = JSON.parse(readFileSync(previewPath, 'utf8'));
+      expect(preview).toEqual({
+        schemaVersion: 1,
+        repository: 'Toydrum/RoadMap2U',
+        state: 'working_tree',
+        baseCommitSha: spawnSync(
+          'git',
+          [
+            '-c',
+            `safe.directory=${frontendRoot.replaceAll('\\', '/')}`,
+            '-C',
+            frontendRoot,
+            'rev-parse',
+            'HEAD',
+          ],
+          { encoding: 'utf8' },
+        ).stdout.trim(),
+        contractHash: contractHash(join(backendRoot, 'shared')),
+      });
+      const release = spawnSync(
+        process.execPath,
+        [join(backendRoot, 'scripts', 'verify-contract-source.mjs'), 'resolve'],
+        { encoding: 'utf8' },
+      );
+      expect(release.status).not.toBe(0);
+      expect(release.stderr).toContain('Local contract preview cannot be used for release');
+    } else {
+      expect(lock['contractHash']).toBe(contractHash(join(backendRoot, 'shared')));
+    }
   });
 
   it('resolves and verifies the pinned checkout before parity checks', () => {
@@ -183,12 +210,7 @@ describe('vendored frontend contracts', () => {
       );
       const result = spawnSync(
         process.execPath,
-        [
-          join(backendRoot, 'scripts', 'verify-contract-source.mjs'),
-          'resolve',
-          '--lock',
-          lockPath,
-        ],
+        [join(backendRoot, 'scripts', 'verify-contract-source.mjs'), 'resolve', '--lock', lockPath],
         { cwd: backendRoot, encoding: 'utf8' },
       );
 
@@ -213,10 +235,14 @@ describe('vendored frontend contracts', () => {
   });
 
   it('prints the deterministic combined contract hash', () => {
-    const result = spawnSync(process.execPath, [join(backendRoot, 'scripts', 'contracts-hash.mjs')], {
-      cwd: backendRoot,
-      encoding: 'utf8',
-    });
+    const result = spawnSync(
+      process.execPath,
+      [join(backendRoot, 'scripts', 'contracts-hash.mjs')],
+      {
+        cwd: backendRoot,
+        encoding: 'utf8',
+      },
+    );
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).toBe(contractHash(join(backendRoot, 'shared')));
@@ -228,7 +254,10 @@ describe('vendored frontend contracts', () => {
       const lfRoot = join(sandbox, 'lf');
       const crlfRoot = join(sandbox, 'crlf');
       for (const relativePath of contractFiles) {
-        for (const [root, newline] of [[lfRoot, '\n'], [crlfRoot, '\r\n']] as const) {
+        for (const [root, newline] of [
+          [lfRoot, '\n'],
+          [crlfRoot, '\r\n'],
+        ] as const) {
           const destination = join(root, relativePath);
           mkdirSync(dirname(destination), { recursive: true });
           writeFileSync(destination, `first${newline}second${newline}`, 'utf8');

@@ -17,6 +17,11 @@ export interface AuditEvent {
 export interface AuditItem extends AuditEvent {
   readonly pk: string;
   readonly sk: string;
+  readonly retentionCategory?: 'ordinary' | 'review_required';
+  readonly retentionUserId?: string;
+  readonly retainUntil?: number;
+  readonly gsi1pk?: string;
+  readonly gsi1sk?: string;
 }
 
 export interface AuditWriterOptions {
@@ -57,9 +62,28 @@ export class AuditWriter {
       throw new Error('invalid audit identity');
     }
     const item: AuditItem = {
-      ...event,
+      targetKind: event.targetKind,
+      targetId: event.targetId,
+      timestamp: event.timestamp,
+      requestId: event.requestId,
+      action: event.action,
+      actor: event.actor,
+      subject: event.subject,
+      ...(event.details === undefined ? {} : { details: event.details }),
       pk: `TARGET#${event.targetKind}#${event.targetId}`,
       sk: `EVENT#${event.timestamp}#${event.requestId}`,
+      ...(process.env['ADULT_PRIVACY_MODE'] === 'enforce'
+        ? event.targetKind === 'USER' &&
+          /^(account_closure|sponsored-access|family|social)\./.test(event.action)
+          ? {
+              retentionCategory: 'ordinary' as const,
+              retentionUserId: event.targetId,
+              retainUntil: event.timestamp + 30 * 86400000,
+              gsi1pk: 'RETENTION#AUDIT',
+              gsi1sk: `DUE#${String(event.timestamp + 30 * 86400000).padStart(14, '0')}#${event.requestId}`,
+            }
+          : { retentionCategory: 'review_required' as const }
+        : {}),
     };
     return {
       Put: {

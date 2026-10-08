@@ -62,7 +62,10 @@ function asExactRecord(body: unknown, keys: readonly string[]): Record<string, u
   const record = body as Record<string, unknown>;
   const observed = Object.keys(record).sort();
   const expected = [...keys].sort();
-  if (observed.length !== expected.length || observed.some((key, index) => key !== expected[index])) {
+  if (
+    observed.length !== expected.length ||
+    observed.some((key, index) => key !== expected[index])
+  ) {
     throw new ApiError('VALIDATION', 'unexpected request fields');
   }
   return record;
@@ -114,7 +117,7 @@ function policyPerson(profile: ProfileItem): SocialPolicyPerson {
   return {
     accountId: profile.userId,
     accountType: profile.accountType,
-    socialEnabled: profile.socialEnabled,
+    socialEnabled: profile.socialEnabled && !profile.privacyMode,
     status: profile.status ?? 'active',
     ...(profile.majorityAt ? { majorityAt: profile.majorityAt } : {}),
   };
@@ -161,8 +164,7 @@ function adultProfileGuard(ctx: Ctx, profile: ProfileItem): TransactItem {
       TableName: ctx.deps.table,
       Key: K.profile(profile.userId),
       ConditionExpression:
-        `${WRITABLE_PROFILE_CONDITION} AND ` +
-        '(#userId = :userId AND #accountType = :adult)',
+        `${WRITABLE_PROFILE_CONDITION} AND ` + '(#userId = :userId AND #accountType = :adult)',
       ExpressionAttributeNames: {
         '#status': 'status',
         '#userId': 'userId',
@@ -177,7 +179,12 @@ function adultProfileGuard(ctx: Ctx, profile: ProfileItem): TransactItem {
   };
 }
 
-function requireCurrentMinor(profile: ProfileItem | null, expectedUserId: string, now: number): ProfileItem {
+function requireCurrentMinor(
+  profile: ProfileItem | null,
+  expectedUserId: string,
+  now: number,
+): ProfileItem {
+  if (profile?.privacyMode) throw new ApiError('FORBIDDEN');
   if (!profile || !isExactProfile(profile, expectedUserId) || profile.accountType !== 'minor') {
     throw new ApiError('ACCOUNT_TYPE_INCOMPATIBLE');
   }
@@ -318,11 +325,7 @@ function pendingFriendshipUpdate(
   };
 }
 
-function consumeMinorCodePointer(
-  ctx: Ctx,
-  profile: ProfileItem,
-  code: string,
-): TransactItem {
+function consumeMinorCodePointer(ctx: Ctx, profile: ProfileItem, code: string): TransactItem {
   return {
     Update: {
       TableName: ctx.deps.table,
@@ -471,7 +474,10 @@ async function requireResponsibleAuthority(
   if (!isExactProfile(actor, actor.userId) || actor.accountType !== 'adult') {
     throw new ApiError('RESPONSIBLE_SCOPE_REQUIRED');
   }
-  const minorCoverage = await getConsistent<CoverageAssignmentItem>(ctx, FK.familyCoverage(minorId));
+  const minorCoverage = await getConsistent<CoverageAssignmentItem>(
+    ctx,
+    FK.familyCoverage(minorId),
+  );
   if (
     !minorCoverage ||
     minorCoverage.entityType !== 'CoverageAssignment' ||
@@ -499,9 +505,7 @@ async function requireResponsibleAuthority(
     now: ctx.deps.now(),
   });
   if (!decision.allowed || decision.actorRole === 'minor_self') {
-    throw new ApiError(
-      decision.allowed ? 'RESPONSIBLE_SCOPE_REQUIRED' : decision.code,
-    );
+    throw new ApiError(decision.allowed ? 'RESPONSIBLE_SCOPE_REQUIRED' : decision.code);
   }
   const minorSeat = snapshot.seats.find(
     (seat): seat is MinorSeatAssignmentItem =>
@@ -587,9 +591,11 @@ function coverageConditionCheck(
         'paidThrough = :paidThrough',
         'graceUntil = :graceUntil',
         ...(mustBeCurrent
-          ? [pilot
-              ? '(#state = :active OR #state = :scheduledEnd)'
-              : '(((#state = :active OR #state = :scheduledEnd) AND paidThrough > :now) OR (#state = :grace AND graceUntil > :now))']
+          ? [
+              pilot
+                ? '(#state = :active OR #state = :scheduledEnd)'
+                : '(((#state = :active OR #state = :scheduledEnd) AND paidThrough > :now) OR (#state = :grace AND graceUntil > :now))',
+            ]
           : []),
       ].join(' AND '),
       ExpressionAttributeNames: { '#state': 'state', '#source': 'source' },
@@ -720,18 +726,10 @@ function responsibleAuthorityChecks(ctx: Ctx, authority: ResponsibleAuthority): 
 
 function transactAddress(item: TransactItem): string {
   if (item.Put) {
-    return JSON.stringify([
-      item.Put.TableName,
-      item.Put.Item?.['pk'],
-      item.Put.Item?.['sk'],
-    ]);
+    return JSON.stringify([item.Put.TableName, item.Put.Item?.['pk'], item.Put.Item?.['sk']]);
   }
   const operation = item.Update ?? item.Delete ?? item.ConditionCheck;
-  return JSON.stringify([
-    operation?.TableName,
-    operation?.Key?.['pk'],
-    operation?.Key?.['sk'],
-  ]);
+  return JSON.stringify([operation?.TableName, operation?.Key?.['pk'], operation?.Key?.['sk']]);
 }
 
 function uniqueWrites(items: readonly TransactItem[]): TransactItem[] {
@@ -861,7 +859,8 @@ function isReplaceableMinorFriendship(item: FriendshipItem, now: number): boolea
   try {
     const pair = canonicalFriendshipPair(item.userA, item.userB);
     const key = SK.friendship(pair.userA, pair.userB);
-    const terminal = item.state === 'rejected' || item.state === 'revoked' || item.state === 'expired';
+    const terminal =
+      item.state === 'rejected' || item.state === 'revoked' || item.state === 'expired';
     const expiredPending =
       item.state === 'pending' && item.expiresAt !== null && item.expiresAt <= now;
     return (
@@ -948,7 +947,9 @@ function friendshipPut(
   };
 }
 
-function parseMinorRequestId(requestId: string): { friendshipId: string; userA: string; userB: string } | null {
+function parseMinorRequestId(
+  requestId: string,
+): { friendshipId: string; userA: string; userB: string } | null {
   const prefix = 'minor-friend:';
   if (!requestId.startsWith(prefix)) return null;
   const pairId = requestId.slice(prefix.length);
@@ -986,9 +987,8 @@ async function readCurrentConsents(ctx: Ctx, friendship: FriendshipItem): Promis
       );
     }),
   );
-  return rows.filter(
-    (row, index): row is ConsentItem =>
-      isExactCurrentConsent(friendship, CONSENT_KINDS[index]!, row, now),
+  return rows.filter((row, index): row is ConsentItem =>
+    isExactCurrentConsent(friendship, CONSENT_KINDS[index]!, row, now),
   );
 }
 
@@ -1017,15 +1017,21 @@ function minorFriendRequestView(
 
 function minorRequestPointer(minorId: string, friendship: FriendshipItem) {
   return {
-    pk: K.user(minorId), sk: `MFR#${friendship.friendshipId}`,
-    entityType: 'MinorFriendRequestPointer', minorId,
-    requestId: friendship.requestId, requestCycleId: friendship.requestCycleId,
+    pk: K.user(minorId),
+    sk: `MFR#${friendship.friendshipId}`,
+    entityType: 'MinorFriendRequestPointer',
+    minorId,
+    requestId: friendship.requestId,
+    requestCycleId: friendship.requestCycleId,
     friendshipId: friendship.friendshipId,
   };
 }
 
 /** Read-only discovery for the two minors and their current responsible adults. */
-export async function getMinorFriendRequests(ctx: Ctx, minorId: string): Promise<MinorFriendRequestView[]> {
+export async function getMinorFriendRequests(
+  ctx: Ctx,
+  minorId: string,
+): Promise<MinorFriendRequestView[]> {
   identifier(minorId, 'minorId');
   await requireWritableOwner(ctx, ctx.callerId);
   const minor = await profileOfConsistent(ctx.deps, minorId);
@@ -1037,25 +1043,40 @@ export async function getMinorFriendRequests(ctx: Ctx, minorId: string): Promise
   } else {
     await requireResponsibleAuthority(ctx, ctx.caller, minorId, 'revoke_minor_friendship');
   }
-  const result = await ctx.deps.ddb.send(new QueryCommand({
-    TableName: ctx.deps.table,
-    KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-    ExpressionAttributeValues: { ':pk': K.user(minorId), ':prefix': 'MFR#' },
-    ConsistentRead: true,
-    Limit: 100,
-  }));
+  const result = await ctx.deps.ddb.send(
+    new QueryCommand({
+      TableName: ctx.deps.table,
+      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
+      ExpressionAttributeValues: { ':pk': K.user(minorId), ':prefix': 'MFR#' },
+      ConsistentRead: true,
+      Limit: 100,
+    }),
+  );
   const views: MinorFriendRequestView[] = [];
   for (const row of result.Items ?? []) {
-    if (row['pk'] !== K.user(minorId) || row['entityType'] !== 'MinorFriendRequestPointer' ||
-      row['minorId'] !== minorId || typeof row['friendshipId'] !== 'string' ||
-      row['sk'] !== `MFR#${row['friendshipId']}` || typeof row['requestId'] !== 'string') continue;
+    if (
+      row['pk'] !== K.user(minorId) ||
+      row['entityType'] !== 'MinorFriendRequestPointer' ||
+      row['minorId'] !== minorId ||
+      typeof row['friendshipId'] !== 'string' ||
+      row['sk'] !== `MFR#${row['friendshipId']}` ||
+      typeof row['requestId'] !== 'string'
+    )
+      continue;
     const pair = parseMinorRequestId(row['requestId']);
     if (!pair || pair.friendshipId !== row['friendshipId']) continue;
-    const friendship = await getConsistent<FriendshipItem>(ctx, SK.friendship(pair.userA, pair.userB));
-    if (!friendship || friendship.requestId !== row['requestId'] ||
+    const friendship = await getConsistent<FriendshipItem>(
+      ctx,
+      SK.friendship(pair.userA, pair.userB),
+    );
+    if (
+      !friendship ||
+      friendship.requestId !== row['requestId'] ||
       friendship.requestCycleId !== row['requestCycleId'] ||
       !isExactPendingFriendship(friendship, ctx.deps.now()) ||
-      (friendship.requesterId !== minorId && friendship.recipientId !== minorId)) continue;
+      (friendship.requesterId !== minorId && friendship.recipientId !== minorId)
+    )
+      continue;
     const [requester, recipient, consents] = await Promise.all([
       profileOfConsistent(ctx.deps, friendship.requesterId!),
       profileOfConsistent(ctx.deps, friendship.recipientId!),
@@ -1068,7 +1089,9 @@ export async function getMinorFriendRequests(ctx: Ctx, minorId: string): Promise
 }
 
 function embeddedMinorProfiles(profiles: readonly ProfileItem[]) {
-  return Object.fromEntries(profiles.map((profile) => [profile.userId, { profile: true as const }]));
+  return Object.fromEntries(
+    profiles.map((profile) => [profile.userId, { profile: true as const }]),
+  );
 }
 
 export async function mintMinorInviteCode(
@@ -1076,14 +1099,15 @@ export async function mintMinorInviteCode(
   body: CreateMinorInviteCodeRequest,
 ): Promise<CodeGrant> {
   const request = parseInviteBody(body);
-  const authority = ctx.callerId === request.minorId
-    ? null
-    : await requireResponsibleAuthority(
-        ctx,
-        ctx.caller,
-        request.minorId,
-        'approve_minor_friendship',
-      );
+  const authority =
+    ctx.callerId === request.minorId
+      ? null
+      : await requireResponsibleAuthority(
+          ctx,
+          ctx.caller,
+          request.minorId,
+          'approve_minor_friendship',
+        );
   const minor = requireCurrentMinor(
     await profileOfConsistent(ctx.deps, request.minorId),
     request.minorId,
@@ -1156,17 +1180,15 @@ export async function mintMinorInviteCode(
     if (previousMinorKey) {
       writes.push(
         previousMinor &&
-        previousMinor.entityType === 'MinorFriendInviteCode' &&
-        previousMinor.kind === 'minor_friend' &&
-        previousMinor.minorId === minor.userId
+          previousMinor.entityType === 'MinorFriendInviteCode' &&
+          previousMinor.kind === 'minor_friend' &&
+          previousMinor.minorId === minor.userId
           ? exactMinorCodeOperation(ctx, previousMinor, 'delete')
           : absentConditionCheck(ctx.deps, previousMinorKey),
       );
     }
     writes.push(
-      previousLegacy &&
-      previousLegacy.kind === 'friend' &&
-      previousLegacy.userId === minor.userId
+      previousLegacy && previousLegacy.kind === 'friend' && previousLegacy.userId === minor.userId
         ? exactCodeOperation(ctx.deps, previousLegacy, 'delete')
         : absentConditionCheck(ctx.deps, K.codeF(minor.friendCode)),
     );
@@ -1175,10 +1197,7 @@ export async function mintMinorInviteCode(
     ctx,
     'create',
     [minor.userId],
-    uniqueWrites([
-      ...writes,
-      ...(authority ? responsibleAuthorityChecks(ctx, authority) : []),
-    ]),
+    uniqueWrites([...writes, ...(authority ? responsibleAuthorityChecks(ctx, authority) : [])]),
     undefined,
     { [minor.userId]: { profile: true } },
   );
@@ -1196,7 +1215,10 @@ export async function createMinorFriendRequest(
   if (!isExactProfile(ctx.caller, ctx.callerId)) throw new ApiError('UNAUTHENTICATED');
 
   await reserveCodeAttempt(ctx);
-  const grant = await getConsistent<MinorFriendInviteCodeItem>(ctx, SK.minorInviteCode(request.code));
+  const grant = await getConsistent<MinorFriendInviteCodeItem>(
+    ctx,
+    SK.minorInviteCode(request.code),
+  );
   if (!grant || !isExactCurrentMinorCode(grant, request.code, ctx.deps.now())) {
     throw new ApiError('CODE_INVALID');
   }
@@ -1254,9 +1276,12 @@ export async function createMinorFriendRequest(
     participants.map(({ userId }) => userId),
     [
       friendshipPut(ctx, friendship, existing),
-      ...[requester.userId, target.userId].map((minorId): TransactItem => ({ Put: {
-        TableName: ctx.deps.table, Item: minorRequestPointer(minorId, friendship),
-      } })),
+      ...[requester.userId, target.userId].map((minorId): TransactItem => ({
+        Put: {
+          TableName: ctx.deps.table,
+          Item: minorRequestPointer(minorId, friendship),
+        },
+      })),
       consentPut(ctx, consent),
       exactMinorCodeOperation(ctx, grant, 'delete', now),
       absentConditionCheck(ctx.deps, K.friend(pair.userA, pair.userB)),
@@ -1312,13 +1337,7 @@ export async function recordMinorAcceptance(
       now: existing.recordedAt,
     });
     if (!sameConsent(existing, expected)) throw new ApiError('CONSENT_INCOMPLETE');
-    return activateMinorFriendshipIfReady(
-      ctx,
-      friendship,
-      left,
-      right,
-      existingConsents,
-    );
+    return activateMinorFriendshipIfReady(ctx, friendship, left, right, existingConsents);
   }
   const consent = createMinorFriendConsent({
     friendship,
@@ -1346,13 +1365,7 @@ export async function recordMinorAcceptance(
     undefined,
     embeddedMinorProfiles(participants),
   );
-  return activateMinorFriendshipIfReady(
-    ctx,
-    updated,
-    left,
-    right,
-    [...existingConsents, consent],
-  );
+  return activateMinorFriendshipIfReady(ctx, updated, left, right, [...existingConsents, consent]);
 }
 
 async function activateMinorFriendshipIfReady(
@@ -1419,15 +1432,13 @@ async function activateMinorFriendshipIfReady(
   const writes = uniqueWrites([
     activationUpdate(ctx, friendship, active),
     ...consents.map((consent) => exactConsentCheck(ctx, consent)),
-    ...mirrors.map(
-      (mirror): TransactItem => ({
-        Put: {
-          TableName: ctx.deps.table,
-          Item: mirror,
-          ConditionExpression: 'attribute_not_exists(pk)',
-        },
-      }),
-    ),
+    ...mirrors.map((mirror): TransactItem => ({
+      Put: {
+        TableName: ctx.deps.table,
+        Item: mirror,
+        ConditionExpression: 'attribute_not_exists(pk)',
+      },
+    })),
     minorProfileGuard(ctx, requester),
     minorProfileGuard(ctx, recipient),
     ...authorities.flatMap((authority) => responsibleAuthorityChecks(ctx, authority)),
@@ -1497,8 +1508,8 @@ export async function recordResponsibleApproval(
   );
   const kind =
     request.minorId === friendship.requesterId
-      ? 'requester_responsible_approval' as const
-      : 'recipient_responsible_approval' as const;
+      ? ('requester_responsible_approval' as const)
+      : ('recipient_responsible_approval' as const);
   const previous = existingConsents.find((consent) => consent.kind === kind);
   if (
     previous &&
@@ -1506,13 +1517,7 @@ export async function recordResponsibleApproval(
     previous.subjectMinorId === request.minorId &&
     previous.policyVersion === MINOR_SOCIAL_POLICY_VERSION
   ) {
-    return activateMinorFriendshipIfReady(
-      ctx,
-      friendship,
-      requester,
-      recipient,
-      existingConsents,
-    );
+    return activateMinorFriendshipIfReady(ctx, friendship, requester, recipient, existingConsents);
   }
   const freshConsent = createMinorFriendConsent({
     friendship,
@@ -1548,13 +1553,7 @@ export async function recordResponsibleApproval(
     ...existingConsents.filter((candidate) => candidate.kind !== kind),
     consent,
   ];
-  return activateMinorFriendshipIfReady(
-    ctx,
-    updated,
-    requester,
-    recipient,
-    nextConsents,
-  );
+  return activateMinorFriendshipIfReady(ctx, updated, requester, recipient, nextConsents);
 }
 
 function terminalPendingUpdate(
@@ -1567,8 +1566,7 @@ function terminalPendingUpdate(
   return {
     Update: {
       ...update,
-      UpdateExpression:
-        `SET #state = ${stateToken}, revision = :nextRevision, updatedAt = :now, endedAt = :now`,
+      UpdateExpression: `SET #state = ${stateToken}, revision = :nextRevision, updatedAt = :now, endedAt = :now`,
       ExpressionAttributeValues: {
         ...update.ExpressionAttributeValues,
         [stateToken]: state,
@@ -1606,11 +1604,7 @@ export async function rejectMinorFriendRequest(
     terminalPendingUpdate(ctx, friendship, 'rejected'),
     ...(authority ? responsibleAuthorityChecks(ctx, authority) : []),
   ]);
-  await guardedWrite(
-    ctx,
-    [friendship.userA, friendship.userB],
-    writes,
-  );
+  await guardedWrite(ctx, [friendship.userA, friendship.userB], writes);
 }
 
 function parseFriendshipId(friendshipId: string): { userA: string; userB: string } | null {
@@ -1665,10 +1659,10 @@ function isExactActiveMinorFriendship(
     return false;
   }
   try {
-    return canonicalFriendshipPair(
-      friendship.requesterId,
-      friendship.recipientId,
-    ).friendshipId === friendshipId;
+    return (
+      canonicalFriendshipPair(friendship.requesterId, friendship.recipientId).friendshipId ===
+      friendshipId
+    );
   } catch {
     return false;
   }

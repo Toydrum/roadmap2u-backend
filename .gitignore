@@ -9,3 +9,4 @@ coverage/
 !.env.example
 cdk.context.json
 cdk-outputs*.json
+shared/contracts-working-tree.json

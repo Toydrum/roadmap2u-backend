@@ -689,34 +689,52 @@ describe('GitHub OIDC bootstrap', () => {
   });
 
   it('authorizes the actual additive family migration puts with stage and attribute limits', async () => {
-    const library = await import(pathToFileURL(
-      join(process.cwd(), 'scripts/lib/family-model-migration.mjs'),
-    ).href);
+    const library = await import(
+      pathToFileURL(join(process.cwd(), 'scripts/lib/family-model-migration.mjs')).href
+    );
     const profile = (userId: string, accountType: 'adult' | 'minor') => ({
-      pk: `USER#${userId}`, sk: 'PROFILE', userId, accountType,
-      status: 'active', createdAt: 1,
+      pk: `USER#${userId}`,
+      sk: 'PROFILE',
+      userId,
+      accountType,
+      status: 'active',
+      createdAt: 1,
     });
     const link = (guardianId: string, minorId: string, kind: 'created' | 'invited') => ({
-      pk: `USER#${minorId}`, sk: `GUARDIAN#${guardianId}`,
-      gsi1pk: `USER#${guardianId}`, gsi1sk: `MINOR#${minorId}`,
-      linkId: `${guardianId}~${minorId}`, guardianId, minorId, kind, createdAt: 2,
+      pk: `USER#${minorId}`,
+      sk: `GUARDIAN#${guardianId}`,
+      gsi1pk: `USER#${guardianId}`,
+      gsi1sk: `MINOR#${minorId}`,
+      linkId: `${guardianId}~${minorId}`,
+      guardianId,
+      minorId,
+      kind,
+      createdAt: 2,
     });
     const inventory = library.classifyLegacyFamilyModel([
-      profile('primary', 'adult'), profile('additional', 'adult'),
-      profile('minor-one', 'minor'), profile('minor-two', 'minor'),
-      link('primary', 'minor-one', 'created'), link('primary', 'minor-two', 'created'),
-      link('additional', 'minor-one', 'invited'), link('additional', 'minor-two', 'invited'),
+      profile('primary', 'adult'),
+      profile('additional', 'adult'),
+      profile('minor-one', 'minor'),
+      profile('minor-two', 'minor'),
+      link('primary', 'minor-one', 'created'),
+      link('primary', 'minor-two', 'created'),
+      link('additional', 'minor-one', 'invited'),
+      link('additional', 'minor-two', 'invited'),
     ]);
-    const plan = inventory.plans.find((candidate: any) =>
-      candidate.primaryResponsibleId === 'primary');
+    const plan = inventory.plans.find(
+      (candidate: any) => candidate.primaryResponsibleId === 'primary',
+    );
     expect(plan.disposition).toBe('candidate');
     const rendered = bootstrapTemplate().toJSON();
     for (const stage of ['dev', 'test', 'prod']) {
-      const policy = Object.values(rendered.Resources).find((resource: any) =>
-        resource.Type === 'AWS::IAM::Policy' &&
-        resource.Properties.PolicyName === `CommercialMigrationPolicy-${stage}`) as any;
-      const puts = policy.Properties.PolicyDocument.Statement.find((statement: any) =>
-        statement.Sid === 'TransactOnlyFamilyModelPuts');
+      const policy = Object.values(rendered.Resources).find(
+        (resource: any) =>
+          resource.Type === 'AWS::IAM::Policy' &&
+          resource.Properties.PolicyName === `CommercialMigrationPolicy-${stage}`,
+      ) as any;
+      const puts = policy.Properties.PolicyDocument.Statement.find(
+        (statement: any) => statement.Sid === 'TransactOnlyFamilyModelPuts',
+      );
       expect(puts, `${stage} must authorize canonical family backfill puts`).toBeDefined();
       expect(puts.Action).toBe('dynamodb:PutItem');
       expect(JSON.stringify(puts.Resource)).toContain(`table/roadmap-${stage}`);
@@ -729,22 +747,37 @@ describe('GitHub OIDC bootstrap', () => {
       });
       expect(puts.Condition.Null).toEqual({ 'dynamodb:Attributes': 'false' });
       const attributes = puts.Condition['ForAllValues:StringEquals']['dynamodb:Attributes'];
-      for (const excluded of ['accountType', 'userId', 'displayName', 'email', 'record',
-        'majorityAt', 'source', 'paidThrough', 'effectivePlanKey']) {
+      for (const excluded of [
+        'accountType',
+        'userId',
+        'displayName',
+        'email',
+        'record',
+        'majorityAt',
+        'source',
+        'paidThrough',
+        'effectivePlanKey',
+      ]) {
         expect(attributes).not.toContain(excluded);
       }
       const transaction = library.buildFamilyModelBackfillTransaction({
-        tableName: `roadmap-${stage}`, auditTableName: `roadmap-access-audit-${stage}`,
-        stage, plan, planHash: inventory.planHash, migrationStartedAt: 3,
+        tableName: `roadmap-${stage}`,
+        auditTableName: `roadmap-access-audit-${stage}`,
+        stage,
+        plan,
+        planHash: inventory.planHash,
+        migrationStartedAt: 3,
       });
-      const canonicalPuts = transaction.TransactItems.filter((operation: any) =>
-        operation.Put?.TableName === `roadmap-${stage}`);
+      const canonicalPuts = transaction.TransactItems.filter(
+        (operation: any) => operation.Put?.TableName === `roadmap-${stage}`,
+      );
       expect(canonicalPuts.length).toBeGreaterThan(4);
       for (const operation of canonicalPuts) {
         expect(operation.Put.Item.pk).toMatch(/^(HOUSEHOLD|USER)#/);
         expect(Object.keys(operation.Put.Item).every((key) => attributes.includes(key))).toBe(true);
         expect(operation.Put.ConditionExpression).toBe(
-          'attribute_not_exists(pk) AND attribute_not_exists(sk)');
+          'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+        );
       }
     }
   });
@@ -782,7 +815,7 @@ describe('GitHub OIDC bootstrap', () => {
     expect(rendered.Outputs).not.toHaveProperty('prodCommercialE2EFixtureRoleArn');
   });
 
-  it('limits runtime audit-table access to exact PutItem on the stage table', () => {
+  it('limits runtime audit-table access to append and classified maintenance on exact stage resources', () => {
     const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
     ) as any[];
@@ -796,10 +829,22 @@ describe('GitHub OIDC bootstrap', () => {
         JSON.stringify(statement.Resource).includes(`table/roadmap-access-audit-${stage}`),
       );
 
-      expect(auditStatements).toHaveLength(1);
-      expect(auditStatements[0].Sid).toBe('AppendOnlyAuditEvents');
-      expect(auditStatements[0].Action).toBe('dynamodb:PutItem');
-      expect(JSON.stringify(auditStatements[0].Resource)).not.toContain('/index/*');
+      expect(auditStatements).toHaveLength(2);
+      const append = auditStatements.find(
+        (statement: any) => statement.Sid === 'AppendOnlyAuditEvents',
+      );
+      const maintenance = auditStatements.find(
+        (statement: any) => statement.Sid === 'MaintainOnlyClassifiedAudit',
+      );
+      expect(append.Action).toBe('dynamodb:PutItem');
+      expect(JSON.stringify(append.Resource)).not.toContain('/index/*');
+      expect(maintenance.Action).toEqual([
+        'dynamodb:Query',
+        'dynamodb:DeleteItem',
+        'dynamodb:UpdateItem',
+      ]);
+      expect(JSON.stringify(maintenance.Resource)).toContain('/index/gsi1');
+      expect(JSON.stringify(maintenance.Resource)).not.toContain('/index/*');
       expect(
         JSON.stringify(
           statements.find((statement: any) => statement.Sid === 'UseOnlyOwnStageTable').Resource,

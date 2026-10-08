@@ -5,13 +5,14 @@ import { fileURLToPath } from 'node:url';
 
 const backendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const rootIndex = process.argv.indexOf('--root');
-const contractsRoot = rootIndex >= 0
-  ? resolve(process.argv[rootIndex + 1] ?? '')
-  : join(backendRoot, 'shared');
+const contractsRoot =
+  rootIndex >= 0 ? resolve(process.argv[rootIndex + 1] ?? '') : join(backendRoot, 'shared');
 const contractFiles = [
   'api/contracts.ts',
   'db/schema.ts',
   'auth/auth-types.ts',
+  'i18n/es.ts',
+  'i18n/en.ts',
 ];
 const hash = createHash('sha256');
 
@@ -21,8 +22,7 @@ for (const relativePath of contractFiles) {
   // Git may materialize text files as CRLF on Windows and LF on Linux.
   // Canonicalize only for the cross-platform release hash; the parity test
   // still compares the vendored contracts byte for byte.
-  const contents = readFileSync(join(contractsRoot, relativePath), 'utf8')
-    .replaceAll('\r\n', '\n');
+  const contents = readFileSync(join(contractsRoot, relativePath), 'utf8').replaceAll('\r\n', '\n');
   hash.update(contents, 'utf8');
   hash.update('\0');
 }

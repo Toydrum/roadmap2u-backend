@@ -33,6 +33,7 @@ const OBSERVED_SERVICES = [
   'family-pilot-broker',
   'family-majority-reconciler',
   'account-closure-request',
+  'privacy-maintenance',
 ] as const;
 export type ObservedService = (typeof OBSERVED_SERVICES)[number];
 const COMMERCIAL_METRICS = new Set([

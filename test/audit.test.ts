@@ -4,10 +4,11 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 import ts from 'typescript';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuditWriter } from '../lambda/commercial/audit';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
+afterEach(() => vi.unstubAllEnvs());
 
 function writer(): AuditWriter {
   return new AuditWriter({
@@ -18,6 +19,39 @@ function writer(): AuditWriter {
 
 describe('append-only commercial audit writer', () => {
   beforeEach(() => ddbMock.reset());
+  it('classifies ordinary operational evidence without an unsafe TTL that could ignore a legal hold', () => {
+    vi.stubEnv('ADULT_PRIVACY_MODE', 'enforce');
+    const item = writer().transactPut({
+      targetKind: 'USER',
+      targetId: 'target',
+      timestamp: 1_800_000_000_000,
+      requestId: 'audit-retention',
+      action: 'account_closure.completed',
+      actor: 'system:worker',
+      subject: 'target',
+    }).Put.Item;
+    expect(item).toMatchObject({
+      retentionCategory: 'ordinary',
+      retainUntil: 1_800_000_000_000 + 30 * 86400000,
+      gsi1pk: 'RETENTION#AUDIT',
+    });
+    expect(item).not.toHaveProperty('ttl');
+  });
+  it('leaves unknown or financial evidence for a documented category instead of applying a blanket 30 days', () => {
+    vi.stubEnv('ADULT_PRIVACY_MODE', 'enforce');
+    const item = writer().transactPut({
+      targetKind: 'USER',
+      targetId: 'target',
+      timestamp: 1_800_000_000_000,
+      requestId: 'financial-retention',
+      action: 'stripe.invoice.finalized',
+      actor: 'system:stripe',
+      subject: 'target',
+    }).Put.Item;
+    expect(item).toMatchObject({ retentionCategory: 'review_required' });
+    expect(item).not.toHaveProperty('retainUntil');
+    expect(item).not.toHaveProperty('ttl');
+  });
 
   it('reuses the caller-supplied timestamp and request id deterministically for retries', async () => {
     ddbMock.on(PutCommand).resolves({});
@@ -177,7 +211,8 @@ describe('append-only commercial audit writer', () => {
 
     function visit(node: ts.Node): void {
       if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
-        if (node.expression.text.endsWith('Command')) commandConstructors.push(node.expression.text);
+        if (node.expression.text.endsWith('Command'))
+          commandConstructors.push(node.expression.text);
       }
       if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)) {
         if (['Put', 'Update', 'Delete', 'BatchWrite'].includes(node.name.text)) {

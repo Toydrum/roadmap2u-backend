@@ -10,16 +10,8 @@ import {
   type SocialPolicyPerson,
 } from './social/policy';
 import { SK, type FriendshipItem as CanonicalFriendshipItem } from './social/model';
-import {
-  Deps,
-  FriendItem,
-  GetCommand,
-  K,
-  LinkItem,
-  ProfileItem,
-  getItem,
-  queryPrefix,
-} from './db';
+import { readRestoreExclusion } from './privacy/retention';
+import { Deps, FriendItem, GetCommand, K, LinkItem, ProfileItem, getItem, queryPrefix } from './db';
 
 /**
  * Authorization primitives — every rule from the permissions matrix
@@ -31,6 +23,8 @@ export interface Ctx {
   caller: ProfileItem;
   /** Cognito auth_time normalized to epoch milliseconds; absent fails reinforced actions closed. */
   authenticatedAt?: number;
+  /** Verified email claim from the JWT authorizer; never accepted from request data. */
+  emailVerified?: boolean;
   deps: Deps;
 }
 
@@ -74,10 +68,18 @@ export async function resolveCaller(
   deps: Deps,
   callerId: string,
   authenticatedAt?: number,
+  emailVerified?: boolean,
 ): Promise<Ctx> {
   const caller = await getItem<ProfileItem>(deps, K.profile(callerId));
-  if (!caller) throw new ApiError('UNAUTHENTICATED');
-  return { callerId, caller, ...(authenticatedAt === undefined ? {} : { authenticatedAt }), deps };
+  if (!caller || (await readRestoreExclusion(deps, callerId))?.scope === 'account')
+    throw new ApiError('UNAUTHENTICATED');
+  return {
+    callerId,
+    caller,
+    ...(authenticatedAt === undefined ? {} : { authenticatedAt }),
+    ...(emailVerified === undefined ? {} : { emailVerified }),
+    deps,
+  };
 }
 
 export async function profileOf(deps: Deps, userId: string): Promise<ProfileItem | null> {
@@ -85,10 +87,7 @@ export async function profileOf(deps: Deps, userId: string): Promise<ProfileItem
 }
 
 /** Strong read for lifecycle-sensitive listings and authorization decisions. */
-export async function profileOfConsistent(
-  deps: Deps,
-  userId: string,
-): Promise<ProfileItem | null> {
+export async function profileOfConsistent(deps: Deps, userId: string): Promise<ProfileItem | null> {
   const result = await deps.ddb.send(
     new GetCommand({
       TableName: deps.table,
@@ -181,9 +180,9 @@ function exactProfile(profile: ProfileItem | null, accountId: string): profile i
   const expected = K.profile(accountId);
   return Boolean(
     profile &&
-      profile.pk === expected.pk &&
-      profile.sk === expected.sk &&
-      profile.userId === accountId,
+    profile.pk === expected.pk &&
+    profile.sk === expected.sk &&
+    profile.userId === accountId,
   );
 }
 
@@ -262,7 +261,10 @@ async function householdForMinor(
   );
 }
 
-async function currentRelationshipProfile(ctx: Ctx, accountId: string): Promise<ProfileItem | null> {
+async function currentRelationshipProfile(
+  ctx: Ctx,
+  accountId: string,
+): Promise<ProfileItem | null> {
   try {
     return await requireWritableOwner(ctx, accountId);
   } catch (error) {
@@ -325,10 +327,12 @@ export async function requireGuardianOfConsistent(ctx: Ctx, minorId: string): Pr
 /** Identity-admin gate — only over minors the caller CREATED. */
 export async function requireCreatedGuardianOf(ctx: Ctx, minorId: string): Promise<LinkItem> {
   const link = await requireGuardianOf(ctx, minorId);
-  if (link.kind !== 'created') throw new ApiError('FORBIDDEN', 'invited links have no identity admin');
+  if (link.kind !== 'created')
+    throw new ApiError('FORBIDDEN', 'invited links have no identity admin');
   return link;
 }
 
 export function requireSocial(ctx: Ctx): void {
-  if (!ctx.caller.socialEnabled) throw new ApiError('FORBIDDEN', 'social features are off');
+  if (ctx.caller.privacyMode || !ctx.caller.socialEnabled)
+    throw new ApiError('FORBIDDEN', 'social features are off');
 }

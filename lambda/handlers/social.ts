@@ -55,7 +55,7 @@ function policyPerson(profile: ProfileItem): SocialPolicyPerson {
   return {
     accountId: profile.userId,
     accountType: profile.accountType,
-    socialEnabled: profile.socialEnabled,
+    socialEnabled: profile.socialEnabled && !profile.privacyMode,
     status: profile.status ?? 'active',
     ...(profile.majorityAt ? { majorityAt: profile.majorityAt } : {}),
   };
@@ -87,6 +87,7 @@ function requireAdultCodeTarget(
   // Code possession is not authority to inspect the target's account class.
   if (
     !target ||
+    target.privacyMode ||
     !isExactProfile(target, expectedUserId) ||
     target.accountType !== 'adult' ||
     !target.socialEnabled ||
@@ -113,7 +114,12 @@ function requireAdultRequestSender(
   expectedUserId: string,
 ): ProfileItem {
   // Old incompatible requests remain removable, but cannot be accepted.
-  if (!sender || !isExactProfile(sender, expectedUserId) || sender.accountType !== 'adult') {
+  if (
+    !sender ||
+    sender.privacyMode ||
+    !isExactProfile(sender, expectedUserId) ||
+    sender.accountType !== 'adult'
+  ) {
     throw new ApiError('NOT_FOUND');
   }
   const decision = authorizeFriendRequest({
@@ -268,11 +274,7 @@ export async function createAdultFriendRequest(
   if (grant.expiresAt <= ctx.deps.now()) throw new ApiError('CODE_EXPIRED');
   if (grant.userId === ctx.callerId) throw new ApiError('VALIDATION', 'that is your own code');
 
-  const target = requireAdultCodeTarget(
-    ctx,
-    await profileOf(ctx.deps, grant.userId),
-    grant.userId,
-  );
+  const target = requireAdultCodeTarget(ctx, await profileOf(ctx.deps, grant.userId), grant.userId);
   const pair = canonicalFriendshipPair(ctx.callerId, target.userId);
   const [legacyFriendship, canonicalFriendship] = await Promise.all([
     friendshipBetween(ctx.deps, ctx.callerId, target.userId),
@@ -283,7 +285,10 @@ export async function createAdultFriendRequest(
   const now = ctx.deps.now();
   if (grant.expiresAt <= now) throw new ApiError('CODE_EXPIRED');
   const reverseRequestId = `freq-${target.userId}~${ctx.callerId}`;
-  const reverse = await getItem<FriendRequestItem>(ctx.deps, K.freq(ctx.callerId, reverseRequestId));
+  const reverse = await getItem<FriendRequestItem>(
+    ctx.deps,
+    K.freq(ctx.callerId, reverseRequestId),
+  );
   if (reverse && reverse.expiresAt > now) throw new ApiError('CONFLICT', 'they already asked you');
 
   const myFriends = await queryPrefix<FriendItem>(ctx.deps, K.user(ctx.callerId), 'FRIEND#');
@@ -334,7 +339,11 @@ export async function createAdultFriendRequest(
           getConsistent<FriendItem>(ctx, K.friend(ctx.callerId, target.userId)),
           getConsistent<FriendshipItem>(ctx, SK.friendship(pair.userA, pair.userB)),
         ]);
-      if (!currentGrant || currentGrant.kind !== 'friend' || currentGrant.userId !== target.userId) {
+      if (
+        !currentGrant ||
+        currentGrant.kind !== 'friend' ||
+        currentGrant.userId !== target.userId
+      ) {
         throw new ApiError('CODE_INVALID');
       }
       if (currentGrant.expiresAt <= ctx.deps.now()) throw new ApiError('CODE_EXPIRED');

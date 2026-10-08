@@ -115,6 +115,33 @@ describe('backend GitHub Actions', () => {
     );
   });
 
+  it('preserves privacy by default and verifies explicit stage activation before publishing markers', () => {
+    const contents = workflow('deploy.yml');
+    const diff = namedStep(contents, 'Review CDK diff');
+    const deploy = namedStep(contents, 'Deploy selected stage');
+    const verify = namedStep(contents, 'Verify deployed privacy modes');
+    expect(contents.match(/options: \[keep, off, enforce\]/g)).toHaveLength(2);
+    expect(contents.match(/default: keep/g)).toHaveLength(2);
+    expect(contents).toContain('ADULT_PRIVACY_MODE=keep');
+    expect(contents).toContain('PRIVATE_ADOLESCENT_MODE=keep');
+    expect(contents).toContain('Rollback must preserve privacy modes.');
+    expect(diff).toContain('node scripts/privacy-deployment.mjs');
+    expect(diff).toContain('(.Parameters | length) == 0');
+    expect(diff).toContain('"${PRIVACY_ARGS[@]}"');
+    expect(deploy).toContain('"${PRIVACY_ARGS[@]}"');
+    expect(deploy).toContain('--previous-parameters true');
+    expect(deploy).toContain('FORCE_ARGS=(--force)');
+    expect(verify).toContain('aws lambda get-function-configuration');
+    expect(verify).toContain('.ADULT_PRIVACY_MODE == $adult');
+    expect(verify).toContain('.PRIVATE_ADOLESCENT_MODE == $adolescent');
+    expect(contents.indexOf('Synthesize immutable privacy template')).toBeLessThan(
+      contents.indexOf('Review CDK diff'),
+    );
+    expect(contents.indexOf('Verify deployed privacy modes')).toBeLessThan(
+      contents.indexOf('Publish immutable backend release manifest'),
+    );
+  });
+
   it('requires and masks the alarm email, passes it to both CDK operations, and exercises the channel', () => {
     const contents = workflow('deploy.yml');
     const ci = workflow('ci.yml');
@@ -124,12 +151,11 @@ describe('backend GitHub Actions', () => {
     const alarmCheck = namedStep(contents, 'Verify commercial alarm channel');
 
     for (const step of [validation, diff, deploy, alarmCheck]) {
-      expect(step).toContain(
-        'ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}',
-      );
+      expect(step).toContain('ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}');
     }
     expect(
-      contents.match(/ALARM_NOTIFICATION_EMAIL: \$\{\{ secrets\.ALARM_NOTIFICATION_EMAIL \}\}/g) ?? [],
+      contents.match(/ALARM_NOTIFICATION_EMAIL: \$\{\{ secrets\.ALARM_NOTIFICATION_EMAIL \}\}/g) ??
+        [],
     ).toHaveLength(4);
     expect(validation).toContain('::add-mask::$ALARM_NOTIFICATION_EMAIL');
     expect(validation).toContain('ALARM_NOTIFICATION_EMAIL is missing or invalid');
@@ -141,12 +167,9 @@ describe('backend GitHub Actions', () => {
       contents.match(
         /--parameters "Roadmap-\$\{STAGE\}-Backend:AlarmNotificationEmail=\$\{ALARM_NOTIFICATION_EMAIL\}"/g,
       ) ?? [],
-    )
-      .toHaveLength(2);
+    ).toHaveLength(2);
     expect(contents).not.toContain('-c ALARM_NOTIFICATION_EMAIL=');
-    expect(repositoryFile(join('bin', 'roadmap.ts'))).not.toContain(
-      'ALARM_NOTIFICATION_EMAIL',
-    );
+    expect(repositoryFile(join('bin', 'roadmap.ts'))).not.toContain('ALARM_NOTIFICATION_EMAIL');
     expect(contents.indexOf('Validate and mask alarm notification email')).toBeLessThan(
       contents.indexOf('Review CDK diff'),
     );
@@ -241,7 +264,9 @@ describe('backend GitHub Actions', () => {
     expect(contents).toContain('options: [deploy, promote, rollback]');
     expect(contents).toContain('Manual deploy is allowed only for dev');
     expect(contents).toContain('TRIGGER_EVENT: ${{ github.event_name }}');
-    expect(contents).toContain("git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'");
+    expect(contents).toContain(
+      "git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'",
+    );
     expect(contents).toContain('test "$SHA" = "$(git rev-parse refs/remotes/origin/main)"');
     expect(contents).toContain("vars.AWS_ROLLBACK_ENABLED == 'true'");
     expect(contents).toContain("vars.AWS_ROLLBACK_ENABLED == 'false'");
@@ -266,9 +291,7 @@ describe('backend GitHub Actions', () => {
     expect(deploy).toBeLessThan(postflight);
     const preflightContents = contents.slice(preflight, diff);
     const postflightContents = contents.slice(postflight);
-    expect(preflightContents).toContain(
-      'CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE',
-    );
+    expect(preflightContents).toContain('CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE');
     expect(postflightContents).toContain('CREATE_COMPLETE|UPDATE_COMPLETE');
     expect(postflightContents).not.toContain('UPDATE_ROLLBACK_COMPLETE');
     expect(contents).toContain('ValidationError');
@@ -334,9 +357,7 @@ describe('backend GitHub Actions', () => {
       contents.indexOf('Verify AWS account and promotion proof'),
     );
 
-    expect(readiness).toContain(
-      "steps.hmac-capability.outputs.store == 'ssm-secure-string-v1'",
-    );
+    expect(readiness).toContain("steps.hmac-capability.outputs.store == 'ssm-secure-string-v1'");
     expect(readiness).toContain('aws ssm describe-parameters');
     expect(readiness).toContain('aws ssm list-tags-for-resource');
     expect(readiness).toContain('aws ssm get-resource-policies');
@@ -354,7 +375,9 @@ describe('backend GitHub Actions', () => {
     expect(readiness).toContain('--mode ssm');
     expect(readiness).toContain('--parameter-resource "$PARAMETER_ARN"');
     expect(readiness).toContain('--retained-secret-resource "$RETAINED_SECRET_ARN"');
-    expect(readiness).toContain('VALIDATOR_ARGS+=(--retained-secret-resource "$RETAINED_SECRET_ARN")');
+    expect(readiness).toContain(
+      'VALIDATOR_ARGS+=(--retained-secret-resource "$RETAINED_SECRET_ARN")',
+    );
     expect(readiness).toContain('test|prod) ;;');
     expect(readiness).toContain('"${VALIDATOR_ARGS[@]}"');
     expect(legacyReadiness).toContain(
@@ -441,8 +464,9 @@ describe('backend GitHub Actions', () => {
       '/aws/lambda/roadmap-account-closure-request-${STAGE}',
       '/aws/apigateway/roadmap-api-${STAGE}',
     ];
-    const listedLogGroups = [...retentionStep.matchAll(/^\s+"(\/aws\/[^"\r\n]+)"$/gm)]
-      .map((match) => match[1]);
+    const listedLogGroups = [...retentionStep.matchAll(/^\s+"(\/aws\/[^"\r\n]+)"$/gm)].map(
+      (match) => match[1],
+    );
     expect(listedLogGroups).toEqual(expectedLogGroups);
     expect(new Set(listedLogGroups).size).toBe(listedLogGroups.length);
     expect(contents).toContain('.retentionInDays == $retention');
@@ -460,7 +484,7 @@ describe('backend GitHub Actions', () => {
     expect(contents).toContain('options: [dev, test, prod, prod-dns-plan, prod-dns-cutover]');
     expect(contents).toContain('permissions: {}');
     expect(contents).toContain('id-token: write');
-    expect(contents).toContain("contains(fromJSON('[\"dev\",\"test\",\"prod\"]'), inputs.stage)");
+    expect(contents).toContain('contains(fromJSON(\'["dev","test","prod"]\'), inputs.stage)');
     expect(contents).toContain("if: ${{ inputs.stage == 'prod-dns-plan' }}");
     expect(contents).toContain("if: ${{ inputs.stage == 'prod-dns-cutover' }}");
     expect(contents).toContain('role-to-assume: ${{ vars.AWS_ROLE_ARN }}');
@@ -504,12 +528,8 @@ describe('backend GitHub Actions', () => {
     expect(contents).toContain('.Distribution.DistributionConfig.IsIPV6Enabled == true');
     expect(contents).toContain('www.roadmap2u.com:443:$EDGE_IP');
     expect(contents).toContain('https://roadmap2u.com/account?volver=%2Fahora');
-    expect(
-      contents.match(/\.AliasTarget\.DNSName \|= rtrimstr\("\."\)/g) ?? [],
-    ).toHaveLength(2);
-    expect(contents.indexOf('IsIPV6Enabled == true')).toBeLessThan(
-      contents.indexOf('Type:"AAAA"'),
-    );
+    expect(contents.match(/\.AliasTarget\.DNSName \|= rtrimstr\("\."\)/g) ?? []).toHaveLength(2);
+    expect(contents.indexOf('IsIPV6Enabled == true')).toBeLessThan(contents.indexOf('Type:"AAAA"'));
     expect(contents).toContain('dns-plan/zone-before.json');
     expect(contents).toContain('dns-plan/zone-unmanaged-before-normalized.json');
     expect(contents).toContain('apply-result/zone-live-after.json');
@@ -601,6 +621,8 @@ describe('backend GitHub Actions', () => {
     expect(setup).not.toContain('no forman parte de esta entrega');
     expect(architecture).not.toContain('deliberadamente **no operativa');
     expect(architecture).toContain('roadmap-commercial-alerts-{stage}');
-    expect(architecture).not.toContain('purga de cuentas adultas y observabilidad/alertas operativas');
+    expect(architecture).not.toContain(
+      'purga de cuentas adultas y observabilidad/alertas operativas',
+    );
   });
 });

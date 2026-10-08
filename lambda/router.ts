@@ -17,6 +17,8 @@ import * as forests from './handlers/forests';
 import * as sync from './handlers/sync';
 import { instrumentHandler } from './observability';
 import { requireFamilyRollout } from './commercial/family-rollout';
+import * as privacy from './privacy/consent';
+import * as privateAdolescents from './privacy/adolescents';
 
 /**
  * The single router behind `/v1/{proxy+}`. CORS preflight returns before auth;
@@ -35,59 +37,271 @@ interface Route {
 }
 
 export const ROUTES: Route[] = [
+  {
+    method: 'GET',
+    pattern: '/privacy/status',
+    handler: (c, p) => privacy.getPrivacyStatus(c, p['language']),
+  },
+  {
+    method: 'POST',
+    pattern: '/privacy/consents',
+    handler: (c, _p, b) => privacy.changePrivacyConsent(c, b),
+  },
+  {
+    method: 'GET',
+    pattern: '/privacy/export',
+    handler: (c, p) => privacy.exportOwnPrivacy(c, p['cursor']),
+  },
+  {
+    method: 'GET',
+    pattern: '/privacy/adolescents',
+    handler: (c) => privateAdolescents.listPrivateAdolescentInvitations(c),
+  },
+  {
+    method: 'POST',
+    pattern: '/privacy/adolescents',
+    handler: (c, _p, b) => privateAdolescents.createPrivateAdolescentInvitation(c, b as never),
+  },
+  {
+    method: 'POST',
+    pattern: '/privacy/adolescents/:id/consents',
+    handler: (c, p, b) =>
+      privateAdolescents.changePrivateAdolescentGuardianConsent(c, p['id'], b as never),
+  },
   { method: 'GET', pattern: '/me', handler: (c) => me.getMe(c) },
-  { method: 'PATCH', pattern: '/me', handler: (c, _p, b) => me.patchMe(c, b as { displayName?: string }) },
+  {
+    method: 'PATCH',
+    pattern: '/me',
+    handler: (c, _p, b) => me.patchMe(c, b as { displayName?: string }),
+  },
 
-  { method: 'POST', pattern: '/family/children', handler: (c, _p, b) => family.createChild(c, b as never), status: 201 },
-  { method: 'POST', pattern: '/family/children/:id/reset-password', handler: (c, p) => family.resetChildPassword(c, p['id']) },
-  { method: 'PATCH', pattern: '/family/children/:id', handler: (c, p, b) => family.patchChild(c, p['id'], b as never) },
-  { method: 'GET', pattern: '/family/children/:id/export', handler: (c, p) => family.exportChild(c, p['id']) },
-  { method: 'DELETE', pattern: '/family/children/:id', handler: (c, p) => family.deleteChild(c, p['id']), status: 204 },
-  { method: 'DELETE', pattern: '/family/links/:linkId', handler: (c, p) => family.deleteFamilyLink(c, p['linkId']), status: 204 },
-  { method: 'POST', pattern: '/family/invites', handler: (c, _p, b) => family.createFamilyInvite(c, b as never), status: 201 },
-  { method: 'POST', pattern: '/family/invites/accept', handler: (c, _p, b) => family.acceptFamilyInvite(c, b as never) },
-  { method: 'DELETE', pattern: '/family/invites/:code', handler: (c, p) => family.revokeFamilyInvite(c, p['code']), status: 204 },
-  { method: 'GET', pattern: '/family/children/:id/friends', handler: (c, p) => family.listChildFriends(c, p['id']) },
-  { method: 'DELETE', pattern: '/family/children/:id/friends/:fid', handler: (c, p) => family.removeChildFriendship(c, p['id'], p['fid']), status: 204 },
-  { method: 'DELETE', pattern: '/family/children/:id/requests/:rid', handler: (c, p) => family.cancelChildRequest(c, p['id'], p['rid']), status: 204 },
+  {
+    method: 'POST',
+    pattern: '/family/children',
+    handler: (c, _p, b) => family.createChild(c, b as never),
+    status: 201,
+  },
+  {
+    method: 'POST',
+    pattern: '/family/children/:id/reset-password',
+    handler: (c, p) => family.resetChildPassword(c, p['id']),
+  },
+  {
+    method: 'PATCH',
+    pattern: '/family/children/:id',
+    handler: (c, p, b) => family.patchChild(c, p['id'], b as never),
+  },
+  {
+    method: 'GET',
+    pattern: '/family/children/:id/export',
+    handler: (c, p) => family.exportChild(c, p['id']),
+  },
+  {
+    method: 'DELETE',
+    pattern: '/family/children/:id',
+    handler: (c, p) => family.deleteChild(c, p['id']),
+    status: 204,
+  },
+  {
+    method: 'DELETE',
+    pattern: '/family/links/:linkId',
+    handler: (c, p) => family.deleteFamilyLink(c, p['linkId']),
+    status: 204,
+  },
+  {
+    method: 'POST',
+    pattern: '/family/invites',
+    handler: (c, _p, b) => family.createFamilyInvite(c, b as never),
+    status: 201,
+  },
+  {
+    method: 'POST',
+    pattern: '/family/invites/accept',
+    handler: (c, _p, b) => family.acceptFamilyInvite(c, b as never),
+  },
+  {
+    method: 'DELETE',
+    pattern: '/family/invites/:code',
+    handler: (c, p) => family.revokeFamilyInvite(c, p['code']),
+    status: 204,
+  },
+  {
+    method: 'GET',
+    pattern: '/family/children/:id/friends',
+    handler: (c, p) => family.listChildFriends(c, p['id']),
+  },
+  {
+    method: 'DELETE',
+    pattern: '/family/children/:id/friends/:fid',
+    handler: (c, p) => family.removeChildFriendship(c, p['id'], p['fid']),
+    status: 204,
+  },
+  {
+    method: 'DELETE',
+    pattern: '/family/children/:id/requests/:rid',
+    handler: (c, p) => family.cancelChildRequest(c, p['id'], p['rid']),
+    status: 204,
+  },
 
   { method: 'GET', pattern: '/family/household', handler: (c) => household.getHousehold(c) },
   { method: 'GET', pattern: '/family/inbox', handler: (c, p) => getFamilyInbox(c, p['cursor']) },
-  { method: 'POST', pattern: '/family/minors', handler: (c, _p, b) => household.createMinor(c, b), status: 201 },
-  { method: 'POST', pattern: '/family/minor-link-codes', handler: (c, _p, b) => household.createMinorLinkCode(c, b), status: 201 },
-  { method: 'POST', pattern: '/family/minor-link-requests', handler: (c, _p, b) => household.createMinorLinkRequest(c, b), status: 201 },
-  { method: 'POST', pattern: '/family/minor-link-requests/:id/approve', handler: (c, p, b) => household.approveMinorLinkRequest(c, p['id'], b) },
-  { method: 'POST', pattern: '/family/minor-link-requests/:id/accept', handler: (c, p, b) => household.acceptMinorLinkRequest(c, p['id'], b) },
-  { method: 'POST', pattern: '/family/additional-responsible-invitations', handler: (c, _p, b) => household.inviteAdditionalResponsible(c, b), status: 201 },
-  { method: 'POST', pattern: '/family/additional-responsible-invitations/:id/accept', handler: (c, p, b) => household.acceptAdditionalResponsible(c, p['id'], b) },
-  { method: 'PUT', pattern: '/family/additional-responsible/scope', handler: (c, _p, b) => household.replaceAdditionalScope(c, b) },
-  { method: 'DELETE', pattern: '/family/additional-responsible', handler: (c, _p, b) => household.revokeAdditionalResponsible(c, b) },
-  { method: 'POST', pattern: '/family/transfer-primary-responsibility', handler: (c, _p, b) => household.transferPrimaryResponsibility(c, b) },
+  {
+    method: 'POST',
+    pattern: '/family/minors',
+    handler: (c, _p, b) => household.createMinor(c, b),
+    status: 201,
+  },
+  {
+    method: 'POST',
+    pattern: '/family/minor-link-codes',
+    handler: (c, _p, b) => household.createMinorLinkCode(c, b),
+    status: 201,
+  },
+  {
+    method: 'POST',
+    pattern: '/family/minor-link-requests',
+    handler: (c, _p, b) => household.createMinorLinkRequest(c, b),
+    status: 201,
+  },
+  {
+    method: 'POST',
+    pattern: '/family/minor-link-requests/:id/approve',
+    handler: (c, p, b) => household.approveMinorLinkRequest(c, p['id'], b),
+  },
+  {
+    method: 'POST',
+    pattern: '/family/minor-link-requests/:id/accept',
+    handler: (c, p, b) => household.acceptMinorLinkRequest(c, p['id'], b),
+  },
+  {
+    method: 'POST',
+    pattern: '/family/additional-responsible-invitations',
+    handler: (c, _p, b) => household.inviteAdditionalResponsible(c, b),
+    status: 201,
+  },
+  {
+    method: 'POST',
+    pattern: '/family/additional-responsible-invitations/:id/accept',
+    handler: (c, p, b) => household.acceptAdditionalResponsible(c, p['id'], b),
+  },
+  {
+    method: 'PUT',
+    pattern: '/family/additional-responsible/scope',
+    handler: (c, _p, b) => household.replaceAdditionalScope(c, b),
+  },
+  {
+    method: 'DELETE',
+    pattern: '/family/additional-responsible',
+    handler: (c, _p, b) => household.revokeAdditionalResponsible(c, b),
+  },
+  {
+    method: 'POST',
+    pattern: '/family/transfer-primary-responsibility',
+    handler: (c, _p, b) => household.transferPrimaryResponsibility(c, b),
+  },
 
   { method: 'GET', pattern: '/friends', handler: (c) => friends.getFriends(c) },
   { method: 'GET', pattern: '/friends/code', handler: (c) => friends.getFriendCode(c) },
   { method: 'POST', pattern: '/friends/code/rotate', handler: (c) => friends.rotateFriendCode(c) },
-  { method: 'POST', pattern: '/friends/requests', handler: (c, _p, b) => friends.createFriendRequest(c, b as never), status: 201 },
-  { method: 'POST', pattern: '/friends/requests/:id/accept', handler: (c, p) => friends.acceptFriendRequest(c, p['id']) },
-  { method: 'POST', pattern: '/friends/requests/:id/decline', handler: (c, p) => friends.declineFriendRequest(c, p['id']), status: 204 },
-  { method: 'DELETE', pattern: '/friends/requests/:id', handler: (c, p) => friends.cancelFriendRequest(c, p['id']), status: 204 },
-  { method: 'DELETE', pattern: '/friends/:friendshipId', handler: (c, p) => friends.removeFriend(c, p['friendshipId']), status: 204 },
+  {
+    method: 'POST',
+    pattern: '/friends/requests',
+    handler: (c, _p, b) => friends.createFriendRequest(c, b as never),
+    status: 201,
+  },
+  {
+    method: 'POST',
+    pattern: '/friends/requests/:id/accept',
+    handler: (c, p) => friends.acceptFriendRequest(c, p['id']),
+  },
+  {
+    method: 'POST',
+    pattern: '/friends/requests/:id/decline',
+    handler: (c, p) => friends.declineFriendRequest(c, p['id']),
+    status: 204,
+  },
+  {
+    method: 'DELETE',
+    pattern: '/friends/requests/:id',
+    handler: (c, p) => friends.cancelFriendRequest(c, p['id']),
+    status: 204,
+  },
+  {
+    method: 'DELETE',
+    pattern: '/friends/:friendshipId',
+    handler: (c, p) => friends.removeFriend(c, p['friendshipId']),
+    status: 204,
+  },
 
-  { method: 'POST', pattern: '/social/adult-friend-requests', handler: (c, _p, b) => social.createAdultFriendRequest(c, b as never), status: 201 },
-  { method: 'POST', pattern: '/social/adult-friend-requests/:id/accept', handler: (c, p) => social.acceptAdultFriendRequest(c, p['id']) },
-  { method: 'DELETE', pattern: '/social/friendships/:friendshipId', handler: (c, p) => social.removeSocialFriendship(c, p['friendshipId']), status: 204 },
-  { method: 'POST', pattern: '/social/minor-invite-codes', handler: (c, _p, b) => social.mintMinorInviteCode(c, b as never), status: 201 },
-  { method: 'POST', pattern: '/social/minor-friend-requests', handler: (c, _p, b) => social.createMinorFriendRequest(c, b as never), status: 201 },
-  { method: 'GET', pattern: '/social/minor-friend-requests/:minorId', handler: (c, p) => social.getMinorFriendRequests(c, p['minorId']) },
-  { method: 'POST', pattern: '/social/minor-friend-requests/:id/minor-accept', handler: (c, p, b) => social.recordMinorAcceptance(c, p['id'], b as never) },
-  { method: 'POST', pattern: '/social/minor-friend-requests/:id/responsible-approve', handler: (c, p, b) => social.recordResponsibleApproval(c, p['id'], b as never) },
-  { method: 'POST', pattern: '/social/minor-friend-requests/:id/reject', handler: (c, p, b) => social.rejectMinorFriendRequest(c, p['id'], b as never), status: 204 },
-  { method: 'DELETE', pattern: '/social/minor-friendships/:friendshipId', handler: (c, p) => social.revokeMinorFriendship(c, p['friendshipId']), status: 204 },
+  {
+    method: 'POST',
+    pattern: '/social/adult-friend-requests',
+    handler: (c, _p, b) => social.createAdultFriendRequest(c, b as never),
+    status: 201,
+  },
+  {
+    method: 'POST',
+    pattern: '/social/adult-friend-requests/:id/accept',
+    handler: (c, p) => social.acceptAdultFriendRequest(c, p['id']),
+  },
+  {
+    method: 'DELETE',
+    pattern: '/social/friendships/:friendshipId',
+    handler: (c, p) => social.removeSocialFriendship(c, p['friendshipId']),
+    status: 204,
+  },
+  {
+    method: 'POST',
+    pattern: '/social/minor-invite-codes',
+    handler: (c, _p, b) => social.mintMinorInviteCode(c, b as never),
+    status: 201,
+  },
+  {
+    method: 'POST',
+    pattern: '/social/minor-friend-requests',
+    handler: (c, _p, b) => social.createMinorFriendRequest(c, b as never),
+    status: 201,
+  },
+  {
+    method: 'GET',
+    pattern: '/social/minor-friend-requests/:minorId',
+    handler: (c, p) => social.getMinorFriendRequests(c, p['minorId']),
+  },
+  {
+    method: 'POST',
+    pattern: '/social/minor-friend-requests/:id/minor-accept',
+    handler: (c, p, b) => social.recordMinorAcceptance(c, p['id'], b as never),
+  },
+  {
+    method: 'POST',
+    pattern: '/social/minor-friend-requests/:id/responsible-approve',
+    handler: (c, p, b) => social.recordResponsibleApproval(c, p['id'], b as never),
+  },
+  {
+    method: 'POST',
+    pattern: '/social/minor-friend-requests/:id/reject',
+    handler: (c, p, b) => social.rejectMinorFriendRequest(c, p['id'], b as never),
+    status: 204,
+  },
+  {
+    method: 'DELETE',
+    pattern: '/social/minor-friendships/:friendshipId',
+    handler: (c, p) => social.revokeMinorFriendship(c, p['friendshipId']),
+    status: 204,
+  },
 
   { method: 'GET', pattern: '/users/:id/forest', handler: (c, p) => forests.getForest(c, p['id']) },
-  { method: 'GET', pattern: '/sync/changes', handler: (c, p) => sync.getSyncChanges(c, p['cursor']) },
+  {
+    method: 'GET',
+    pattern: '/sync/changes',
+    handler: (c, p) => sync.getSyncChanges(c, p['cursor']),
+  },
   { method: 'POST', pattern: '/sync/push', handler: (c, _p, b) => sync.pushSync(c, b as never) },
-  { method: 'POST', pattern: '/users/:id/sync/push', handler: (c, p, b) => sync.pushSyncFor(c, p['id'], b as never) },
+  {
+    method: 'POST',
+    pattern: '/users/:id/sync/push',
+    handler: (c, p, b) => sync.pushSyncFor(c, p['id'], b as never),
+  },
 ];
 
 export function matchRoute(
@@ -118,33 +332,32 @@ let deps: Deps | null = null;
 
 type RouterEvent = APIGatewayProxyEventV2 | APIGatewayProxyEventV2WithJWTAuthorizer;
 
-export function authTimeMillisFromClaims(
-  claims: Record<string, unknown>,
-): number | undefined {
+export function authTimeMillisFromClaims(claims: Record<string, unknown>): number | undefined {
   const raw = claims['auth_time'];
-  const seconds = typeof raw === 'number'
-    ? raw
-    : typeof raw === 'string' && /^\d+$/.test(raw)
-      ? Number(raw)
-      : Number.NaN;
+  const seconds =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && /^\d+$/.test(raw)
+        ? Number(raw)
+        : Number.NaN;
   if (!Number.isSafeInteger(seconds) || seconds <= 0 || seconds > Number.MAX_SAFE_INTEGER / 1_000) {
     return undefined;
   }
   return seconds * 1_000;
 }
 
-export async function handleEvent(
-  event: RouterEvent,
-  injected?: Deps,
-): Promise<HttpResponse> {
+export function emailVerifiedFromClaims(claims: Record<string, unknown>): boolean {
+  return claims['email_verified'] === true || claims['email_verified'] === 'true';
+}
+
+export async function handleEvent(event: RouterEvent, injected?: Deps): Promise<HttpResponse> {
   try {
     const method = event.requestContext.http.method.toUpperCase();
     if (method === 'OPTIONS') return { statusCode: 204, headers: {}, body: '' };
 
     const d = injected ?? (deps ??= realDeps());
-    const claims = 'authorizer' in event.requestContext
-      ? event.requestContext.authorizer.jwt.claims
-      : undefined;
+    const claims =
+      'authorizer' in event.requestContext ? event.requestContext.authorizer.jwt.claims : undefined;
     const sub = claims?.['sub'];
     if (typeof sub !== 'string' || !sub) throw new ApiError('UNAUTHENTICATED');
 
@@ -156,11 +369,23 @@ export async function handleEvent(
       d,
       sub,
       authTimeMillisFromClaims((claims ?? {}) as Record<string, unknown>),
+      emailVerifiedFromClaims((claims ?? {}) as Record<string, unknown>),
     );
+    if (
+      ctx.caller.privacyMode === 'adolescent_private' &&
+      /^\/(?:family|social|friends)(?:\/|$)/.test(found.route.pattern)
+    )
+      throw new ApiError('FORBIDDEN');
+    if (!found.route.pattern.startsWith('/privacy/') && found.route.pattern !== '/me') {
+      await privacy.requireAdultAdmission(ctx);
+    }
     await requireFamilyRollout(ctx, method, found.route.pattern);
     // PATH params spread LAST (0.0.115 S1): a crafted `?userId=` used to
     // shadow the path's own `{userId}` before the handler ever saw it.
-    const params = { ...(event.queryStringParameters ?? {}), ...found.params } as Record<string, string>;
+    const params = { ...(event.queryStringParameters ?? {}), ...found.params } as Record<
+      string,
+      string
+    >;
     const result = await found.route.handler(ctx, params, parseJsonBody(event.body));
     return ok(result, found.route.status ?? 200);
   } catch (error) {
@@ -168,7 +393,6 @@ export async function handleEvent(
   }
 }
 
-export const handler = instrumentHandler(
-  'router',
-  (event: RouterEvent, _context?: Context) => handleEvent(event),
+export const handler = instrumentHandler('router', (event: RouterEvent, _context?: Context) =>
+  handleEvent(event),
 );
