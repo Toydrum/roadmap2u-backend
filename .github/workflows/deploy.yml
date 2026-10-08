@@ -24,13 +24,13 @@ on:
         required: false
         type: choice
         default: keep
-        options: [keep, off, enforce]
+        options: [keep, 'off', enforce]
       private_adolescent_mode:
         description: Keep current private adolescent mode, or explicitly activate/deactivate it
         required: false
         type: choice
         default: keep
-        options: [keep, off, enforce]
+        options: [keep, 'off', enforce]
 
 permissions:
   contents: read
