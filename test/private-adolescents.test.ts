@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { marshall } from '@aws-sdk/util-dynamodb';
 import {
   DynamoDBDocumentClient,
   GetCommand,
@@ -170,6 +171,36 @@ const acceptance = (id: string): PrivacyConsentCommand => ({
   understandsPrivacy: true,
 });
 describe('private adolescent admission', () => {
+  it.each(['account_attestation', 'operator_verified', 'legacy_operator_verified'] as const)(
+    'serializes a complete authorization condition for %s acceptance',
+    async (method) => {
+      const invite = await invitation();
+      if (method !== 'account_attestation') authorize(invite.invitationId);
+      const stored = rows.get(`privacy/ADOLESCENT_INVITE#${invite.invitationId}/STATE`);
+      if (method === 'legacy_operator_verified') delete stored.authorizationMethod;
+      await changePrivacyConsent(ctx('teen'), acceptance(invite.invitationId));
+      const command = ddb.commandCalls(TransactWriteCommand).at(-1)!.args[0];
+      const put = command.input.TransactItems!.find(
+        (item) =>
+          item.Put?.TableName === 'privacy' &&
+          item.Put.Item?.pk === `ADOLESCENT_INVITE#${invite.invitationId}`,
+      )!.Put!;
+      // Exercise the same AWS serialization option as the runtime. A document
+      // client mock accepts undefined values and does not validate expressions.
+      const values = marshall(put.ExpressionAttributeValues!, { removeUndefinedValues: true });
+      const required = [...new Set(put.ConditionExpression!.match(/:[A-Za-z0-9_]+/g))].sort();
+      expect(Object.keys(values).sort()).toEqual(required);
+      if (method === 'account_attestation') {
+        expect(stored.representationVerifiedAt).toBeUndefined();
+        expect(put.ConditionExpression).toMatch(/authorizationMethod\s*=/);
+        expect(put.ConditionExpression).toMatch(/attestation\s*=/);
+        expect(Object.values(put.ExpressionAttributeValues!)).toContainEqual(stored.attestation);
+      } else {
+        expect(put.ConditionExpression).toMatch(/representationVerifiedAt\s*=/);
+        expect(Object.values(put.ExpressionAttributeValues!)).toContain(NOW);
+      }
+    },
+  );
   it.each([true, 'true', false, 'false', undefined, 'True', 1])(
     'takes email confirmation only from verified authorizer claims: %s',
     async (emailVerified) => {

@@ -762,13 +762,18 @@ export async function acceptPrivateAdolescentInvitation(
         TableName: privacyTableName(ctx.deps),
         Item: acceptedInvite,
         ConditionExpression:
-          '#state = :authorized AND revision = :revision AND guardianId = :parent AND representationVerifiedAt = :verified',
+          '#state = :authorized AND revision = :revision AND guardianId = :parent AND ' +
+          (invite.authorizationMethod === 'account_attestation'
+            ? 'authorizationMethod = :method AND attestation = :attestation'
+            : 'representationVerifiedAt = :verified'),
         ExpressionAttributeNames: { '#state': 'state' },
         ExpressionAttributeValues: {
           ':authorized': 'authorized',
           ':revision': invite.revision,
           ':parent': invite.guardianId,
-          ':verified': invite.representationVerifiedAt,
+          ...(invite.authorizationMethod === 'account_attestation'
+            ? { ':method': 'account_attestation', ':attestation': invite.attestation! }
+            : { ':verified': invite.representationVerifiedAt! }),
         },
       },
     },
