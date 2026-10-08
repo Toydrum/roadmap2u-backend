@@ -430,6 +430,59 @@ describe('GitHub OIDC bootstrap', () => {
     }
   });
 
+  it.each(['dev', 'test', 'prod'])(
+    'lets the %s backend deployer read only its four privacy function configurations',
+    (stage) => {
+      const resources = bootstrapTemplate().toJSON().Resources;
+      const [roleId] = Object.entries(resources).find(
+        ([, resource]: [string, any]) =>
+          resource.Type === 'AWS::IAM::Role' &&
+          resource.Properties.RoleName === `roadmap2u-${stage}-backend-deploy`,
+      ) as [string, any];
+      const policies = Object.values(resources).filter(
+        (resource: any) => resource.Type === 'AWS::IAM::Policy',
+      ) as any[];
+      const statements = policies
+        .filter((policy) => policy.Properties.Roles.some((role: any) => role.Ref === roleId))
+        .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+      const reads = statements.filter((statement: any) => {
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        return actions.includes('lambda:GetFunctionConfiguration');
+      });
+
+      expect(reads).toHaveLength(1);
+      expect(reads[0].Effect).toBe('Allow');
+      expect(reads[0].Action).toBe('lambda:GetFunctionConfiguration');
+      expect(reads[0].Condition).toBeUndefined();
+      const expectedFunctions = [
+        'roadmap-router',
+        'roadmap-account-closure-privacy',
+        'roadmap-account-closure-request',
+        'roadmap-account-closure-worker',
+      ].map((name) => ({
+        'Fn::Join': [
+          '',
+          [
+            'arn:',
+            { Ref: 'AWS::Partition' },
+            `:lambda:us-east-1:${ACCOUNT}:function:${name}-${stage}`,
+          ],
+        ],
+      }));
+      expect(reads[0].Resource).toEqual(expectedFunctions);
+      const lambdaActions = statements.flatMap((statement: any) =>
+        (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).filter(
+          (action: string) => action.startsWith('lambda:') || action === '*',
+        ),
+      );
+      expect(lambdaActions).toEqual(['lambda:GetFunctionConfiguration']);
+      const otherPolicies = policies.filter(
+        (policy) => !policy.Properties.Roles.some((role: any) => role.Ref === roleId),
+      );
+      expect(JSON.stringify(otherPolicies)).not.toContain(`ReadPrivacyFunctionConfiguration${stage}`);
+    },
+  );
+
   it('lets only the backend OIDC role inspect its topic and exercise its synthetic alarm', () => {
     const template = bootstrapTemplate().toJSON();
     const roles = Object.entries(template.Resources).filter(
