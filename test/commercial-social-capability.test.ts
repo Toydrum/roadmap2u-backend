@@ -176,8 +176,11 @@ describe('commercial social capability', () => {
     async (action) => {
       const caller = profile('minor-a', { accountType: 'minor' });
       const coverage = createCoverageAssignment({
-        householdId: 'household-a', accountId: caller.userId, seatType: 'minor',
-        paidThrough: NOW, now: NOW - 1_000,
+        householdId: 'household-a',
+        accountId: caller.userId,
+        seatType: 'minor',
+        paidThrough: NOW,
+        now: NOW - 1_000,
       });
       const resolved = deriveAccessItem(caller.userId, NOW, undefined, [], { coverage });
       const items = [flags('off', 'enforce'), coverage, resolved];
@@ -186,9 +189,15 @@ describe('commercial social capability', () => {
       }));
       ddbMock.on(QueryCommand).resolves({ Items: [] });
       const emit = vi.fn();
-      await expect(resolveSocialCapability(ctxOf(caller), action, [caller.userId], emit))
-        .rejects.toMatchObject({ code: 'CAPABILITY_REQUIRED' });
-      expect(emit).toHaveBeenCalledWith({ kind: 'social', action, mode: 'enforce', wouldDeny: true });
+      await expect(
+        resolveSocialCapability(ctxOf(caller), action, [caller.userId], emit),
+      ).rejects.toMatchObject({ code: 'CAPABILITY_REQUIRED' });
+      expect(emit).toHaveBeenCalledWith({
+        kind: 'social',
+        action,
+        mode: 'enforce',
+        wouldDeny: true,
+      });
       expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
     },
   );
@@ -196,23 +205,51 @@ describe('commercial social capability', () => {
   it.each(['off', 'observe', 'enforce'] as const)(
     'billing %s evaluates the exact account, including alternate sources',
     async (mode) => {
-      for (const source of ['none', 'minor', 'primary_responsible', 'additional_responsible', 'individual', 'sponsored'] as const) {
+      for (const source of [
+        'none',
+        'minor',
+        'primary_responsible',
+        'additional_responsible',
+        'individual',
+        'sponsored',
+      ] as const) {
         const caller = profile('account-a');
         const coverage = createCoverageAssignment({
-          householdId: 'household-a', accountId: caller.userId,
-          seatType: source === 'primary_responsible' || source === 'additional_responsible' ? source : 'minor',
+          householdId: 'household-a',
+          accountId: caller.userId,
+          seatType:
+            source === 'primary_responsible' || source === 'additional_responsible'
+              ? source
+              : 'minor',
           paidThrough: ['none', 'individual', 'sponsored'].includes(source) ? NOW : NOW + 60_000,
           now: NOW - 1_000,
         });
-        const subscription = source === 'individual' ? {
-          pk: K.user(caller.userId), sk: 'SUBSCRIPTION#INDIVIDUAL' as const,
-          entityType: 'SubscriptionSource' as const, ownerSub: caller.userId,
-          sourceId: 'paid-a', state: 'active' as const, paidThrough: NOW + 60_000,
-          graceUntil: null, revision: 1, updatedAt: NOW - 1,
-        } : undefined;
+        const subscription =
+          source === 'individual'
+            ? {
+                pk: K.user(caller.userId),
+                sk: 'SUBSCRIPTION#INDIVIDUAL' as const,
+                entityType: 'SubscriptionSource' as const,
+                ownerSub: caller.userId,
+                sourceId: 'paid-a',
+                state: 'active' as const,
+                paidThrough: NOW + 60_000,
+                graceUntil: null,
+                revision: 1,
+                updatedAt: NOW - 1,
+              }
+            : undefined;
         const grants = source === 'sponsored' ? [premiumGrant(caller.userId)] : [];
-        const resolved = deriveAccessItem(caller.userId, NOW, undefined, grants, { coverage, subscription });
-        const items = [flags('off', mode), coverage, resolved, ...(subscription ? [subscription] : [])];
+        const resolved = deriveAccessItem(caller.userId, NOW, undefined, grants, {
+          coverage,
+          subscription,
+        });
+        const items = [
+          flags('off', mode),
+          coverage,
+          resolved,
+          ...(subscription ? [subscription] : []),
+        ];
         ddbMock.on(GetCommand).callsFake(({ Key }) => ({
           Item: items.find((item) => item.pk === Key.pk && item.sk === Key.sk),
         }));
@@ -222,9 +259,16 @@ describe('commercial social capability', () => {
         if (mode === 'enforce' && source === 'none') {
           await expect(resolution).rejects.toMatchObject({ code: 'CAPABILITY_REQUIRED' });
         } else {
-          expect((await resolution).accesses.get(caller.userId)?.capabilities.social).toBe(source !== 'none');
+          expect((await resolution).accesses.get(caller.userId)?.capabilities.social).toBe(
+            source !== 'none',
+          );
         }
-        expect(emit).toHaveBeenCalledWith({ kind: 'social', action: 'accept', mode, wouldDeny: source === 'none' });
+        expect(emit).toHaveBeenCalledWith({
+          kind: 'social',
+          action: 'accept',
+          mode,
+          wouldDeny: source === 'none',
+        });
       }
     },
   );
@@ -467,7 +511,10 @@ describe('commercial social capability', () => {
     ddbMock.on(GetCommand).callsFake((input) => ({ Item: items.get(JSON.stringify(input.Key)) }));
     ddbMock.on(QueryCommand).callsFake((input) => {
       const prefix = input.ExpressionAttributeValues?.[':prefix'];
-      if (prefix === 'GRANT#' && input.ExpressionAttributeValues?.[':pk'] === K.user(caller.userId)) {
+      if (
+        prefix === 'GRANT#' &&
+        input.ExpressionAttributeValues?.[':pk'] === K.user(caller.userId)
+      ) {
         return { Items: [] };
       }
       return { Items: [] };
@@ -493,9 +540,8 @@ describe('commercial social capability', () => {
       if (key.pk === K.profile(target.userId).pk && key.sk === 'PROFILE') {
         targetProfileReads += 1;
         return {
-          Item: targetProfileReads === 1
-            ? target
-            : profile(target.userId, { socialEnabled: false }),
+          Item:
+            targetProfileReads === 1 ? target : profile(target.userId, { socialEnabled: false }),
         };
       }
       if (key.pk === K.profile(caller.userId).pk && key.sk === 'PROFILE') {
@@ -508,7 +554,8 @@ describe('commercial social capability', () => {
       return {};
     });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
-    ddbMock.on(TransactWriteCommand)
+    ddbMock
+      .on(TransactWriteCommand)
       .resolvesOnce({})
       .rejectsOnce(transactionCanceled())
       .resolves({});
@@ -543,7 +590,8 @@ describe('commercial social capability', () => {
       return {};
     });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
-    ddbMock.on(TransactWriteCommand)
+    ddbMock
+      .on(TransactWriteCommand)
       .resolvesOnce({})
       .rejectsOnce(transactionCanceled())
       .resolves({});
@@ -552,12 +600,17 @@ describe('commercial social capability', () => {
 
     const transactions = ddbMock.commandCalls(TransactWriteCommand);
     expect(transactions).toHaveLength(3);
-    const revisions = transactions.slice(1).map((call) =>
-      (call.args[0].input.TransactItems ?? [])
-        .filter((item) => item.ConditionCheck?.Key?.['sk'] === 'ACCESS')
-        .map((item) => item.ConditionCheck?.ExpressionAttributeValues?.[':accessRevision']),
-    );
-    expect(revisions).toEqual([[1, 1], [2, 2]]);
+    const revisions = transactions
+      .slice(1)
+      .map((call) =>
+        (call.args[0].input.TransactItems ?? [])
+          .filter((item) => item.ConditionCheck?.Key?.['sk'] === 'ACCESS')
+          .map((item) => item.ConditionCheck?.ExpressionAttributeValues?.[':accessRevision']),
+      );
+    expect(revisions).toEqual([
+      [1, 1],
+      [2, 2],
+    ]);
   });
 
   it('declines without consulting social capability or socialEnabled', async () => {
@@ -584,9 +637,9 @@ describe('commercial social capability', () => {
     ddbMock.on(TransactWriteCommand).resolves({});
 
     await expect(cancelFriendRequest(ctxOf(caller), request.requestId)).resolves.toBeUndefined();
-    const reads = ddbMock.commandCalls(GetCommand).map(
-      (call) => call.args[0].input.Key as { pk: string; sk: string },
-    );
+    const reads = ddbMock
+      .commandCalls(GetCommand)
+      .map((call) => call.args[0].input.Key as { pk: string; sk: string });
     expect(reads).not.toContainEqual({ pk: 'COMMERCIAL#CONFIG', sk: 'FLAGS' });
     expect(reads.some((key) => key.sk === 'ACCESS')).toBe(false);
   });
@@ -602,6 +655,7 @@ describe('commercial social capability', () => {
 
   it('lists existing social state without consulting capability or socialEnabled', async () => {
     const caller = profile('rocio', { socialEnabled: false });
+    ddbMock.on(GetCommand).resolves({ Item: caller });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
 
     await expect(getFriends(ctxOf(caller))).resolves.toEqual({
@@ -609,7 +663,9 @@ describe('commercial social capability', () => {
       incoming: [],
       outgoing: [],
     });
-    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(GetCommand).map((call) => call.args[0].input.Key)).toEqual([
+      K.profile(caller.userId),
+    ]);
   });
 
   it('gates a friend forest visit with the viewer capability only', async () => {
@@ -694,9 +750,11 @@ describe('commercial social capability', () => {
     await expect(getForest(ctxOf(caller), owner.userId)).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
-    const recordQueries = ddbMock.commandCalls(QueryCommand).filter((call) =>
-      String(call.args[0].input.ExpressionAttributeValues?.[':prefix']).startsWith('REC#'),
-    );
+    const recordQueries = ddbMock
+      .commandCalls(QueryCommand)
+      .filter((call) =>
+        String(call.args[0].input.ExpressionAttributeValues?.[':prefix']).startsWith('REC#'),
+      );
     expect(recordQueries).toHaveLength(0);
   });
 
@@ -725,9 +783,11 @@ describe('commercial social capability', () => {
     await expect(getForest(ctxOf(caller), owner.userId)).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
-    const recordQueries = ddbMock.commandCalls(QueryCommand).filter((call) =>
-      String(call.args[0].input.ExpressionAttributeValues?.[':prefix']).startsWith('REC#'),
-    );
+    const recordQueries = ddbMock
+      .commandCalls(QueryCommand)
+      .filter((call) =>
+        String(call.args[0].input.ExpressionAttributeValues?.[':prefix']).startsWith('REC#'),
+      );
     expect(recordQueries).toHaveLength(0);
   });
 });

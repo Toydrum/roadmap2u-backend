@@ -65,6 +65,8 @@ describe('stage backend infrastructure', () => {
         AttributeDefinitions: [
           { AttributeName: 'pk', AttributeType: 'S' },
           { AttributeName: 'sk', AttributeType: 'S' },
+          { AttributeName: 'gsi1pk', AttributeType: 'S' },
+          { AttributeName: 'gsi1sk', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'pk', KeyType: 'HASH' },
@@ -176,6 +178,7 @@ describe('stage backend infrastructure', () => {
           `/aws/lambda/roadmap-account-closure-reconciler-${stage}`,
           `/aws/lambda/roadmap-account-closure-request-${stage}`,
           `/aws/lambda/roadmap-account-closure-worker-${stage}`,
+          `/aws/lambda/roadmap-account-closure-privacy-${stage}`,
           `/aws/lambda/roadmap-catalog-${stage}`,
           `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
           `/aws/lambda/roadmap-commercial-inventory-executor-${stage}`,
@@ -223,6 +226,7 @@ describe('stage backend infrastructure', () => {
           `roadmap-account-closure-reconciler-${stage}`,
           `roadmap-account-closure-request-${stage}`,
           `roadmap-account-closure-worker-${stage}`,
+          `roadmap-account-closure-privacy-${stage}`,
           `roadmap-catalog-${stage}`,
           `roadmap-commercial-config-broker-${stage}`,
           `roadmap-commercial-inventory-executor-${stage}`,

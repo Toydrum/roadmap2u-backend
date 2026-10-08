@@ -21,9 +21,13 @@ import {
 } from '../family/forest-authority';
 import { accountClosureKey } from '../account-closure';
 import {
-  createDynamoAccessResolver,
-  readStableAccessSnapshot,
-} from '../access-reader';
+  requireCloudConsent,
+  recheckCloudConsent,
+  cloudConsentConditions,
+  assertCloudRecords,
+  type CloudConsentGuard,
+} from '../privacy/consent';
+import { createDynamoAccessResolver, readStableAccessSnapshot } from '../access-reader';
 import { CommercialFlagsResolver } from '../commercial/flags';
 import { inspectHeartTransition, type HeartInspection } from '../commercial/heart';
 import {
@@ -37,18 +41,8 @@ import {
   evaluateTreeUsageMutation,
   type UsageMutationDelta,
 } from '../commercial/usage';
-import {
-  GetCommand,
-  K,
-  ProfileItem,
-  QueryCommand,
-  RecordItem,
-  TransactWriteCommand,
-} from '../db';
-import {
-  emitCommercialMetric,
-  type CommercialMetricStage,
-} from '../observability';
+import { GetCommand, K, ProfileItem, QueryCommand, RecordItem, TransactWriteCommand } from '../db';
+import { emitCommercialMetric, type CommercialMetricStage } from '../observability';
 
 const STORES: ReadonlySet<string> = new Set<SyncStore>([
   'trees',
@@ -135,7 +129,8 @@ async function recheckWriteGuards(
   expectedAuthority?: ForestWriteAuthority,
 ): Promise<void> {
   if (ownerId !== ctx.callerId) {
-    if (!expectedAuthority || expectedAuthority.minorId !== ownerId) throw new ApiError('NOT_FOUND');
+    if (!expectedAuthority || expectedAuthority.minorId !== ownerId)
+      throw new ApiError('NOT_FOUND');
     return recheckForestWriteAuthority(ctx, expectedAuthority);
   }
   const caller = await requireWritableOwner(ctx, ctx.callerId);
@@ -214,17 +209,11 @@ function canonicalJson(value: unknown): string {
     .join(',')}}`;
 }
 
-function mutationHash(
-  ownerId: string,
-  group: ParsedMutationGroup,
-  legacyClient: boolean,
-): string {
+function mutationHash(ownerId: string, group: ParsedMutationGroup, legacyClient: boolean): string {
   return createHash('sha256')
     .update(
       canonicalJson({
-        domain: legacyClient
-          ? 'roadmap2u.sync-mutation.v1-compat'
-          : 'roadmap2u.sync-mutation.v2',
+        domain: legacyClient ? 'roadmap2u.sync-mutation.v1-compat' : 'roadmap2u.sync-mutation.v2',
         ownerId,
         id: group.id,
         expectedCount: group.expectedCount,
@@ -324,9 +313,7 @@ function markerPut(tableName: string, request: CommercialGroupRequest): Transact
   };
 }
 
-function mutationMarkerFormat(
-  marker: MutationMarkerItem,
-): 'pre-ttl' | 'retained' | null {
+function mutationMarkerFormat(marker: MutationMarkerItem): 'pre-ttl' | 'retained' | null {
   // Previously deployed pre-TTL writers may have produced six-field markers.
   // They remain retry receipts only; every new write uses the retained form.
   if (hasExactKeys(marker, PRE_TTL_MUTATION_MARKER_KEYS)) return 'pre-ttl';
@@ -337,10 +324,7 @@ function mutationMarkerFormat(
     : null;
 }
 
-function isCanonicalMarker(
-  marker: MutationMarkerItem,
-  request: CommercialGroupRequest,
-): boolean {
+function isCanonicalMarker(marker: MutationMarkerItem, request: CommercialGroupRequest): boolean {
   return (
     mutationMarkerFormat(marker) !== null &&
     marker.pk === K.user(request.ownerSub) &&
@@ -360,6 +344,7 @@ function recordPut(
   ownerId: string,
   entry: SyncRecord,
   syncedAt: number,
+  consent?: CloudConsentGuard,
 ): TransactItem {
   const record = validateRecord(entry);
   const item: RecordItem = {
@@ -372,6 +357,7 @@ function recordPut(
     rev: record.rev,
     updatedAt: record.updatedAt,
     syncedAt,
+    ...(consent ? { privacyRevision: consent.revision } : {}),
   };
   return {
     Put: {
@@ -395,10 +381,7 @@ function transactItemKey(item: TransactItem): string {
   return `${pk}\u0000${sk}`;
 }
 
-function assertMutationTransaction(
-  items: readonly TransactItem[],
-  guardianWrite: boolean,
-): void {
+function assertMutationTransaction(items: readonly TransactItem[], guardianWrite: boolean): void {
   // Two paid-source guards; supervised coverage shares a key with the scope guard.
   // Up to six Household v2 facts plus the responsible's profile and closure.
   const maximum = guardianWrite ? 55 : 48;
@@ -428,9 +411,7 @@ function commercialMetricStage(): CommercialMetricStage | undefined {
   if (explicit === 'dev' || explicit === 'test' || explicit === 'prod') return explicit;
   const functionName = process.env['AWS_LAMBDA_FUNCTION_NAME'];
   const inferred = /-(dev|test|prod)$/.exec(functionName ?? '')?.[1];
-  return inferred === 'dev' || inferred === 'test' || inferred === 'prod'
-    ? inferred
-    : undefined;
+  return inferred === 'dev' || inferred === 'test' || inferred === 'prod' ? inferred : undefined;
 }
 
 async function readFlags(ctx: Ctx) {
@@ -483,16 +464,17 @@ function isCanonicalTreeUsage(
 async function readCommercialGroupSnapshot(
   ctx: Ctx,
   request: CommercialGroupRequest,
+  consent?: CloudConsentGuard,
 ): Promise<CommercialMutationSnapshot> {
   const recordCache = new Map<string, Promise<RecordItem | undefined>>();
   const loadStored = (store: SyncStore, id: string): Promise<RecordItem | undefined> => {
     const ref = `${store}\u0000${id}`;
     let pending = recordCache.get(ref);
     if (!pending) {
-      pending = getStrong<RecordItem>(
-        ctx,
-        K.rec(request.ownerSub, store, id),
-      );
+      pending = getStrong<RecordItem>(ctx, K.rec(request.ownerSub, store, id)).then((item) => {
+        assertCloudRecords(consent, [item]);
+        return item;
+      });
       recordCache.set(ref, pending);
     }
     return pending;
@@ -514,10 +496,7 @@ async function readCommercialGroupSnapshot(
   const previous = new Map<string, RecordItem | undefined>();
   for (const entry of request.group.records) {
     const record = validateRecord(entry);
-    previous.set(
-      `${entry.store}\u0000${record.id}`,
-      await loadStored(entry.store, record.id),
-    );
+    previous.set(`${entry.store}\u0000${record.id}`, await loadStored(entry.store, record.id));
   }
 
   if (!request.legacyClient) {
@@ -573,10 +552,7 @@ async function readCommercialGroupSnapshot(
               ? (entry.record as TreeNode).treeId
               : `${entry.store}:${record.id}`;
         return {
-          ...neutralDelta(
-            treeId,
-            previous.get(`${entry.store}\u0000${record.id}`) === undefined,
-          ),
+          ...neutralDelta(treeId, previous.get(`${entry.store}\u0000${record.id}`) === undefined),
           outcome: lwwOutcomes[index],
         };
       }),
@@ -613,10 +589,7 @@ async function readCommercialGroupSnapshot(
     );
   }
 
-  const treeContexts = new Map<
-    string,
-    { tree: Tree; previous?: Tree; heart: HeartInspection }
-  >();
+  const treeContexts = new Map<string, { tree: Tree; previous?: Tree; heart: HeartInspection }>();
   for (const treeId of affectedTreeIds) {
     const tree = await effectiveRecord<Tree>('trees', treeId);
     if (!tree) throw new ApiError('CONFLICT', 'owning tree disappeared');
@@ -635,9 +608,7 @@ async function readCommercialGroupSnapshot(
       typeof tree.heartId === 'string'
         ? await effectiveRecord<TreeNode>('nodes', tree.heartId)
         : undefined;
-    const nodes = heartNode
-      ? [{ ownerSub: request.ownerSub, record: heartNode }]
-      : [];
+    const nodes = heartNode ? [{ ownerSub: request.ownerSub, record: heartNode }] : [];
     const heart = previousTree
       ? inspectHeartTransition({
           kind: 'update',
@@ -715,6 +686,7 @@ async function readCommercialGroupSnapshot(
     usageByTree,
     migration,
     deltas,
+    ...(consent?.responsiblePremium ? { cloudSyncAuthority: 'responsible_premium' as const } : {}),
   };
 }
 
@@ -725,6 +697,7 @@ async function applyV2Group(
   expectedAuthority?: ForestWriteAuthority,
   legacyClient = false,
 ): Promise<SyncPushResponse> {
+  const consent = await requireCloudConsent(ctx, ownerId);
   const request: CommercialGroupRequest = {
     ownerSub: ownerId,
     group,
@@ -732,15 +705,13 @@ async function applyV2Group(
     syncedAt: ctx.deps.now(),
     legacyClient,
   };
-  const existingMarker = await getStrong<MutationMarkerItem>(
-    ctx,
-    mutationKey(ownerId, group.id),
-  );
+  const existingMarker = await getStrong<MutationMarkerItem>(ctx, mutationKey(ownerId, group.id));
   if (existingMarker) {
     if (!isCanonicalMarker(existingMarker, request)) {
       throw new ApiError('MUTATION_GROUP_INVALID');
     }
     await recheckWriteGuards(ctx, ownerId, expectedAuthority);
+    await recheckCloudConsent(ctx, consent);
     return {
       applied: group.records.map((entry) => validateRecord(entry).id),
       rejected: [],
@@ -755,10 +726,10 @@ async function applyV2Group(
   const writer = new CommercialMutationWriter<CommercialGroupRequest>({
     tableName: ctx.deps.table,
     now: ctx.deps.now,
-    readSnapshot: (current) => readCommercialGroupSnapshot(ctx, current),
-    resolveFreshAccess: async (ownerSub) =>
-      (await accessResolver.resolveFresh(ownerSub)).access,
+    readSnapshot: (current) => readCommercialGroupSnapshot(ctx, current, consent),
+    resolveFreshAccess: async (ownerSub) => (await accessResolver.resolveFresh(ownerSub)).access,
     commit: async (current, proposal: MutationCommitProposal) => {
+      await recheckCloudConsent(ctx, consent);
       const guardianWrite = current.ownerSub !== ctx.callerId;
       if (guardianWrite && (!expectedAuthority || expectedAuthority.minorId !== current.ownerSub)) {
         throw new ApiError('NOT_FOUND');
@@ -766,13 +737,15 @@ async function applyV2Group(
       const baseItems: TransactItem[] = [
         markerPut(ctx.deps.table, current),
         ...current.group.records.map((entry) =>
-          recordPut(ctx.deps.table, current.ownerSub, entry, current.syncedAt),
+          recordPut(ctx.deps.table, current.ownerSub, entry, current.syncedAt, consent),
         ),
         ...proposal.items,
+        ...(consent ? cloudConsentConditions(ctx.deps, consent) : []),
       ];
-      const items = guardianWrite && expectedAuthority
-        ? withForestWriteAuthority(ctx, expectedAuthority, baseItems)
-        : baseItems;
+      const items =
+        guardianWrite && expectedAuthority
+          ? withForestWriteAuthority(ctx, expectedAuthority, baseItems)
+          : baseItems;
       assertMutationTransaction(items, guardianWrite);
       try {
         await ctx.deps.ddb.send(
@@ -782,6 +755,7 @@ async function applyV2Group(
         );
         return 'committed';
       } catch (error) {
+        await recheckCloudConsent(ctx, consent);
         const cancellation = classifyTransactionCancellation(error);
         if (!cancellation?.recheckGuards) throw error;
         const concurrentMarker = await getStrong<MutationMarkerItem>(
@@ -804,12 +778,14 @@ async function applyV2Group(
 
   const result = await writer.write(request);
   if (result.outcome === 'stale') {
+    await recheckCloudConsent(ctx, consent);
     const latestWinners = await Promise.all(
       group.records.map((entry) => {
         const record = validateRecord(entry);
         return getStrong<RecordItem>(ctx, K.rec(ownerId, entry.store, record.id));
       }),
     );
+    assertCloudRecords(consent, latestWinners);
     if (ownerId !== ctx.callerId) {
       await recheckWriteGuards(ctx, ownerId, expectedAuthority);
     }
@@ -830,6 +806,7 @@ async function applyV2Group(
         }
       }
     });
+    await recheckCloudConsent(ctx, consent);
     return {
       applied: [],
       rejected: group.records.map((entry) => ({
@@ -852,6 +829,7 @@ async function pushInto(
   req: SyncPushPayload,
   expectedAuthority?: ForestWriteAuthority,
 ): Promise<SyncPushResponse> {
+  const consent = await requireCloudConsent(ctx, ownerId);
   if (typeof req !== 'object' || req === null || Array.isArray(req)) {
     throw new ApiError('VALIDATION');
   }
@@ -914,7 +892,8 @@ async function pushInto(
     return response;
   }
   if (!Array.isArray(req.records)) throw new ApiError('VALIDATION');
-  if (req.records.length > LIMITS.syncPushMax) throw new ApiError('LIMIT_EXCEEDED', `max ${LIMITS.syncPushMax} records per push`);
+  if (req.records.length > LIMITS.syncPushMax)
+    throw new ApiError('LIMIT_EXCEEDED', `max ${LIMITS.syncPushMax} records per push`);
   if (req.records.length === 0) {
     await recheckWriteGuards(ctx, ownerId, expectedAuthority);
     return { applied: [], rejected: [], serverRecords: [] };
@@ -926,6 +905,7 @@ async function pushInto(
     heartPolicy: 'compatible',
     loadRecord: async (validatedOwnerId, store, id) => {
       const stored = await getStrong<RecordItem>(ctx, K.rec(validatedOwnerId, store, id));
+      assertCloudRecords(consent, [stored]);
       if (!stored) return undefined;
       return {
         owner: stored.owner,
@@ -973,6 +953,7 @@ export async function pushSyncFor(
 }
 
 export async function getSyncChanges(ctx: Ctx, cursor?: string): Promise<SyncChangesResponse> {
+  const consent = await requireCloudConsent(ctx, ctx.callerId);
   const page = 200;
   const out = await ctx.deps.ddb.send(
     new QueryCommand({
@@ -988,6 +969,8 @@ export async function getSyncChanges(ctx: Ctx, cursor?: string): Promise<SyncCha
     }),
   );
   const items = (out.Items ?? []) as RecordItem[];
+  assertCloudRecords(consent, items);
+  await recheckCloudConsent(ctx, consent);
   return {
     changes: items.map((i) => ({ store: i.store, record: i.record })),
     cursor: items.length ? items[items.length - 1].gsi2sk : (cursor ?? ''),

@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -8,7 +15,18 @@ const backendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const frontendRoot = resolve(
   process.env.ROADMAP2U_FRONTEND_PATH ?? join(backendRoot, '..', 'RoadMap2U'),
 );
-const contractFiles = ['api/contracts.ts', 'db/schema.ts', 'auth/auth-types.ts'];
+const contractFiles = [
+  'api/contracts.ts',
+  'db/schema.ts',
+  'auth/auth-types.ts',
+  'i18n/es.ts',
+  'i18n/en.ts',
+];
+const workingTree = process.argv.includes('--working-tree');
+if (process.argv.slice(2).some((argument) => argument !== '--working-tree'))
+  throw new Error('Unknown contract sync argument');
+if (workingTree && process.env.CI)
+  throw new Error('Working-tree contract copies are not allowed in CI');
 const contractSourceFiles = contractFiles.map((relativePath) =>
   join('src', 'app', 'core', relativePath),
 );
@@ -22,12 +40,12 @@ function runFrontendGit(args) {
 
 function committedFrontendSha() {
   const dirty = runFrontendGit(['diff', '--quiet', 'HEAD', '--', ...contractSourceFiles]);
-  if (dirty.status === 1) {
+  if (dirty.status === 1 && !workingTree) {
     throw new Error(
       'Frontend contracts have uncommitted changes; commit them before syncing an exact source lock',
     );
   }
-  if (dirty.status !== 0) {
+  if (dirty.status !== 0 && dirty.status !== 1) {
     throw new Error(`Unable to inspect frontend contracts: ${dirty.stderr.trim()}`);
   }
 
@@ -76,12 +94,20 @@ for (const { source, destination } of copies) {
   copyFileSync(source, destination);
 }
 
-const lockDestination = join(backendRoot, 'shared', 'contracts-source.json');
+const previewDestination = join(backendRoot, 'shared', 'contracts-working-tree.json');
+const lockDestination = workingTree
+  ? previewDestination
+  : join(backendRoot, 'shared', 'contracts-source.json');
 const lockContents = `${JSON.stringify(
   {
-    schemaVersion: 1,
-    repository: 'Toydrum/RoadMap2U',
-    commitSha: sourceSha,
+    ...(workingTree
+      ? {
+          schemaVersion: 1,
+          repository: 'Toydrum/RoadMap2U',
+          state: 'working_tree',
+          baseCommitSha: sourceSha,
+        }
+      : { schemaVersion: 1, repository: 'Toydrum/RoadMap2U', commitSha: sourceSha }),
     contractHash: contractHash(join(backendRoot, 'shared')),
   },
   null,
@@ -91,6 +117,7 @@ if (!existsSync(lockDestination) || readFileSync(lockDestination, 'utf8') !== lo
   changed.push(lockDestination.slice(backendRoot.length + 1));
 }
 writeFileSync(lockDestination, lockContents, 'utf8');
+if (!workingTree && existsSync(previewDestination)) unlinkSync(previewDestination);
 
 process.stdout.write(`Synced ${copies.length} contracts from ${frontendRoot}\n`);
 process.stdout.write(
@@ -98,4 +125,8 @@ process.stdout.write(
     ? `Updated:\n${changed.map((path) => `  ${path}`).join('\n')}\n`
     : 'No vendored contract changed.\n',
 );
-process.stdout.write('Run npm test before committing.\n');
+process.stdout.write(
+  workingTree
+    ? 'LOCAL COPY ONLY: commit frontend and rerun without --working-tree before publication.\n'
+    : 'Run npm test before committing.\n',
+);

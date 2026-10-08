@@ -22,8 +22,8 @@ function backend(stage: 'dev' | 'test' | 'prod' = 'dev'): Record<string, any> {
 }
 
 function resources(template: Record<string, any>, type: string): Array<[string, any]> {
-  return Object.entries(template.Resources).filter(([, resource]: [string, any]) =>
-    resource.Type === type,
+  return Object.entries(template.Resources).filter(
+    ([, resource]: [string, any]) => resource.Type === type,
   );
 }
 
@@ -62,8 +62,8 @@ describe('account closure infrastructure', () => {
       )![0];
       const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
 
-      const index = statements.find((statement) =>
-        statement.Sid === 'ReadAccountClosureRequestFamilyIndex',
+      const index = statements.find(
+        (statement) => statement.Sid === 'ReadAccountClosureRequestFamilyIndex',
       );
       expect(index).toMatchObject({
         Effect: 'Allow',
@@ -73,45 +73,64 @@ describe('account closure infrastructure', () => {
       expect(JSON.stringify(index?.Resource)).toContain('/index/gsi1');
       expect(JSON.stringify(index?.Resource)).not.toContain('/index/*');
 
-      expect(statements.find((statement) =>
-        statement.Sid === 'ReadAccountClosureRequestFamilyState',
-      )).toEqual({
+      expect(
+        statements.find((statement) => statement.Sid === 'ReadAccountClosureRequestFamilyState'),
+      ).toEqual({
         Sid: 'ReadAccountClosureRequestFamilyState',
-        Effect: 'Allow', Action: 'dynamodb:Query', Resource: tableArn,
-        Condition: { 'ForAllValues:StringLike': {
-          'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
-        } },
+        Effect: 'Allow',
+        Action: 'dynamodb:Query',
+        Resource: tableArn,
+        Condition: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
+          },
+        },
       });
-      expect(statements.find((statement) =>
-        statement.Sid === 'ReadAccountClosureRequestFamilyCoverage',
-      )).toEqual({
+      expect(
+        statements.find((statement) => statement.Sid === 'ReadAccountClosureRequestFamilyCoverage'),
+      ).toEqual({
         Sid: 'ReadAccountClosureRequestFamilyCoverage',
-        Effect: 'Allow', Action: 'dynamodb:BatchGetItem', Resource: tableArn,
+        Effect: 'Allow',
+        Action: 'dynamodb:BatchGetItem',
+        Resource: tableArn,
         Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
       });
-      expect(statements.find((statement) =>
-        statement.Sid === 'TransactOnlyAccountClosureRequestFamilyChecks',
-      )).toEqual({
+      expect(
+        statements.find(
+          (statement) => statement.Sid === 'TransactOnlyAccountClosureRequestFamilyChecks',
+        ),
+      ).toEqual({
         Sid: 'TransactOnlyAccountClosureRequestFamilyChecks',
-        Effect: 'Allow', Action: 'dynamodb:ConditionCheckItem', Resource: tableArn,
+        Effect: 'Allow',
+        Action: 'dynamodb:ConditionCheckItem',
+        Resource: tableArn,
         Condition: {
           'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'] },
           StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
         },
       });
 
-      const actions = statementActions(statements.filter((statement) => statement.Effect === 'Allow'));
-      for (const action of ['dynamodb:Scan', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem',
-        'cognito-idp:AdminDeleteUser', 'cognito-idp:AdminCreateUser']) {
+      const actions = statementActions(
+        statements.filter((statement) => statement.Effect === 'Allow'),
+      );
+      for (const action of [
+        'dynamodb:Scan',
+        'dynamodb:DeleteItem',
+        'dynamodb:BatchWriteItem',
+        'cognito-idp:AdminDeleteUser',
+        'cognito-idp:AdminCreateUser',
+      ]) {
         expect(actions).not.toContain(action);
       }
-      expect(statements.find((statement) =>
-        statement.Sid === 'TransactOnlyAccountClosureRequestState',
-      )?.Condition).toEqual({
+      expect(
+        statements.find((statement) => statement.Sid === 'TransactOnlyAccountClosureRequestState')
+          ?.Condition,
+      ).toEqual({
         'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['USER#*', 'ACCOUNT_CLOSURE#*'] },
         StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
       });
-    }, 20_000,
+    },
+    20_000,
   );
 
   it.each(['dev', 'test', 'prod'] as const)(
@@ -124,18 +143,24 @@ describe('account closure infrastructure', () => {
         ([, table]) => table.Properties.TableName === `roadmap-${stage}`,
       )![0];
       const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
-      expect(statements.find((statement) =>
-        statement.Sid === 'ReadAccountClosureWorkerFamilyCoverage',
-      )).toEqual({
+      expect(
+        statements.find((statement) => statement.Sid === 'ReadAccountClosureWorkerFamilyCoverage'),
+      ).toEqual({
         Sid: 'ReadAccountClosureWorkerFamilyCoverage',
-        Effect: 'Allow', Action: 'dynamodb:BatchGetItem', Resource: tableArn,
+        Effect: 'Allow',
+        Action: 'dynamodb:BatchGetItem',
+        Resource: tableArn,
         Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
       });
-      expect(statements.find((statement) =>
-        statement.Sid === 'TransactOnlyAccountClosureWorkerFamilyChecks',
-      )).toEqual({
+      expect(
+        statements.find(
+          (statement) => statement.Sid === 'TransactOnlyAccountClosureWorkerFamilyChecks',
+        ),
+      ).toEqual({
         Sid: 'TransactOnlyAccountClosureWorkerFamilyChecks',
-        Effect: 'Allow', Action: 'dynamodb:ConditionCheckItem', Resource: tableArn,
+        Effect: 'Allow',
+        Action: 'dynamodb:ConditionCheckItem',
+        Resource: tableArn,
         Condition: {
           'ForAllValues:StringLike': {
             'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*', 'ACCOUNT_CLOSURE#*'],
@@ -143,18 +168,20 @@ describe('account closure infrastructure', () => {
           StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
         },
       });
-    }, 20_000,
+    },
+    20_000,
   );
 
   it('uses an encrypted source queue with a longer-lived DLQ and bounded retries', () => {
     const template = backend();
     const queues = resources(template, 'AWS::SQS::Queue');
-    const [, source] = queues.find(
-      ([, queue]) => queue.Properties.QueueName === 'roadmap-account-closure-dev',
-    ) ?? [];
-    const [dlqId, dlq] = queues.find(
-      ([, queue]) => queue.Properties.QueueName === 'roadmap-account-closure-dlq-dev',
-    ) ?? [];
+    const [, source] =
+      queues.find(([, queue]) => queue.Properties.QueueName === 'roadmap-account-closure-dev') ??
+      [];
+    const [dlqId, dlq] =
+      queues.find(
+        ([, queue]) => queue.Properties.QueueName === 'roadmap-account-closure-dlq-dev',
+      ) ?? [];
 
     expect(source).toBeDefined();
     expect(dlq).toBeDefined();
@@ -172,9 +199,7 @@ describe('account closure infrastructure', () => {
       SqsManagedSseEnabled: true,
     });
 
-    const queuePolicies = resources(template, 'AWS::SQS::QueuePolicy').map(
-      ([, policy]) => policy,
-    );
+    const queuePolicies = resources(template, 'AWS::SQS::QueuePolicy').map(([, policy]) => policy);
     const serialized = JSON.stringify(queuePolicies);
     expect(serialized).toContain('aws:SecureTransport');
     expect(serialized).toContain('false');
@@ -182,10 +207,7 @@ describe('account closure infrastructure', () => {
 
   it('wires partial SQS failures, scheduled reconciliation, and least-privilege roles', () => {
     const template = backend();
-    const [workerId, worker] = lambdaByName(
-      template,
-      'roadmap-account-closure-worker-dev',
-    );
+    const [workerId, worker] = lambdaByName(template, 'roadmap-account-closure-worker-dev');
     const [reconcilerId, reconciler] = lambdaByName(
       template,
       'roadmap-account-closure-reconciler-dev',
@@ -219,7 +241,9 @@ describe('account closure infrastructure', () => {
     expect(closureRule?.[1].Properties).toMatchObject({
       ScheduleExpression: 'rate(5 minutes)',
       State: 'ENABLED',
-      Targets: [expect.objectContaining({ Arn: { 'Fn::GetAtt': [reconcilerId, 'Arn'] } })],
+      Targets: expect.arrayContaining([
+        expect.objectContaining({ Arn: { 'Fn::GetAtt': [reconcilerId, 'Arn'] } }),
+      ]),
     });
 
     const workerStatements = roleStatementsFor(template, worker);
@@ -253,11 +277,18 @@ describe('account closure infrastructure', () => {
         'dynamodb:DeleteItem',
       ),
     );
-    expect(transactionalDeletes).toHaveLength(1);
-    expect(transactionalDeletes[0].Condition).toEqual({
+    expect(transactionalDeletes).toHaveLength(2);
+    const mainDeletes = transactionalDeletes.find(
+      (statement) => !JSON.stringify(statement.Resource).includes('PrivacyTable'),
+    )!;
+    expect(mainDeletes.Condition).toEqual({
       'ForAllValues:StringLike': {
         'dynamodb:LeadingKeys': ['USER#*', 'CODE#G#*'],
       },
+      StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+    });
+    expect(transactionalDeletes.find((statement) => statement !== mainDeletes)?.Condition).toEqual({
+      'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'PRIVACY_STATE#*' },
       StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
     });
 

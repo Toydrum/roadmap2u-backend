@@ -5,7 +5,11 @@ import { K } from '../lambda/db';
 import { accountClosureKey } from '../lambda/account-closure';
 import { deriveAccessItem } from '../lambda/commercial/access-resolver';
 import { createCoverageAssignment } from '../lambda/family/model';
-import { FAMILY_BILLING_FLAG_DEFAULTS, type CommercialConfigResult, type CommercialFlags } from '../lambda/commercial/flags';
+import {
+  FAMILY_BILLING_FLAG_DEFAULTS,
+  type CommercialConfigResult,
+  type CommercialFlags,
+} from '../lambda/commercial/flags';
 import type { UsageMutationDelta } from '../lambda/commercial/usage';
 import {
   CommercialMutationWriter,
@@ -165,9 +169,7 @@ function newHeart(treeId = 'tree-2'): UsageMutationDelta {
   };
 }
 
-function snapshot(
-  overrides: Partial<CommercialMutationSnapshot> = {},
-): CommercialMutationSnapshot {
+function snapshot(overrides: Partial<CommercialMutationSnapshot> = {}): CommercialMutationSnapshot {
   return {
     profile: profile(),
     grants: [],
@@ -328,9 +330,8 @@ describe('CommercialMutationWriter', () => {
     await h.writer.write({ ownerSub: OWNER, mutationId: 'zero-tree-delta' });
 
     expect(
-      h.commits[0].items.find(
-        (item) => item.ConditionCheck?.Key?.['sk'] === 'USAGE#TREE#tree-1',
-      )?.ConditionCheck,
+      h.commits[0].items.find((item) => item.ConditionCheck?.Key?.['sk'] === 'USAGE#TREE#tree-1')
+        ?.ConditionCheck,
     ).toMatchObject({
       ConditionExpression:
         'generation = :activeGeneration AND visibleBranches = :expectedVisibleBranches',
@@ -501,8 +502,8 @@ describe('CommercialMutationWriter', () => {
       wouldDeny: true,
     });
     expect(
-      h.commits[0].items.find((item) => item.Update?.Key?.['sk'] === 'USAGE')
-        ?.Update?.ExpressionAttributeValues,
+      h.commits[0].items.find((item) => item.Update?.Key?.['sk'] === 'USAGE')?.Update
+        ?.ExpressionAttributeValues,
     ).toMatchObject({ ':expectedActiveTrees': 2, ':activeTreesDelta': 1 });
   });
 
@@ -607,10 +608,51 @@ describe('CommercialMutationWriter', () => {
     });
   });
 
-  it('observes missing cloudSync capability without blocking the group', async () => {
+  it('allows private cloud covered by the responsible adult while keeping Free quotas and ACCESS unchanged', async () => {
     const h = harness([
-      snapshot({ flags: flags({ capabilityMode: 'observe' }) }),
+      snapshot({
+        profile: profile({
+          accountType: 'minor',
+          privacyMode: 'adolescent_private',
+          majorityAt: '2029-10-07',
+        }),
+        cloudSyncAuthority: 'responsible_premium',
+        flags: flags({ capabilityMode: 'enforce', quotaMode: 'enforce' }),
+      } as Partial<CommercialMutationSnapshot>),
     ]);
+    await expect(
+      h.writer.write({ ownerSub: OWNER, mutationId: 'private-cloud' }),
+    ).resolves.toMatchObject({ outcome: 'committed' });
+    expect(h.decisions).toContainEqual({ kind: 'cloudSync', mode: 'enforce', wouldDeny: false });
+    expect(h.commits[0].items.some((item) => item.Put?.Item?.['sk'] === 'ACCESS')).toBe(false);
+    expect(
+      h.commits[0].items.some((item) => item.Put?.Item?.['sk']?.toString().startsWith('GRANT#')),
+    ).toBe(false);
+  });
+  it('does not turn responsible-adult cloud into unlimited adolescent quota', async () => {
+    const current = snapshot({
+      profile: profile({
+        accountType: 'minor',
+        privacyMode: 'adolescent_private',
+        majorityAt: '2029-10-07',
+      }),
+      cloudSyncAuthority: 'responsible_premium',
+      flags: flags({ capabilityMode: 'enforce', quotaMode: 'enforce' }),
+    } as Partial<CommercialMutationSnapshot>);
+    const h = harness([
+      {
+        ...current,
+        usageByTree: { 'tree-1': { ...current.usageByTree['tree-1'], visibleBranches: 10 } },
+      },
+    ]);
+    await expect(
+      h.writer.write({ ownerSub: OWNER, mutationId: 'private-cloud-eleventh-branch' }),
+    ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' });
+    expect(h.commits).toHaveLength(0);
+  });
+
+  it('observes missing cloudSync capability without blocking the group', async () => {
+    const h = harness([snapshot({ flags: flags({ capabilityMode: 'observe' }) })]);
 
     await expect(
       h.writer.write({ ownerSub: OWNER, mutationId: 'observe-cloud-sync' }),
@@ -651,9 +693,7 @@ describe('CommercialMutationWriter', () => {
       },
     },
   ])('keeps the compatible path when $label', async ({ usage }) => {
-    const h = harness([
-      snapshot({ usage, usageByTree: {}, deltas: [branchGrowth()] }),
-    ]);
+    const h = harness([snapshot({ usage, usageByTree: {}, deltas: [branchGrowth()] })]);
 
     await expect(
       h.writer.write({ ownerSub: OWNER, mutationId: 'compatible-usage' }),
@@ -682,9 +722,7 @@ describe('CommercialMutationWriter', () => {
   });
 
   it('allows and counts a reduction while configuration is unavailable', async () => {
-    const h = harness([
-      snapshot({ flags: unavailableFlags(), deltas: [branchReduction()] }),
-    ]);
+    const h = harness([snapshot({ flags: unavailableFlags(), deltas: [branchReduction()] })]);
 
     await expect(
       h.writer.write({ ownerSub: OWNER, mutationId: 'unavailable-reduction' }),
@@ -692,9 +730,8 @@ describe('CommercialMutationWriter', () => {
 
     expect(h.decisions).toEqual([]);
     expect(
-      h.commits[0].items.find(
-        (item) => item.Update?.Key?.['sk'] === 'USAGE#TREE#tree-1',
-      )?.Update?.ExpressionAttributeValues,
+      h.commits[0].items.find((item) => item.Update?.Key?.['sk'] === 'USAGE#TREE#tree-1')?.Update
+        ?.ExpressionAttributeValues,
     ).toMatchObject({ ':visibleBranchesDelta': -1 });
     expect(JSON.stringify(h.commits[0].items)).not.toContain('quotaMode');
     expect(JSON.stringify(h.commits[0].items)).not.toContain('capabilityMode');
@@ -721,9 +758,7 @@ describe('CommercialMutationWriter', () => {
       },
     },
   ])('fails closed for present USAGE with $label', async ({ usage }) => {
-    const h = harness([
-      snapshot({ usage, usageByTree: {}, deltas: [neutralEdit()] }),
-    ]);
+    const h = harness([snapshot({ usage, usageByTree: {}, deltas: [neutralEdit()] })]);
 
     await expect(
       h.writer.write({ ownerSub: OWNER, mutationId: 'corrupt-usage' }),
@@ -760,15 +795,29 @@ describe('CommercialMutationWriter', () => {
   });
 
   it('preserves and fences family coverage when sync first materializes ACCESS', async () => {
-    const coverage = createCoverageAssignment({ accountId: OWNER, householdId: 'household-a', seatType: 'minor', now: NOW, paidThrough: NOW + 60_000 });
+    const coverage = createCoverageAssignment({
+      accountId: OWNER,
+      householdId: 'household-a',
+      seatType: 'minor',
+      now: NOW,
+      paidThrough: NOW + 60_000,
+    });
     const h = harness([snapshot({ access: undefined, coverage, deltas: [neutralEdit()] })]);
     await h.writer.write({ ownerSub: OWNER, mutationId: 'missing-family-access' });
     const items = h.commits[0]!.items;
     expect(items.find((item) => item.Put?.Item?.sk === 'ACCESS')!.Put!.Item).toMatchObject({
-      capabilities: { family: true }, activeSources: [expect.objectContaining({ scope: 'family_member', householdId: 'household-a' })],
+      capabilities: { family: true },
+      activeSources: [
+        expect.objectContaining({ scope: 'family_member', householdId: 'household-a' }),
+      ],
     });
-    expect(items.find((item) => item.ConditionCheck?.Key?.sk === 'COVERAGE#FAMILY')!.ConditionCheck!.ExpressionAttributeValues).toMatchObject({
-      ':revision': coverage.revision, ':paidThrough': coverage.paidThrough, ':state': 'active',
+    expect(
+      items.find((item) => item.ConditionCheck?.Key?.sk === 'COVERAGE#FAMILY')!.ConditionCheck!
+        .ExpressionAttributeValues,
+    ).toMatchObject({
+      ':revision': coverage.revision,
+      ':paidThrough': coverage.paidThrough,
+      ':state': 'active',
     });
   });
 
@@ -824,10 +873,7 @@ describe('CommercialMutationWriter', () => {
       resolved: deriveAccessItem('adult-2', NOW, undefined, []),
     },
   ])('never commits when resolved ACCESS is $label', async ({ resolved }) => {
-    const h = harness(
-      [snapshot({ deltas: [neutralEdit()] })],
-      { resolvedAccess: [resolved] },
-    );
+    const h = harness([snapshot({ deltas: [neutralEdit()] })], { resolvedAccess: [resolved] });
 
     await expect(
       h.writer.write({ ownerSub: OWNER, mutationId: 'invalid-access' }),
@@ -842,10 +888,9 @@ describe('CommercialMutationWriter', () => {
       offlineValidUntil: NOW - 1,
     };
     const refreshed = deriveAccessItem(OWNER, NOW, expired, []);
-    const h = harness(
-      [snapshot({ access: expired, deltas: [neutralEdit()] })],
-      { resolvedAccess: [refreshed] },
-    );
+    const h = harness([snapshot({ access: expired, deltas: [neutralEdit()] })], {
+      resolvedAccess: [refreshed],
+    });
 
     await h.writer.write({ ownerSub: OWNER, mutationId: 'refresh-access' });
 
@@ -890,7 +935,11 @@ describe('CommercialMutationWriter', () => {
   it.each([
     {
       label: 'recomputation boundary passes',
-      access: { ...deriveAccessItem(OWNER, NOW, undefined, []), nextRecomputeAt: NOW + 1, offlineValidUntil: NOW + 1 },
+      access: {
+        ...deriveAccessItem(OWNER, NOW, undefined, []),
+        nextRecomputeAt: NOW + 1,
+        offlineValidUntil: NOW + 1,
+      },
     },
     {
       label: 'offline validity expires',
@@ -939,10 +988,7 @@ describe('CommercialMutationWriter', () => {
 
   it('bounds transaction conflict retries to two complete snapshots', async () => {
     const h = harness(
-      [
-        snapshot({ deltas: [neutralEdit()] }),
-        snapshot({ deltas: [neutralEdit()] }),
-      ],
+      [snapshot({ deltas: [neutralEdit()] }), snapshot({ deltas: [neutralEdit()] })],
       { commitOutcomes: ['conflict', 'conflict'] },
     );
 
@@ -1008,17 +1054,19 @@ describe('CommercialMutationWriter', () => {
     await h.writer.write({ ownerSub: OWNER, mutationId: 'two-trees' });
 
     const treeKeys = h.commits[0].items
-      .flatMap((item) => (item.Update?.Key?.['sk']?.toString().startsWith('USAGE#TREE#') ? [item.Update.Key] : []))
+      .flatMap((item) =>
+        item.Update?.Key?.['sk']?.toString().startsWith('USAGE#TREE#') ? [item.Update.Key] : [],
+      )
       .map((key) => key?.['sk'])
       .sort();
     expect(treeKeys).toEqual(['USAGE#TREE#tree-1', 'USAGE#TREE#tree-2']);
   });
 
   it('rejects more deltas than one mutation group can contain before entitlement work', async () => {
-    const deltas = Array.from(
-      { length: LIMITS.syncMutationGroupMax + 1 },
-      (_, index) => ({ ...neutralEdit(), treeId: `tree-${index}` }),
-    );
+    const deltas = Array.from({ length: LIMITS.syncMutationGroupMax + 1 }, (_, index) => ({
+      ...neutralEdit(),
+      treeId: `tree-${index}`,
+    }));
     const h = harness([snapshot({ deltas })]);
 
     await expect(
@@ -1029,10 +1077,10 @@ describe('CommercialMutationWriter', () => {
   });
 
   it('keeps the maximum commercial block to 25 items for TASK-032 transaction headroom', async () => {
-    const deltas = Array.from(
-      { length: LIMITS.syncMutationGroupMax },
-      (_, index) => ({ ...branchGrowth(), treeId: `tree-${index}` }),
-    );
+    const deltas = Array.from({ length: LIMITS.syncMutationGroupMax }, (_, index) => ({
+      ...branchGrowth(),
+      treeId: `tree-${index}`,
+    }));
     const usageByTree = Object.fromEntries(
       deltas.map((delta, index) => [
         delta.treeId,
@@ -1058,9 +1106,7 @@ describe('CommercialMutationWriter', () => {
   });
 
   it('returns stale for the whole group and never commits when any member is stale', async () => {
-    const h = harness([
-      snapshot({ deltas: [stale(), branchGrowth()] }),
-    ]);
+    const h = harness([snapshot({ deltas: [stale(), branchGrowth()] })]);
 
     await expect(
       h.writer.write({ ownerSub: OWNER, mutationId: 'mixed-stale' }),

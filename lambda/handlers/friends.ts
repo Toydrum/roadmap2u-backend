@@ -1,17 +1,7 @@
-import type {
-  CodeGrant,
-  FriendRequestView,
-  FriendView,
-  FriendsResponse,
-} from '@app/api/contracts';
-import { type Ctx, profileOf, toPublic } from '../authz';
-import {
-  type FriendItem,
-  type FriendRequestItem,
-  K,
-  type LinkItem,
-  queryPrefix,
-} from '../db';
+import type { CodeGrant, FriendRequestView, FriendView, FriendsResponse } from '@app/api/contracts';
+import { ApiError } from '@app/api/contracts';
+import { type Ctx, profileOfConsistent, toPublic } from '../authz';
+import { type FriendItem, type FriendRequestItem, K, type LinkItem, queryPrefix } from '../db';
 import {
   acceptAdultFriendRequest,
   cancelSocialFriendRequest,
@@ -27,8 +17,8 @@ async function requestView(
   item: FriendRequestItem,
   otherId: string,
 ): Promise<FriendRequestView | null> {
-  const other = await profileOf(ctx.deps, otherId);
-  if (!other) return null;
+  const other = await profileOfConsistent(ctx.deps, otherId);
+  if (!other || other.privacyMode) return null;
   return {
     requestId: item.requestId,
     user: toPublic(other, false),
@@ -43,6 +33,10 @@ export async function getFriends(ctx: Ctx): Promise<FriendsResponse> {
 
 /** Legacy listing stays readable so incompatible relationships can be removed. */
 export async function friendsOf(ctx: Ctx, userId: string): Promise<FriendsResponse> {
+  const profiles = await Promise.all(
+    [...new Set([ctx.callerId, userId])].map((id) => profileOfConsistent(ctx.deps, id)),
+  );
+  if (profiles.some((profile) => profile?.privacyMode)) throw new ApiError('FORBIDDEN');
   const now = ctx.deps.now();
   const [friendItems, incomingItems, outgoingItems] = await Promise.all([
     queryPrefix<FriendItem>(ctx.deps, K.user(userId), 'FRIEND#'),
@@ -53,9 +47,13 @@ export async function friendsOf(ctx: Ctx, userId: string): Promise<FriendsRespon
   const friends: FriendView[] = [];
   for (const item of friendItems) {
     const otherId = item.userA === userId ? item.userB : item.userA;
-    const other = await profileOf(ctx.deps, otherId);
-    if (!other) continue;
-    friends.push({ friendshipId: item.friendshipId, user: toPublic(other, false), since: item.createdAt });
+    const other = await profileOfConsistent(ctx.deps, otherId);
+    if (!other || other.privacyMode) continue;
+    friends.push({
+      friendshipId: item.friendshipId,
+      user: toPublic(other, false),
+      since: item.createdAt,
+    });
   }
   const incoming: FriendRequestView[] = [];
   for (const item of incomingItems.filter((candidate) => candidate.expiresAt > now)) {

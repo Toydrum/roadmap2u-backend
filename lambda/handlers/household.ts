@@ -31,7 +31,7 @@ import { USERNAME_PATTERN } from '@app/auth/auth-types';
 import {
   WRITABLE_PROFILE_CONDITION,
   closureAbsenceConditionCheck,
-  profileOfConsistent,
+  profileOfConsistent as rawProfileOfConsistent,
   toPublic,
   writableOwnerConditionChecks,
   type Ctx,
@@ -50,6 +50,7 @@ import {
   composite,
 } from '../db';
 import { assertFamilyIdentifier, FK, householdIdForPrimary } from '../family/keys';
+import { familySocialProfileFences } from './guarded-mutation';
 import {
   CURRENT_MINOR_CONSENT_VERSION,
   CURRENT_MINOR_DECLARATION_VERSION,
@@ -77,15 +78,8 @@ import {
   classifyFamilyTransactionCancellation,
   readHouseholdSnapshot,
 } from '../family/repository';
-import {
-  FAMILY_POLICY_VERSION,
-  authorizeFamilyAction,
-  type FamilyAction,
-} from '../family/policy';
-import {
-  guardianInviteMirrors,
-  idempotentGuardianInviteMirrorDelete,
-} from '../guardian-invites';
+import { FAMILY_POLICY_VERSION, authorizeFamilyAction, type FamilyAction } from '../family/policy';
+import { guardianInviteMirrors, idempotentGuardianInviteMirrorDelete } from '../guardian-invites';
 import { reserveCodeAttempt } from './guarded-mutation';
 import { familyInboxWrites } from '../family/inbox';
 
@@ -94,8 +88,7 @@ const PRIMARY_TRANSFER_TTL_MS = 15 * 60 * 1_000;
 const FAMILY_STEP_UP_MAX_AGE_MS = 5 * 60 * 1_000;
 const FAMILY_STEP_UP_CLOCK_SKEW_MS = 60 * 1_000;
 const FAMILY_FENCE_VERSION = 1;
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 type NoticeState = 'pending' | 'approved' | 'accepted' | 'rejected' | 'revoked';
@@ -204,9 +197,8 @@ function parseCreateMinor(body: unknown): CreateMinorRequest {
     'declarationVersion',
     'consentVersion',
   ]);
-  const username = typeof record['username'] === 'string'
-    ? record['username'].trim().toLowerCase()
-    : '';
+  const username =
+    typeof record['username'] === 'string' ? record['username'].trim().toLowerCase() : '';
   if (!USERNAME_PATTERN.test(username)) throw new ApiError('VALIDATION', 'invalid username');
   if (record['country'] !== 'MX') throw new ApiError('LEGAL_REGION_UNSUPPORTED');
   const majorityAt = record['majorityAt'];
@@ -249,20 +241,15 @@ function requireRecentFamilyAuthentication(ctx: Ctx): void {
 function parseCodeCommand(body: unknown): CreateMinorLinkRequest {
   const record = asRecord(body);
   const base = parseBase(record, [...BASE_KEYS, 'code']);
-  const code = typeof record['code'] === 'string'
-    ? record['code'].trim().toUpperCase().replace(/-/g, '')
-    : '';
+  const code =
+    typeof record['code'] === 'string' ? record['code'].trim().toUpperCase().replace(/-/g, '') : '';
   if (!/^[A-Z0-9]{6,64}$/.test(code)) throw new ApiError('VALIDATION', 'invalid code');
   return { ...base, code };
 }
 
 function parseAcceptMinorLink(body: unknown): AcceptMinorLinkRequest {
   const record = asRecord(body);
-  const base = parseBase(record, [
-    ...BASE_KEYS,
-    'responsibilityVersion',
-    'privacyVersion',
-  ]);
+  const base = parseBase(record, [...BASE_KEYS, 'responsibilityVersion', 'privacyVersion']);
   if (
     record['responsibilityVersion'] !== CURRENT_MINOR_LINK_RESPONSIBILITY_VERSION ||
     record['privacyVersion'] !== CURRENT_MINOR_LINK_PRIVACY_VERSION
@@ -320,6 +307,12 @@ function parseTransfer(body: unknown): TransferPrimaryResponsibilityRequest {
 
 function repoDeps(ctx: Ctx) {
   return { ddb: ctx.deps.ddb, tableName: ctx.deps.table, now: ctx.deps.now };
+}
+
+async function profileOfConsistent(deps: Ctx['deps'], id: string) {
+  const profile = await rawProfileOfConsistent(deps, id);
+  if (profile?.privacyMode) throw new ApiError('NOT_FOUND');
+  return profile;
 }
 
 async function explicitSnapshot(ctx: Ctx, householdId: string): Promise<HouseholdSnapshot> {
@@ -399,11 +392,13 @@ function familyEntitlementConditionCheck(
         ':requiredMinorSeats': required.minorSeats,
         ':requiredAdditionalResponsibleSeat': required.additionalResponsibleSeat,
         ':active': 'active',
-        ...(entitlement.source === 'sponsored_pilot' ? {} : {
-          ':scheduledEnd': 'scheduled_end',
-          ':grace': 'grace',
-          ':now': ctx.deps.now(),
-        }),
+        ...(entitlement.source === 'sponsored_pilot'
+          ? {}
+          : {
+              ':scheduledEnd': 'scheduled_end',
+              ':grace': 'grace',
+              ':now': ctx.deps.now(),
+            }),
       },
       ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
     },
@@ -427,13 +422,20 @@ async function primaryTransferOfConsistent(
 function writableMinorConditionChecks(ctx: Ctx, minorIds: readonly string[]): TransactItem[] {
   const today = new Date(ctx.deps.now()).toISOString().slice(0, 10);
   return [...new Set(minorIds)].flatMap((minorId): TransactItem[] => [
-    { ConditionCheck: {
-      TableName: ctx.deps.table, Key: K.profile(minorId),
-      ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND userId = :minorId AND accountType = :minor AND (attribute_not_exists(majorityAt) OR majorityAt > :today)`,
-      ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: { ':active': 'active', ':minorId': minorId,
-        ':minor': 'minor', ':today': today },
-    } },
+    {
+      ConditionCheck: {
+        TableName: ctx.deps.table,
+        Key: K.profile(minorId),
+        ConditionExpression: `${WRITABLE_PROFILE_CONDITION} AND userId = :minorId AND accountType = :minor AND (attribute_not_exists(majorityAt) OR majorityAt > :today)`,
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':active': 'active',
+          ':minorId': minorId,
+          ':minor': 'minor',
+          ':today': today,
+        },
+      },
+    },
     closureAbsenceConditionCheck(ctx.deps, minorId),
   ]);
 }
@@ -476,10 +478,7 @@ async function validatedPrimaryTransferState(
     throw new ApiError('RESPONSIBLE_SCOPE_REQUIRED');
   }
 
-  const currentPrimaryCoverage = currentCoverage(
-    snapshot,
-    snapshot.household.primaryResponsibleId,
-  );
+  const currentPrimaryCoverage = currentCoverage(snapshot, snapshot.household.primaryResponsibleId);
   const nextPrimaryCoverage = currentCoverage(snapshot, newPrimaryAccountId);
   if (!currentPrimaryCoverage || !nextPrimaryCoverage) throw new ApiError('PAYMENT_REQUIRED');
 
@@ -494,11 +493,14 @@ async function validatedPrimaryTransferState(
 }
 
 async function snapshotForCaller(ctx: Ctx): Promise<HouseholdSnapshot> {
+  if (ctx.caller.privacyMode) throw new ApiError('FORBIDDEN');
   const deterministicId = householdIdForPrimary(ctx.callerId);
   const coverage = await coverageOfConsistent(ctx, ctx.callerId);
   // Majority preserves ended minor coverage as history, alongside the adult's own household.
-  const endedMinorCoverage = ctx.caller.accountType === 'adult' &&
-    coverage?.seatType === 'minor' && coverage.state === 'ended';
+  const endedMinorCoverage =
+    ctx.caller.accountType === 'adult' &&
+    coverage?.seatType === 'minor' &&
+    coverage.state === 'ended';
   if (coverage && !endedMinorCoverage) {
     const covered = await readHouseholdSnapshot(repoDeps(ctx), coverage.householdId);
     if (covered) return covered;
@@ -516,6 +518,7 @@ function authorize(
   expectedHouseholdRevision?: number,
   targetAccountId?: string,
 ): void {
+  if (ctx.caller.privacyMode) throw new ApiError('FORBIDDEN');
   const decision = authorizeFamilyAction({
     actor: {
       accountId: ctx.callerId,
@@ -536,12 +539,14 @@ function currentCoverage(
   snapshot: HouseholdSnapshot,
   accountId: string,
 ): CoverageAssignmentItem | null {
-  return snapshot.coverages.find(
-    (coverage) =>
-      coverage.accountId === accountId &&
-      coverage.householdId === snapshot.household.householdId &&
-      coverage.state !== 'ended',
-  ) ?? null;
+  return (
+    snapshot.coverages.find(
+      (coverage) =>
+        coverage.accountId === accountId &&
+        coverage.householdId === snapshot.household.householdId &&
+        coverage.state !== 'ended',
+    ) ?? null
+  );
 }
 
 function coverageAllowsNewFamilyAction(
@@ -564,12 +569,22 @@ function inheritedCoverage(
   now: number,
 ): CoverageAssignmentItem {
   if (payerCoverage.source === 'sponsored_pilot') {
-    return createCoverageAssignment({ householdId, accountId, seatType, source: 'sponsored_pilot', now });
+    return createCoverageAssignment({
+      householdId,
+      accountId,
+      seatType,
+      source: 'sponsored_pilot',
+      now,
+    });
   }
   if (payerCoverage.paidThrough === null) throw new ApiError('PAYMENT_REQUIRED');
   return createCoverageAssignment({
-    householdId, accountId, seatType, paidThrough: payerCoverage.paidThrough,
-    source: payerCoverage.source ?? 'subscription_projection', now,
+    householdId,
+    accountId,
+    seatType,
+    paidThrough: payerCoverage.paidThrough,
+    source: payerCoverage.source ?? 'subscription_projection',
+    now,
   });
 }
 
@@ -581,10 +596,12 @@ function assignedMinorSeats(snapshot: HouseholdSnapshot): MinorSeatAssignmentIte
 }
 
 function emptyMinorSeat(snapshot: HouseholdSnapshot): MinorSeatAssignmentItem | null {
-  return snapshot.seats.find(
-    (seat): seat is MinorSeatAssignmentItem =>
-      seat.seatType === 'minor' && seat.state === 'empty' && seat.accountId === null,
-  ) ?? null;
+  return (
+    snapshot.seats.find(
+      (seat): seat is MinorSeatAssignmentItem =>
+        seat.seatType === 'minor' && seat.state === 'empty' && seat.accountId === null,
+    ) ?? null
+  );
 }
 
 function additionalSeat(snapshot: HouseholdSnapshot): AdditionalResponsibleSeatAssignmentItem {
@@ -600,11 +617,12 @@ function coverageState(
   snapshot: HouseholdSnapshot,
   accountId: string,
 ): HouseholdView['minors'][number]['coverageState'] {
-  return snapshot.coverages.find(
-    (coverage) =>
-      coverage.accountId === accountId &&
-      coverage.householdId === snapshot.household.householdId,
-  )?.state ?? null;
+  return (
+    snapshot.coverages.find(
+      (coverage) =>
+        coverage.accountId === accountId && coverage.householdId === snapshot.household.householdId,
+    )?.state ?? null
+  );
 }
 
 async function householdView(
@@ -616,8 +634,7 @@ async function householdView(
     (left, right) => left.seatNumber - right.seatNumber,
   );
   const extraSeat = additionalSeat(snapshot);
-  const additionalCaller =
-    extraSeat.state === 'assigned' && extraSeat.accountId === callerId;
+  const additionalCaller = extraSeat.state === 'assigned' && extraSeat.accountId === callerId;
   const visibleMinorIds = additionalCaller
     ? new Set(
         snapshot.supervisionLinks
@@ -694,8 +711,10 @@ async function householdView(
     myRole,
     primaryResponsible: toPublic(primary, false),
     familyCoverage: (() => {
-      const coverage = snapshot.coverages.find((item) =>
-        item.accountId === primary.userId && item.householdId === snapshot.household.householdId);
+      const coverage = snapshot.coverages.find(
+        (item) =>
+          item.accountId === primary.userId && item.householdId === snapshot.household.householdId,
+      );
       return coverage ? { source: coverage.source, state: coverage.state } : null;
     })(),
     additionalResponsible,
@@ -727,11 +746,7 @@ async function readNotice(ctx: Ctx, id: string): Promise<FamilyNoticeItem | null
   return (response.Item as FamilyNoticeItem | undefined) ?? null;
 }
 
-function exactUnexpiredLegacyInviteDelete(
-  ctx: Ctx,
-  invite: CodeItem,
-  now: number,
-): TransactItem {
+function exactUnexpiredLegacyInviteDelete(ctx: Ctx, invite: CodeItem, now: number): TransactItem {
   return {
     Delete: {
       TableName: ctx.deps.table,
@@ -767,11 +782,7 @@ function exactUnexpiredLegacyInviteDelete(
   };
 }
 
-function legacyInviteDeleteOperations(
-  ctx: Ctx,
-  invite: CodeItem,
-  now: number,
-): TransactItem[] {
+function legacyInviteDeleteOperations(ctx: Ctx, invite: CodeItem, now: number): TransactItem[] {
   return [
     exactUnexpiredLegacyInviteDelete(ctx, invite, now),
     ...(invite.closureMirrorVersion === 1
@@ -834,7 +845,7 @@ async function transact(ctx: Ctx, items: readonly TransactItem[]): Promise<void>
   if (items.length > 100) throw new Error('family transaction exceeds DynamoDB limit');
   try {
     await ctx.deps.ddb.send(
-      new TransactWriteCommand({ TransactItems: [...items] }),
+      new TransactWriteCommand({ TransactItems: familySocialProfileFences(ctx.deps.table, items) }),
     );
   } catch (error) {
     if ((error as { name?: string }).name === 'TransactionCanceledException') {
@@ -899,11 +910,7 @@ function legacyLinkItem(
   };
 }
 
-function addLegacyCreatedMinorToFence(
-  ctx: Ctx,
-  guardianId: string,
-  minorId: string,
-): TransactItem {
+function addLegacyCreatedMinorToFence(ctx: Ctx, guardianId: string, minorId: string): TransactItem {
   return {
     Update: {
       TableName: ctx.deps.table,
@@ -941,12 +948,7 @@ async function createMinorWithAuthority(
   input: MinorAuthorityCreationInput,
 ): Promise<{ readonly minor: UserProfile; readonly tempPassword: string }> {
   const snapshot = input.snapshot;
-  authorize(
-    ctx,
-    snapshot,
-    'create_minor',
-    input.expectedHouseholdRevision,
-  );
+  authorize(ctx, snapshot, 'create_minor', input.expectedHouseholdRevision);
   requireRecentFamilyAuthentication(ctx);
   const seat = emptyMinorSeat(snapshot);
   if (!seat) throw new ApiError('HOUSEHOLD_CAPACITY_EXCEEDED');
@@ -965,16 +967,11 @@ async function createMinorWithAuthority(
   }
   if (input.majorityAt !== null) {
     const majorityTime = Date.parse(`${input.majorityAt}T00:00:00.000Z`);
-    if (
-      majorityTime <= now ||
-      majorityTime > now + 18 * 366 * 24 * 60 * 60 * 1_000
-    ) {
+    if (majorityTime <= now || majorityTime > now + 18 * 366 * 24 * 60 * 60 * 1_000) {
       throw new ApiError('VALIDATION', 'majorityAt must describe a current minor');
     }
   }
-  if (
-    !coverageAllowsNewFamilyAction(payerCoverage, now)
-  ) {
+  if (!coverageAllowsNewFamilyAction(payerCoverage, now)) {
     throw new ApiError('PAYMENT_REQUIRED');
   }
 
@@ -1008,11 +1005,13 @@ async function createMinorWithAuthority(
       socialEnabled: false,
       createdAt: now,
       status: 'active',
-      ...(input.majorityAt === null ? {} : {
-        majorityAt: input.majorityAt,
-        gsi2pk: 'FAMILY#MAJORITY',
-        gsi2sk: `${input.majorityAt}#${minorId}`,
-      }),
+      ...(input.majorityAt === null
+        ? {}
+        : {
+            majorityAt: input.majorityAt,
+            gsi2pk: 'FAMILY#MAJORITY',
+            gsi2sk: `${input.majorityAt}#${minorId}`,
+          }),
     };
     const primaryLink = createSupervisionLink({
       householdId: snapshot.household.householdId,
@@ -1021,20 +1020,27 @@ async function createMinorWithAuthority(
       role: 'primary_responsible',
       now,
     });
-    const minorCoverage = inheritedCoverage(snapshot.household.householdId, minorId, 'minor', payerCoverage, now);
-    const consent = input.consent && input.majorityAt
-      ? createMinorConsentAcceptance({
-          householdId: snapshot.household.householdId,
-          minorId,
-          actorId: ctx.callerId,
-          majorityAt: input.majorityAt,
-          declarationVersion: input.consent.declarationVersion,
-          consentVersion: input.consent.consentVersion,
-          commandId: input.consent.commandId,
-          policyVersion: input.consent.policyVersion,
-          now,
-        })
-      : null;
+    const minorCoverage = inheritedCoverage(
+      snapshot.household.householdId,
+      minorId,
+      'minor',
+      payerCoverage,
+      now,
+    );
+    const consent =
+      input.consent && input.majorityAt
+        ? createMinorConsentAcceptance({
+            householdId: snapshot.household.householdId,
+            minorId,
+            actorId: ctx.callerId,
+            majorityAt: input.majorityAt,
+            declarationVersion: input.consent.declarationVersion,
+            consentVersion: input.consent.consentVersion,
+            commandId: input.consent.commandId,
+            policyVersion: input.consent.policyVersion,
+            now,
+          })
+        : null;
     const assignment = buildAssignMinorTransaction({
       tableName: ctx.deps.table,
       household: snapshot.household,
@@ -1088,13 +1094,15 @@ async function createMinorWithAuthority(
         },
       },
       ...(consent
-        ? [{
-            Put: {
-              TableName: ctx.deps.table,
-              Item: consent,
-              ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
-            },
-          } satisfies TransactItem]
+        ? [
+            {
+              Put: {
+                TableName: ctx.deps.table,
+                Item: consent,
+                ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+              },
+            } satisfies TransactItem,
+          ]
         : []),
       ...(legacyLink
         ? [
@@ -1128,12 +1136,12 @@ async function createMinorWithAuthority(
     }
     return {
       minor: {
-      userId: child.userId,
-      username: child.username,
-      displayName: child.displayName,
-      accountType: 'minor',
-      socialEnabled: false,
-      createdAt: child.createdAt,
+        userId: child.userId,
+        username: child.username,
+        displayName: child.displayName,
+        accountType: 'minor',
+        socialEnabled: false,
+        createdAt: child.createdAt,
       },
       tempPassword: password,
     };
@@ -1208,37 +1216,61 @@ export async function createMinorLinkCode(ctx: Ctx, body: unknown): Promise<Code
   const seat = assignedMinorSeats(source).find((row) => row.accountId === request.minorId);
   if (!seat) throw new ApiError('NOT_FOUND');
   const minor = await profileOfConsistent(ctx.deps, request.minorId);
-  if (!minor || minor.accountType !== 'minor' ||
+  if (
+    !minor ||
+    minor.accountType !== 'minor' ||
     (minor.status ?? 'active') !== 'active' ||
-    !minor.majorityAt || minor.majorityAt <= new Date(ctx.deps.now()).toISOString().slice(0, 10)) {
+    !minor.majorityAt ||
+    minor.majorityAt <= new Date(ctx.deps.now()).toISOString().slice(0, 10)
+  ) {
     throw new ApiError('NOT_FOUND');
   }
   const now = ctx.deps.now();
   const code = friendCode();
   const expiresAt = now + FAMILY_NOTICE_TTL_MS;
   const grant: CodeItem = {
-    ...K.codeG(code), code, kind: 'linkExisting', userId: ctx.callerId,
-    minorId: request.minorId, closureMirrorVersion: 1,
-    expiresAt, ttl: Math.ceil(expiresAt / 1000),
+    ...K.codeG(code),
+    code,
+    kind: 'linkExisting',
+    userId: ctx.callerId,
+    minorId: request.minorId,
+    closureMirrorVersion: 1,
+    expiresAt,
+    ttl: Math.ceil(expiresAt / 1000),
   };
   await transact(ctx, [
     exactHouseholdCheck(ctx, source, source.household.revision),
-    { ConditionCheck: {
-      TableName: ctx.deps.table,
-      Key: FK.minorSeat(source.household.householdId, seat.seatNumber),
-      ConditionExpression: 'entityType = :entityType AND #state = :assigned AND accountId = :minorId AND revision = :revision',
-      ExpressionAttributeNames: { '#state': 'state' },
-      ExpressionAttributeValues: { ':entityType': 'SeatAssignment', ':assigned': 'assigned',
-        ':minorId': request.minorId, ':revision': seat.revision },
-    } },
+    {
+      ConditionCheck: {
+        TableName: ctx.deps.table,
+        Key: FK.minorSeat(source.household.householdId, seat.seatNumber),
+        ConditionExpression:
+          'entityType = :entityType AND #state = :assigned AND accountId = :minorId AND revision = :revision',
+        ExpressionAttributeNames: { '#state': 'state' },
+        ExpressionAttributeValues: {
+          ':entityType': 'SeatAssignment',
+          ':assigned': 'assigned',
+          ':minorId': request.minorId,
+          ':revision': seat.revision,
+        },
+      },
+    },
     ...writableOwnerConditionChecks(ctx.deps, ctx.callerId),
     ...writableMinorConditionChecks(ctx, [request.minorId]),
-    { Put: { TableName: ctx.deps.table, Item: grant,
-      ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)' } },
-    ...guardianInviteMirrors(grant).map((mirror): TransactItem => ({ Put: {
-      TableName: ctx.deps.table, Item: mirror,
-      ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
-    } })),
+    {
+      Put: {
+        TableName: ctx.deps.table,
+        Item: grant,
+        ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+      },
+    },
+    ...guardianInviteMirrors(grant).map((mirror): TransactItem => ({
+      Put: {
+        TableName: ctx.deps.table,
+        Item: mirror,
+        ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+      },
+    })),
   ]);
   return { code, expiresAt };
 }
@@ -1249,12 +1281,7 @@ export async function createMinorLinkRequest(
 ): Promise<MinorLinkRequestView> {
   const request = parseCodeCommand(body);
   const target = await explicitSnapshot(ctx, request.householdId);
-  authorize(
-    ctx,
-    target,
-    'create_minor_link_request',
-    request.expectedHouseholdRevision,
-  );
+  authorize(ctx, target, 'create_minor_link_request', request.expectedHouseholdRevision);
   if (!emptyMinorSeat(target)) throw new ApiError('HOUSEHOLD_CAPACITY_EXCEEDED');
 
   await reserveCodeAttempt(ctx);
@@ -1273,8 +1300,12 @@ export async function createMinorLinkRequest(
   }
   if (grant.expiresAt <= now) throw new ApiError('CODE_EXPIRED');
   const minor = await profileOfConsistent(ctx.deps, grant.minorId);
-  if (!minor || minor.accountType !== 'minor' || !minor.majorityAt ||
-    minor.majorityAt <= new Date(now).toISOString().slice(0, 10)) {
+  if (
+    !minor ||
+    minor.accountType !== 'minor' ||
+    !minor.majorityAt ||
+    minor.majorityAt <= new Date(now).toISOString().slice(0, 10)
+  ) {
     throw new ApiError('CODE_INVALID');
   }
   const coverage = await coverageOfConsistent(ctx, minor.userId);
@@ -1318,9 +1349,15 @@ export async function createMinorLinkRequest(
   await transact(ctx, [
     exactHouseholdCheck(ctx, target, request.expectedHouseholdRevision),
     exactHouseholdCheck(ctx, source, source.household.revision),
-    ...[...new Set([ctx.callerId, source.household.primaryResponsibleId, minor.userId])]
-      .flatMap((recipientId) => writableOwnerConditionChecks(ctx.deps, recipientId)),
-    ...familyInboxWrites(ctx, notice, [notice.createdById, notice.sourcePrimaryId, notice.intendedAdultId, notice.minorId]),
+    ...[...new Set([ctx.callerId, source.household.primaryResponsibleId, minor.userId])].flatMap(
+      (recipientId) => writableOwnerConditionChecks(ctx.deps, recipientId),
+    ),
+    ...familyInboxWrites(ctx, notice, [
+      notice.createdById,
+      notice.sourcePrimaryId,
+      notice.intendedAdultId,
+      notice.minorId,
+    ]),
     {
       Put: {
         TableName: ctx.deps.table,
@@ -1371,9 +1408,13 @@ export async function approveMinorLinkRequest(
     }
     authorize(ctx, source, 'approve_minor_link', undefined, notice.minorId);
     requireRecentFamilyAuthentication(ctx);
-    if (!minor || minor.accountType !== 'minor' ||
+    if (
+      !minor ||
+      minor.accountType !== 'minor' ||
       (minor.majorityAt !== undefined &&
-        minor.majorityAt <= new Date(now).toISOString().slice(0, 10))) throw new ApiError('NOT_FOUND');
+        minor.majorityAt <= new Date(now).toISOString().slice(0, 10))
+    )
+      throw new ApiError('NOT_FOUND');
     return minorLinkView(notice, minor);
   }
   if (notice.state !== 'pending') throw new ApiError('NOT_FOUND');
@@ -1390,22 +1431,19 @@ export async function approveMinorLinkRequest(
   ) {
     throw new ApiError('CURRENT_PRIMARY_APPROVAL_REQUIRED');
   }
-  authorize(
-    ctx,
-    source,
-    'approve_minor_link',
-    source.household.revision,
-    notice.minorId,
-  );
+  authorize(ctx, source, 'approve_minor_link', source.household.revision, notice.minorId);
   requireRecentFamilyAuthentication(ctx);
   const sourceSeat = assignedMinorSeats(source).find((seat) => seat.accountId === notice.minorId);
   const targetSeat = emptyMinorSeat(target);
   if (!sourceSeat) throw new ApiError('NOT_FOUND');
   if (!targetSeat) throw new ApiError('HOUSEHOLD_CAPACITY_EXCEEDED');
   const minor = await profileOfConsistent(ctx.deps, notice.minorId);
-  if (!minor || minor.accountType !== 'minor' ||
-    (minor.majorityAt !== undefined &&
-      minor.majorityAt <= new Date(now).toISOString().slice(0, 10))) throw new ApiError('NOT_FOUND');
+  if (
+    !minor ||
+    minor.accountType !== 'minor' ||
+    (minor.majorityAt !== undefined && minor.majorityAt <= new Date(now).toISOString().slice(0, 10))
+  )
+    throw new ApiError('NOT_FOUND');
 
   const approvedNotice: FamilyNoticeItem = {
     ...notice,
@@ -1503,13 +1541,7 @@ export async function acceptMinorLinkRequest(
   ) {
     throw new ApiError('CURRENT_PRIMARY_APPROVAL_REQUIRED');
   }
-  authorize(
-    ctx,
-    target,
-    'accept_minor_link',
-    request.expectedHouseholdRevision,
-    notice.minorId,
-  );
+  authorize(ctx, target, 'accept_minor_link', request.expectedHouseholdRevision, notice.minorId);
   requireRecentFamilyAuthentication(ctx);
   const sourceSeat = assignedMinorSeats(source).find((seat) => seat.accountId === notice.minorId);
   const targetSeat = emptyMinorSeat(target);
@@ -1534,8 +1566,7 @@ export async function acceptMinorLinkRequest(
     sourceExtraSeat.accountId !== null &&
     activeSourceLinks.some(
       (link) =>
-        link.role === 'additional_responsible' &&
-        link.adultId === sourceExtraSeat.accountId,
+        link.role === 'additional_responsible' && link.adultId === sourceExtraSeat.accountId,
     );
   const additionalKeepsAnotherMinor =
     sourceExtraSeat.state === 'assigned' &&
@@ -1549,7 +1580,7 @@ export async function acceptMinorLinkRequest(
     );
   const clearSourceAdditionalSeat = movedAdditionalLink && !additionalKeepsAnotherMinor;
   const sourceAdditionalCoverage = sourceExtraSeat.accountId
-    ? source.coverages.find((item) => item.accountId === sourceExtraSeat.accountId) ?? null
+    ? (source.coverages.find((item) => item.accountId === sourceExtraSeat.accountId) ?? null)
     : null;
   const newPrimary = createSupervisionLink({
     householdId: target.household.householdId,
@@ -1558,51 +1589,64 @@ export async function acceptMinorLinkRequest(
     role: 'primary_responsible',
     now,
   });
-  const historicalTargetLink = (await ctx.deps.ddb.send(new GetCommand({
-    TableName: ctx.deps.table,
-    Key: FK.supervision(notice.minorId, ctx.callerId),
-    ConsistentRead: true,
-  }))).Item as SupervisionLinkItem | undefined;
-  if (historicalTargetLink && (
-    (historicalTargetLink.state !== 'ended' && historicalTargetLink.state !== 'revoked') ||
-    historicalTargetLink.adultId !== ctx.callerId || historicalTargetLink.minorId !== notice.minorId ||
-    (historicalTargetLink.role !== 'primary_responsible' && historicalTargetLink.role !== 'additional_responsible')
-  )) throw new ApiError('CONFLICT');
+  const historicalTargetLink = (
+    await ctx.deps.ddb.send(
+      new GetCommand({
+        TableName: ctx.deps.table,
+        Key: FK.supervision(notice.minorId, ctx.callerId),
+        ConsistentRead: true,
+      }),
+    )
+  ).Item as SupervisionLinkItem | undefined;
+  if (
+    historicalTargetLink &&
+    ((historicalTargetLink.state !== 'ended' && historicalTargetLink.state !== 'revoked') ||
+      historicalTargetLink.adultId !== ctx.callerId ||
+      historicalTargetLink.minorId !== notice.minorId ||
+      (historicalTargetLink.role !== 'primary_responsible' &&
+        historicalTargetLink.role !== 'additional_responsible'))
+  )
+    throw new ApiError('CONFLICT');
   // Returning to an earlier responsible adult starts a new accepted interval
   // at the same key. Never overwrite an active interval or reset its revision.
-  const primaryWrite: TransactItem = historicalTargetLink ? {
-    Update: {
-      TableName: ctx.deps.table,
-      Key: FK.supervision(notice.minorId, ctx.callerId),
-      UpdateExpression:
-        'SET linkId = :linkId, householdId = :targetHouseholdId, #role = :primaryRole, #state = :active, validFrom = :now, validUntil = :noEnd, updatedAt = :now, revision = :nextRevision',
-      ConditionExpression:
-        'revision = :expectedRevision AND #state = :previousState AND #role = :previousRole AND householdId = :previousHouseholdId AND adultId = :adultId AND minorId = :minorId',
-      ExpressionAttributeNames: { '#state': 'state', '#role': 'role' },
-      ExpressionAttributeValues: {
-        ':expectedRevision': historicalTargetLink.revision,
-        ':nextRevision': nextRevision(historicalTargetLink.revision, historicalTargetLink.revision),
-        ':previousState': historicalTargetLink.state,
-        ':previousRole': historicalTargetLink.role,
-        ':previousHouseholdId': historicalTargetLink.householdId,
-        ':adultId': ctx.callerId,
-        ':minorId': notice.minorId,
-        ':targetHouseholdId': target.household.householdId,
-        ':linkId': newPrimary.linkId,
-        ':primaryRole': 'primary_responsible',
-        ':active': 'active',
-        ':now': now,
-        ':noEnd': null,
-      },
-      ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
-    },
-  } : {
-    Put: {
-      TableName: ctx.deps.table,
-      Item: newPrimary,
-      ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
-    },
-  };
+  const primaryWrite: TransactItem = historicalTargetLink
+    ? {
+        Update: {
+          TableName: ctx.deps.table,
+          Key: FK.supervision(notice.minorId, ctx.callerId),
+          UpdateExpression:
+            'SET linkId = :linkId, householdId = :targetHouseholdId, #role = :primaryRole, #state = :active, validFrom = :now, validUntil = :noEnd, updatedAt = :now, revision = :nextRevision',
+          ConditionExpression:
+            'revision = :expectedRevision AND #state = :previousState AND #role = :previousRole AND householdId = :previousHouseholdId AND adultId = :adultId AND minorId = :minorId',
+          ExpressionAttributeNames: { '#state': 'state', '#role': 'role' },
+          ExpressionAttributeValues: {
+            ':expectedRevision': historicalTargetLink.revision,
+            ':nextRevision': nextRevision(
+              historicalTargetLink.revision,
+              historicalTargetLink.revision,
+            ),
+            ':previousState': historicalTargetLink.state,
+            ':previousRole': historicalTargetLink.role,
+            ':previousHouseholdId': historicalTargetLink.householdId,
+            ':adultId': ctx.callerId,
+            ':minorId': notice.minorId,
+            ':targetHouseholdId': target.household.householdId,
+            ':linkId': newPrimary.linkId,
+            ':primaryRole': 'primary_responsible',
+            ':active': 'active',
+            ':now': now,
+            ':noEnd': null,
+          },
+          ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+        },
+      }
+    : {
+        Put: {
+          TableName: ctx.deps.table,
+          Item: newPrimary,
+          ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+        },
+      };
   const acceptance = createMinorLinkAcceptance({
     requestId: notice.noticeId,
     minorId: notice.minorId,
@@ -1710,27 +1754,29 @@ export async function acceptMinorLinkRequest(
             },
           } as TransactItem,
           ...(sourceAdditionalCoverage && sourceAdditionalCoverage.state !== 'ended'
-            ? [{
-                Update: {
-                  TableName: ctx.deps.table,
-                  Key: FK.familyCoverage(sourceExtraSeat.accountId),
-                  UpdateExpression:
-                    'SET #state = :ended, updatedAt = :now, revision = :nextRevision',
-                  ConditionExpression:
-                    'revision = :expectedRevision AND #state <> :ended AND householdId = :householdId',
-                  ExpressionAttributeNames: { '#state': 'state' },
-                  ExpressionAttributeValues: {
-                    ':expectedRevision': sourceAdditionalCoverage.revision,
-                    ':nextRevision': nextRevision(
-                      sourceAdditionalCoverage.revision,
-                      sourceAdditionalCoverage.revision,
-                    ),
-                    ':ended': 'ended',
-                    ':householdId': source.household.householdId,
-                    ':now': now,
+            ? [
+                {
+                  Update: {
+                    TableName: ctx.deps.table,
+                    Key: FK.familyCoverage(sourceExtraSeat.accountId),
+                    UpdateExpression:
+                      'SET #state = :ended, updatedAt = :now, revision = :nextRevision',
+                    ConditionExpression:
+                      'revision = :expectedRevision AND #state <> :ended AND householdId = :householdId',
+                    ExpressionAttributeNames: { '#state': 'state' },
+                    ExpressionAttributeValues: {
+                      ':expectedRevision': sourceAdditionalCoverage.revision,
+                      ':nextRevision': nextRevision(
+                        sourceAdditionalCoverage.revision,
+                        sourceAdditionalCoverage.revision,
+                      ),
+                      ':ended': 'ended',
+                      ':householdId': source.household.householdId,
+                      ':now': now,
+                    },
                   },
-                },
-              } as TransactItem]
+                } as TransactItem,
+              ]
             : []),
         ]
       : []),
@@ -1762,7 +1808,13 @@ export async function acceptMinorLinkRequest(
       : {
           Put: {
             TableName: ctx.deps.table,
-            Item: inheritedCoverage(target.household.householdId, notice.minorId, 'minor', targetCoverage, now),
+            Item: inheritedCoverage(
+              target.household.householdId,
+              notice.minorId,
+              'minor',
+              targetCoverage,
+              now,
+            ),
             ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
           },
         },
@@ -1848,7 +1900,13 @@ function additionalResponsibleCoverageWrite(
       },
     };
   }
-  const coverage = inheritedCoverage(householdId, ctx.callerId, 'additional_responsible', payerCoverage, now);
+  const coverage = inheritedCoverage(
+    householdId,
+    ctx.callerId,
+    'additional_responsible',
+    payerCoverage,
+    now,
+  );
   return {
     Put: {
       TableName: ctx.deps.table,
@@ -1875,10 +1933,7 @@ export async function acceptLegacyCoGuardianInvite(
     throw new ApiError('CODE_INVALID');
   }
 
-  const snapshot = await readHouseholdSnapshot(
-    repoDeps(ctx),
-    householdIdForPrimary(invite.userId),
-  );
+  const snapshot = await readHouseholdSnapshot(repoDeps(ctx), householdIdForPrimary(invite.userId));
   if (!snapshot || snapshot.household.primaryResponsibleId !== invite.userId) {
     throw new ApiError('CODE_INVALID');
   }
@@ -1895,11 +1950,7 @@ export async function acceptLegacyCoGuardianInvite(
   );
   if (!minorSeat || !primaryLink) throw new ApiError('CODE_INVALID');
   const minor = await profileOfConsistent(ctx.deps, invite.minorId);
-  if (
-    !minor ||
-    minor.accountType !== 'minor' ||
-    (minor.status ?? 'active') !== 'active'
-  ) {
+  if (!minor || minor.accountType !== 'minor' || (minor.status ?? 'active') !== 'active') {
     throw new ApiError('CODE_INVALID');
   }
   requireRecentFamilyAuthentication(ctx);
@@ -1911,9 +1962,7 @@ export async function acceptLegacyCoGuardianInvite(
     additionalResponsibleSeat: 1,
   });
   const payerCoverage = currentCoverage(snapshot, snapshot.household.primaryResponsibleId);
-  if (
-    !coverageAllowsNewFamilyAction(payerCoverage, now)
-  ) {
+  if (!coverageAllowsNewFamilyAction(payerCoverage, now)) {
     throw new ApiError('PAYMENT_REQUIRED');
   }
   const previousCoverage = await coverageOfConsistent(ctx, ctx.callerId);
@@ -1994,10 +2043,7 @@ export async function acceptLegacyLinkExistingInvite(
   invite: CodeItem,
 ): Promise<{ readonly link: LinkItem; readonly issuer: ProfileItem }> {
   const now = ctx.deps.now();
-  if (
-    ctx.caller.accountType !== 'minor' ||
-    (ctx.caller.status ?? 'active') !== 'active'
-  ) {
+  if (ctx.caller.accountType !== 'minor' || (ctx.caller.status ?? 'active') !== 'active') {
     throw new ApiError('ACCOUNT_TYPE_INCOMPATIBLE');
   }
   if (
@@ -2009,11 +2055,7 @@ export async function acceptLegacyLinkExistingInvite(
     throw new ApiError('CODE_INVALID');
   }
   const issuer = await profileOfConsistent(ctx.deps, invite.userId);
-  if (
-    !issuer ||
-    issuer.accountType !== 'adult' ||
-    (issuer.status ?? 'active') !== 'active'
-  ) {
+  if (!issuer || issuer.accountType !== 'adult' || (issuer.status ?? 'active') !== 'active') {
     throw new ApiError('CODE_INVALID');
   }
 
@@ -2036,10 +2078,7 @@ export async function acceptLegacyLinkExistingInvite(
   );
   if (!sourceSeat || !sourcePrimaryLink) throw new ApiError('CODE_INVALID');
 
-  const target = await readHouseholdSnapshot(
-    repoDeps(ctx),
-    householdIdForPrimary(invite.userId),
-  );
+  const target = await readHouseholdSnapshot(repoDeps(ctx), householdIdForPrimary(invite.userId));
   if (
     !target ||
     target.household.primaryResponsibleId !== invite.userId ||
@@ -2049,18 +2088,11 @@ export async function acceptLegacyLinkExistingInvite(
   }
   if (!emptyMinorSeat(target)) throw new ApiError('HOUSEHOLD_CAPACITY_EXCEEDED');
   const targetCoverage = currentCoverage(target, invite.userId);
-  if (
-    !coverageAllowsNewFamilyAction(targetCoverage, now)
-  ) {
+  if (!coverageAllowsNewFamilyAction(targetCoverage, now)) {
     throw new ApiError('PAYMENT_REQUIRED');
   }
 
-  const id = noticeId(
-    'mlr',
-    target.household.householdId,
-    invite.code,
-    ctx.callerId,
-  );
+  const id = noticeId('mlr', target.household.householdId, invite.code, ctx.callerId);
   const notice: FamilyNoticeItem = {
     ...noticeKey(id),
     entityType: 'FamilyNotice',
@@ -2092,7 +2124,12 @@ export async function acceptLegacyLinkExistingInvite(
     exactHouseholdCheck(ctx, target, target.household.revision),
     supervisionExactCheck(ctx, sourcePrimaryLink),
     ...legacyInviteDeleteOperations(ctx, invite, now),
-    ...familyInboxWrites(ctx, notice, [notice.createdById, notice.sourcePrimaryId, notice.intendedAdultId, notice.minorId]),
+    ...familyInboxWrites(ctx, notice, [
+      notice.createdById,
+      notice.sourcePrimaryId,
+      notice.intendedAdultId,
+      notice.minorId,
+    ]),
     {
       Put: {
         TableName: ctx.deps.table,
@@ -2117,12 +2154,7 @@ export async function inviteAdditionalResponsible(
 ): Promise<AdditionalResponsibleInvitationView> {
   const request = parseAdditionalInvitation(body);
   const snapshot = await explicitSnapshot(ctx, request.householdId);
-  authorize(
-    ctx,
-    snapshot,
-    'invite_additional_responsible',
-    request.expectedHouseholdRevision,
-  );
+  authorize(ctx, snapshot, 'invite_additional_responsible', request.expectedHouseholdRevision);
   requireRecentFamilyAuthentication(ctx);
   const intendedAdult = await profileOfConsistent(ctx.deps, request.intendedAdultId);
   if (!intendedAdult || intendedAdult.accountType !== 'adult') {
@@ -2168,7 +2200,12 @@ export async function inviteAdditionalResponsible(
     exactHouseholdCheck(ctx, snapshot, request.expectedHouseholdRevision),
     ...writableOwnerConditionChecks(ctx.deps, ctx.callerId),
     ...writableOwnerConditionChecks(ctx.deps, intendedAdult.userId),
-    ...familyInboxWrites(ctx, notice, [notice.createdById, notice.sourcePrimaryId, notice.intendedAdultId, notice.minorId]),
+    ...familyInboxWrites(ctx, notice, [
+      notice.createdById,
+      notice.sourcePrimaryId,
+      notice.intendedAdultId,
+      notice.minorId,
+    ]),
     {
       Put: {
         TableName: ctx.deps.table,
@@ -2192,11 +2229,7 @@ export async function acceptAdditionalResponsible(
   requireRecentFamilyAuthentication(ctx);
   const notice = await readNotice(ctx, invitationId);
   const now = ctx.deps.now();
-  if (
-    !notice ||
-    notice.kind !== 'additional_responsible_invitation' ||
-    !notice.intendedAdultId
-  ) {
+  if (!notice || notice.kind !== 'additional_responsible_invitation' || !notice.intendedAdultId) {
     throw new ApiError('NOT_FOUND');
   }
   if (request.householdId !== notice.householdId) throw new ApiError('NOT_FOUND');
@@ -2291,7 +2324,13 @@ export async function acceptAdditionalResponsible(
       },
     };
   });
-  const coverage = inheritedCoverage(snapshot.household.householdId, ctx.callerId, 'additional_responsible', payerCoverage, now);
+  const coverage = inheritedCoverage(
+    snapshot.household.householdId,
+    ctx.callerId,
+    'additional_responsible',
+    payerCoverage,
+    now,
+  );
   const coverageWrite: TransactItem = previousCoverage
     ? {
         Update: {
@@ -2419,18 +2458,10 @@ function revokeLinkUpdate(ctx: Ctx, link: SupervisionLinkItem, now: number): Tra
   };
 }
 
-export async function replaceAdditionalScope(
-  ctx: Ctx,
-  body: unknown,
-): Promise<HouseholdView> {
+export async function replaceAdditionalScope(ctx: Ctx, body: unknown): Promise<HouseholdView> {
   const request = parseScopeCommand(body);
   const snapshot = await explicitSnapshot(ctx, request.householdId);
-  authorize(
-    ctx,
-    snapshot,
-    'replace_additional_scope',
-    request.expectedHouseholdRevision,
-  );
+  authorize(ctx, snapshot, 'replace_additional_scope', request.expectedHouseholdRevision);
   requireRecentFamilyAuthentication(ctx);
   const seat = additionalSeat(snapshot);
   if (seat.state !== 'assigned' || !seat.accountId) throw new ApiError('NOT_FOUND');
@@ -2445,8 +2476,7 @@ export async function replaceAdditionalScope(
   });
   const now = ctx.deps.now();
   const linksForAdult = snapshot.supervisionLinks.filter(
-    (link) =>
-      link.adultId === seat.accountId && link.role === 'additional_responsible',
+    (link) => link.adultId === seat.accountId && link.role === 'additional_responsible',
   );
   const activeScope = new Set(
     linksForAdult.filter((link) => link.state === 'active').map((link) => link.minorId),
@@ -2519,18 +2549,10 @@ export async function replaceAdditionalScope(
   return refreshedView(ctx, snapshot.household.householdId);
 }
 
-export async function revokeAdditionalResponsible(
-  ctx: Ctx,
-  body: unknown,
-): Promise<HouseholdView> {
+export async function revokeAdditionalResponsible(ctx: Ctx, body: unknown): Promise<HouseholdView> {
   const request = parseCommand(body) as RevokeAdditionalResponsibleRequest;
   const snapshot = await explicitSnapshot(ctx, request.householdId);
-  authorize(
-    ctx,
-    snapshot,
-    'revoke_additional_responsible',
-    request.expectedHouseholdRevision,
-  );
+  authorize(ctx, snapshot, 'revoke_additional_responsible', request.expectedHouseholdRevision);
   requireRecentFamilyAuthentication(ctx);
   const seat = additionalSeat(snapshot);
   if (seat.state !== 'assigned' || !seat.accountId) throw new ApiError('NOT_FOUND');
@@ -2567,24 +2589,25 @@ export async function revokeAdditionalResponsible(
     },
     ...links.map((link) => revokeLinkUpdate(ctx, link, now)),
     ...(coverage && coverage.state !== 'ended'
-      ? [{
-          Update: {
-            TableName: ctx.deps.table,
-            Key: FK.familyCoverage(seat.accountId),
-            UpdateExpression:
-              'SET #state = :ended, updatedAt = :now, revision = :nextRevision',
-            ConditionExpression:
-              'revision = :expectedRevision AND #state <> :ended AND householdId = :householdId',
-            ExpressionAttributeNames: { '#state': 'state' },
-            ExpressionAttributeValues: {
-              ':expectedRevision': coverage.revision,
-              ':nextRevision': nextRevision(coverage.revision, coverage.revision),
-              ':ended': 'ended',
-              ':householdId': snapshot.household.householdId,
-              ':now': now,
+      ? [
+          {
+            Update: {
+              TableName: ctx.deps.table,
+              Key: FK.familyCoverage(seat.accountId),
+              UpdateExpression: 'SET #state = :ended, updatedAt = :now, revision = :nextRevision',
+              ConditionExpression:
+                'revision = :expectedRevision AND #state <> :ended AND householdId = :householdId',
+              ExpressionAttributeNames: { '#state': 'state' },
+              ExpressionAttributeValues: {
+                ':expectedRevision': coverage.revision,
+                ':nextRevision': nextRevision(coverage.revision, coverage.revision),
+                ':ended': 'ended',
+                ':householdId': snapshot.household.householdId,
+                ':now': now,
+              },
             },
-          },
-        } as TransactItem]
+          } as TransactItem,
+        ]
       : []),
     ...writableOwnerConditionChecks(ctx.deps, ctx.callerId),
   ];
@@ -2700,11 +2723,7 @@ export async function transferPrimaryResponsibility(
   ) {
     throw new ApiError('CURRENT_PRIMARY_APPROVAL_REQUIRED');
   }
-  const transfer = await validatedPrimaryTransferState(
-    ctx,
-    snapshot,
-    request.newPrimaryAccountId,
-  );
+  const transfer = await validatedPrimaryTransferState(ctx, snapshot, request.newPrimaryAccountId);
   const entitlement = await requireFamilyEntitlement(ctx, request.householdId, {
     minorSeats: transfer.minors.length,
     additionalResponsibleSeat: 1,

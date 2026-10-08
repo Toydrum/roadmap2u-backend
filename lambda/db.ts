@@ -24,6 +24,8 @@ export interface Deps {
   cognito: CognitoIdentityProviderClient;
   table: string;
   userPoolId: string;
+  /** Independent, live privacy decisions/restore exclusions; never restored with the forest. */
+  privacyTable?: string;
   now(): number;
 }
 
@@ -36,6 +38,7 @@ export function realDeps(): Deps {
     cognito: new CognitoIdentityProviderClient({}),
     table: process.env['TABLE_NAME'] ?? 'roadmap',
     userPoolId: process.env['USER_POOL_ID'] ?? '',
+    privacyTable: process.env['PRIVACY_TABLE_NAME'],
     now: () => Date.now(),
   };
 }
@@ -50,6 +53,8 @@ export interface ProfileItem {
   displayName: string;
   accountType: AccountType;
   socialEnabled: boolean;
+  /** Private adolescent accounts keep this restriction after turning 18. */
+  privacyMode?: 'adolescent_private';
   createdAt: number;
   /** Missing on legacy profiles and therefore treated exactly like `active`. */
   status?: 'active' | 'closing';
@@ -133,6 +138,8 @@ export interface RecordItem {
    *  expression, and DynamoDB can only compare top-level attributes. */
   updatedAt: number;
   syncedAt: number;
+  /** Server consent revision; absent on pre-privacy records. */
+  privacyRevision?: number;
 }
 
 // ── Key builders ────────────────────────────────────────────────────────────
@@ -140,7 +147,10 @@ export interface RecordItem {
 export const K = {
   user: (id: string) => `USER#${id}`,
   profile: (id: string) => ({ pk: `USER#${id}`, sk: 'PROFILE' as const }),
-  uniqUsername: (username: string) => ({ pk: `UNIQ#USERNAME#${username.toLowerCase()}`, sk: 'UNIQ' }),
+  uniqUsername: (username: string) => ({
+    pk: `UNIQ#USERNAME#${username.toLowerCase()}`,
+    sk: 'UNIQ',
+  }),
   link: (minorId: string, guardianId: string) => ({
     pk: `USER#${minorId}`,
     sk: `GUARDIAN#${guardianId}`,
@@ -297,4 +307,12 @@ export async function batchWriteAll(deps: Deps, requests: BatchWriteRequest[]): 
   }
 }
 
-export { BatchWriteCommand, DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand };
+export {
+  BatchWriteCommand,
+  DeleteCommand,
+  GetCommand,
+  PutCommand,
+  QueryCommand,
+  TransactWriteCommand,
+  UpdateCommand,
+};

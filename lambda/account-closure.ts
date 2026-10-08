@@ -6,10 +6,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
-import {
-  DynamoDBDocumentClient,
-  type TransactWriteCommandInput,
-} from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import type { Context, SQSBatchResponse, SQSEvent } from 'aws-lambda';
 import {
   GetCommand,
@@ -35,7 +32,7 @@ import {
   discoverAdultFamilyClosure,
 } from './family/account-closure';
 import { SK } from './social/model';
-import { FK, supervisionLinkId } from './family/keys';
+import { FK, supervisionLinkId, householdIdForPrimary } from './family/keys';
 import type {
   CoverageAssignmentItem,
   FamilyEntitlementItem,
@@ -43,18 +40,16 @@ import type {
   SupervisionLinkItem,
 } from './family/model';
 import { readHouseholdSnapshot } from './family/repository';
+import { prepareAccountPrivacyClosure, completeAccountPrivacyClosure } from './privacy/closure';
+import type { RestoreExclusionItem } from './privacy/retention';
 
 export const ACCOUNT_CLOSURE_OPEN_GSI_PK = 'ACCOUNT_CLOSURE#OPEN';
 type AccountClosureTransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
 
 export type AccountClosureState =
-  | 'requested'
-  | 'purging'
-  | 'purgeComplete'
-  | 'completed'
-  | 'blocked';
+  'requested' | 'purging' | 'purgeComplete' | 'completed' | 'blocked';
 
-export type AccountClosureKind = 'self_adult' | 'guardian_minor';
+export type AccountClosureKind = 'self_adult' | 'guardian_minor' | 'private_adolescent';
 
 export type AccountClosurePhase =
   | 'familyMembership'
@@ -160,16 +155,13 @@ const WORKER_LEASE_MS = 60_000;
 // empty full sweeps separated by this window provide a stable purge boundary.
 const GSI_STABILITY_DELAY_MS = 30_000;
 // Keep completed tombstones for 30 days so delayed/duplicate deliveries remain idempotent.
-const COMPLETED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const COMPLETED_RETENTION_MS = 36 * 24 * 60 * 60 * 1000;
 
 function isTerminalClosureState(state: AccountClosureState): boolean {
   return state === 'completed' || state === 'blocked';
 }
 
-function exactClosureLeaseCheck(
-  deps: AccountClosureDeps,
-  closure: AccountClosureItem,
-) {
+function exactClosureLeaseCheck(deps: AccountClosureDeps, closure: AccountClosureItem) {
   return {
     ConditionCheck: {
       TableName: deps.table,
@@ -399,7 +391,7 @@ async function readFamilyCoverage(
   return item?.entityType === 'CoverageAssignment' &&
     item.pk === FK.familyCoverage(accountId).pk &&
     item.sk === FK.familyCoverage(accountId).sk
-    ? item as CoverageAssignmentItem
+    ? (item as CoverageAssignmentItem)
     : null;
 }
 
@@ -495,6 +487,24 @@ async function purgeFamilyMembership(
   deps: AccountClosureDeps,
   closure: AccountClosureItem,
 ): Promise<'continue' | 'blocked'> {
+  if (closure.kind === 'private_adolescent') {
+    const [coverage, household] = await Promise.all([
+      readFamilyCoverage(deps, closure.sub),
+      deps.ddb.send(
+        new GetCommand({
+          TableName: deps.table,
+          Key: FK.household(householdIdForPrimary(closure.sub)),
+          ConsistentRead: true,
+        }),
+      ),
+    ]);
+    if (coverage || household.Item) {
+      await blockClosure(deps, closure, 'incomplete_family_state', []);
+      return 'blocked';
+    }
+    await saveClosureCheckpoint(deps, closure, { phase: 'inboundGuardianLinks' });
+    return 'continue';
+  }
   if ((closure.kind ?? 'self_adult') === 'self_adult') {
     const discovery = await discoverAdultFamilyClosure(deps, closure.sub);
     const reason = adultFamilyClosureBlockReason(discovery);
@@ -546,9 +556,7 @@ async function purgeFamilyMembership(
   const additionalSeat = snapshot.seats.find(
     (candidate) => candidate.seatType === 'additional_responsible',
   );
-  const additionalId = additionalSeat?.state === 'assigned'
-    ? additionalSeat.accountId
-    : null;
+  const additionalId = additionalSeat?.state === 'assigned' ? additionalSeat.accountId : null;
   const releasesAdditional =
     additionalId !== null &&
     links.some(
@@ -565,7 +573,7 @@ async function purgeFamilyMembership(
         link.state === 'active',
     );
   const additionalCoverage = releasesAdditional
-    ? snapshot.coverages.find((item) => item.accountId === additionalId) ?? null
+    ? (snapshot.coverages.find((item) => item.accountId === additionalId) ?? null)
     : null;
   const now = deps.now();
   await deps.ddb.send(
@@ -706,7 +714,7 @@ async function familyEntitlementOf(
   );
   const item = result.Item as Partial<FamilyEntitlementItem> | undefined;
   return item?.entityType === 'FamilyEntitlement' && item.householdId === householdId
-    ? item as FamilyEntitlementItem
+    ? (item as FamilyEntitlementItem)
     : null;
 }
 
@@ -774,14 +782,9 @@ async function closeOwnedHousehold(
     return 'continue';
   }
   if (owned.seats.some((seat) => seat.state !== 'empty' || seat.accountId !== null)) {
-    await blockClosure(
-      deps,
-      closure,
-      'incomplete_family_state',
-      [
-        ...owned.seats.map((seat) => exactSeatCheck(deps, seat)),
-      ],
-    );
+    await blockClosure(deps, closure, 'incomplete_family_state', [
+      ...owned.seats.map((seat) => exactSeatCheck(deps, seat)),
+    ]);
     return 'blocked';
   }
   const entitlement = await familyEntitlementOf(deps, owned.household.householdId);
@@ -794,8 +797,7 @@ async function closeOwnedHousehold(
           Update: {
             TableName: deps.table,
             Key: FK.household(owned.household.householdId),
-            UpdateExpression:
-              'SET #state = :closed, revision = :nextRevision, updatedAt = :now',
+            UpdateExpression: 'SET #state = :closed, revision = :nextRevision, updatedAt = :now',
             ConditionExpression:
               'entityType = :entityType AND householdId = :householdId AND primaryResponsibleId = :primaryResponsibleId AND #state = :active AND revision = :expectedRevision',
             ExpressionAttributeNames: { '#state': 'state' },
@@ -904,10 +906,7 @@ async function purgeFamilySupervisionLink(
     }
     await deps.ddb.send(
       new TransactWriteCommand({
-        TransactItems: [
-          exactClosureLeaseCheck(deps, closure),
-          exactSupervisionDelete(deps, link),
-        ],
+        TransactItems: [exactClosureLeaseCheck(deps, closure), exactSupervisionDelete(deps, link)],
       }),
     );
     await saveClosureCheckpoint(deps, closure, {
@@ -1134,12 +1133,7 @@ async function purgeDirectMirrors(
   }
   const keys = [
     K.uniqUsername(closure.username),
-    ...(closure.friendCode
-      ? [
-          K.codeF(closure.friendCode),
-          ...minorInviteKeys,
-        ]
-      : []),
+    ...(closure.friendCode ? [K.codeF(closure.friendCode), ...minorInviteKeys] : []),
   ];
   await batchWriteAll(
     deps,
@@ -1158,9 +1152,7 @@ async function purgeUserPartitionPage(
     consistentRead: true,
   });
   if (page.items.some(({ sk }) => sk.startsWith('GUARDIAN#'))) {
-    return (await purgeInboundGuardianLink(deps, closure)) === 'blocked'
-      ? 'blocked'
-      : 'pending';
+    return (await purgeInboundGuardianLink(deps, closure)) === 'blocked' ? 'blocked' : 'pending';
   }
   await batchWriteAll(
     deps,
@@ -1226,6 +1218,7 @@ async function markPurgeComplete(
 async function deleteIdentityAndComplete(
   deps: AccountClosureDeps,
   closure: AccountClosureItem,
+  privacyControl?: RestoreExclusionItem,
 ): Promise<void> {
   try {
     await deps.cognito.send(
@@ -1271,6 +1264,7 @@ async function deleteIdentityAndComplete(
           subject: closure.sub,
           details: { closureId: closure.closureId, from: 'purgeComplete', to: 'completed' },
         }),
+        ...(await completeAccountPrivacyClosure(deps, privacyControl)),
       ],
     }),
   );
@@ -1352,13 +1346,18 @@ export async function processAccountClosureMessage(
     await deps.queue.enqueue(message, delaySeconds);
     return 'pending';
   }
+  const privacy = await prepareAccountPrivacyClosure(deps, closure);
+  if (privacy.blocked) {
+    await deps.queue.enqueue(message, 900);
+    return 'pending';
+  }
   if (closure.state === 'purgeComplete') {
     if (closure.familyCleanupVersion !== ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION) {
       await reopenLegacyPurgeCompleteForFamilyCleanup(deps, closure);
       await deps.queue.enqueue(message);
       return 'pending';
     }
-    await deleteIdentityAndComplete(deps, closure);
+    await deleteIdentityAndComplete(deps, closure, privacy.control);
     return 'completed';
   }
   if (closure.state === 'purging') {
@@ -1372,9 +1371,10 @@ export async function processAccountClosureMessage(
       throw error;
     }
     let continuationDelay: number | undefined;
-    const phase = leased.familyCleanupVersion === ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION
-      ? leased.checkpoint?.phase
-      : 'familyMembership';
+    const phase =
+      leased.familyCleanupVersion === ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION
+        ? leased.checkpoint?.phase
+        : 'familyMembership';
     switch (phase) {
       case 'familyMembership':
         if ((await purgeFamilyMembership(deps, leased)) === 'blocked') return 'pending';
@@ -1518,6 +1518,9 @@ export function realAccountClosureWorkerDeps(): AccountClosureDeps {
     ddb,
     cognito: new CognitoIdentityProviderClient({}),
     table: requiredEnvironment('TABLE_NAME'),
+    ...(process.env['PRIVACY_TABLE_NAME']
+      ? { privacyTable: process.env['PRIVACY_TABLE_NAME'] }
+      : {}),
     userPoolId: requiredEnvironment('USER_POOL_ID'),
     now: Date.now,
     auditWriter: new AuditWriter({
@@ -1538,10 +1541,8 @@ let workerDeps: AccountClosureDeps | undefined;
 export function createAccountClosureWorkerHandler(
   resolveDeps: () => AccountClosureDeps,
 ): (event: SQSEvent, context?: Context) => Promise<SQSBatchResponse> {
-  return instrumentHandler(
-    'account-closure-worker',
-    (event: SQSEvent, _context?: Context) =>
-      handleAccountClosureQueueEvent(event, resolveDeps()),
+  return instrumentHandler('account-closure-worker', (event: SQSEvent, _context?: Context) =>
+    handleAccountClosureQueueEvent(event, resolveDeps()),
   );
 }
 

@@ -15,7 +15,11 @@ import {
 export interface PaidAccessSources {
   readonly subscription?: SubscriptionSourceItem;
   readonly coverage?: CoverageAssignmentItem;
-  readonly ownerProfile?: { readonly accountType: 'adult' | 'minor'; readonly majorityAt?: string };
+  readonly ownerProfile?: {
+    readonly accountType: 'adult' | 'minor';
+    readonly majorityAt?: string;
+    readonly privacyMode?: string;
+  };
 }
 
 export interface AccessSnapshot extends PaidAccessSources {
@@ -299,11 +303,16 @@ function paidEntitlements(
     });
   }
   const family = sources.coverage;
-  const pilotMajority = family?.seatType === 'minor' && sources.ownerProfile?.accountType === 'minor'
-    && typeof sources.ownerProfile.majorityAt === 'string'
-    ? Date.parse(`${sources.ownerProfile.majorityAt}T00:00:00.000Z`) : null;
-  const pilot = family?.source === 'sponsored_pilot' &&
-    family.state === 'active' && family.paidThrough === null &&
+  const pilotMajority =
+    family?.seatType === 'minor' &&
+    sources.ownerProfile?.accountType === 'minor' &&
+    typeof sources.ownerProfile.majorityAt === 'string'
+      ? Date.parse(`${sources.ownerProfile.majorityAt}T00:00:00.000Z`)
+      : null;
+  const pilot =
+    family?.source === 'sponsored_pilot' &&
+    family.state === 'active' &&
+    family.paidThrough === null &&
     (family.seatType !== 'minor' ||
       (pilotMajority !== null && Number.isFinite(pilotMajority) && pilotMajority > now));
   const familyUntil = family?.source === 'sponsored_pilot' ? null : paidBoundary(family, now);
@@ -343,7 +352,13 @@ export function deriveAccessItem(
   sources: PaidAccessSources = {},
 ): AccessItem {
   const key = accessKey(ownerSub);
-  const active: ActiveEntitlement[] = grants
+  const privateMinor =
+    sources.ownerProfile?.accountType === 'minor' &&
+    sources.ownerProfile.privacyMode === 'adolescent_private';
+  // Private adolescent cloud is authorized separately by the responsible adult.
+  // Preserve old sources as data, but they cannot lift this minor's Free limits.
+  const eligibleGrants = privateMinor ? [] : grants;
+  const active: ActiveEntitlement[] = eligibleGrants
     .filter((grant) => isActiveGrant(grant, ownerSub, now))
     .map<ActiveEntitlement>((grant) => ({
       limits: grant.limits,
@@ -355,14 +370,14 @@ export function deriveAccessItem(
         validUntil: grant.expiresAt,
       },
     }));
-  active.push(...paidEntitlements(ownerSub, now, sources));
+  if (!privateMinor) active.push(...paidEntitlements(ownerSub, now, sources));
   active.sort(
     (left, right) =>
       left.source.kind.localeCompare(right.source.kind) ||
       left.source.sourceId.localeCompare(right.source.sourceId),
   );
   const boundaries = [
-    nextBoundary(grants, ownerSub, now),
+    nextBoundary(eligibleGrants, ownerSub, now),
     ...active.map(({ source }) => source.validUntil),
   ].filter((value): value is number => value !== null && value > now);
   const boundary = boundaries.length ? Math.min(...boundaries) : null;

@@ -84,8 +84,12 @@ describe('guardian-minor closure infrastructure', () => {
           'dynamodb:ConditionCheckItem',
         ),
     );
-    expect(conditionChecks).toHaveLength(1);
-    expect(conditionChecks[0].Condition).toEqual({
+    expect(conditionChecks).toHaveLength(2);
+    expect(
+      conditionChecks.find(
+        (statement) => !JSON.stringify(statement.Resource).includes('PrivacyTable'),
+      )?.Condition,
+    ).toEqual({
       StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
     });
   }, 20_000);
@@ -102,11 +106,18 @@ describe('guardian-minor closure infrastructure', () => {
           : statement.Action === 'dynamodb:DeleteItem'),
     );
 
-    expect(deleteAllows).toHaveLength(1);
-    expect(deleteAllows[0].Condition).toEqual({
+    expect(deleteAllows).toHaveLength(2);
+    const mainDeletes = deleteAllows.find(
+      (statement) => !JSON.stringify(statement.Resource).includes('PrivacyTable'),
+    )!;
+    expect(mainDeletes.Condition).toEqual({
       'ForAllValues:StringLike': {
         'dynamodb:LeadingKeys': ['USER#*', 'CODE#G#*'],
       },
+      StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+    });
+    expect(deleteAllows.find((statement) => statement !== mainDeletes)?.Condition).toEqual({
+      'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'PRIVACY_STATE#*' },
       StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
     });
   }, 20_000);

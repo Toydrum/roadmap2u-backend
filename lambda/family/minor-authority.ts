@@ -2,11 +2,7 @@ import { ApiError } from '@app/api/contracts';
 import { GetCommand, type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import { K, type Deps, type LinkItem, type ProfileItem } from '../db';
 import { FK } from './keys';
-import type {
-  HouseholdItem,
-  MinorSeatAssignmentItem,
-  SupervisionLinkItem,
-} from './model';
+import type { HouseholdItem, MinorSeatAssignmentItem, SupervisionLinkItem } from './model';
 import { authorizeFamilyAction, type FamilyAction } from './policy';
 import { readHouseholdSnapshot } from './repository';
 
@@ -50,6 +46,9 @@ export async function requirePrimaryMinorAuthority(
   minorId: string,
   action: PrimaryMinorAction,
 ): Promise<PrimaryMinorAuthority> {
+  // Restored legacy/family links cannot override a private admission.
+  const privateProfile = await readConsistent<ProfileItem>(deps, K.profile(minorId));
+  if (actor.privacyMode || privateProfile?.privacyMode) throw new ApiError('NOT_FOUND');
   const coverage = await readConsistent<{ householdId?: unknown }>(
     deps,
     FK.familyCoverage(minorId),
@@ -57,11 +56,7 @@ export async function requirePrimaryMinorAuthority(
   if (!coverage) {
     const link = await readConsistent<LinkItem>(deps, K.link(minorId, actor.userId));
     if (!link) throw new ApiError('NOT_FOUND');
-    if (
-      link.kind !== 'created' ||
-      link.guardianId !== actor.userId ||
-      link.minorId !== minorId
-    ) {
+    if (link.kind !== 'created' || link.guardianId !== actor.userId || link.minorId !== minorId) {
       throw new ApiError('FORBIDDEN', 'only the current primary responsible administers identity');
     }
     return { model: 'legacy', link };
@@ -71,9 +66,12 @@ export async function requirePrimaryMinorAuthority(
   }
 
   const minor = await readConsistent<ProfileItem>(deps, K.profile(minorId));
-  if (!minor || minor.accountType !== 'minor' ||
+  if (
+    !minor ||
+    minor.accountType !== 'minor' ||
     (minor.majorityAt !== undefined &&
-      minor.majorityAt <= new Date(deps.now()).toISOString().slice(0, 10))) {
+      minor.majorityAt <= new Date(deps.now()).toISOString().slice(0, 10))
+  ) {
     throw new ApiError('NOT_FOUND');
   }
 

@@ -219,27 +219,33 @@ function sponsoredAccessBrokerLogGroupArn(stack: Stack, stage: PolicyStage): str
 }
 
 function familyPilotBrokerLogGroupArn(stack: Stack, stage: PolicyStage): string {
-  return Arn.format({
-    partition: Aws.PARTITION,
-    service: 'logs',
-    region: stack.region,
-    account: stack.account,
-    resource: 'log-group',
-    resourceName: `/aws/lambda/roadmap-family-pilot-broker-${stage}`,
-    arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-  }, stack);
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'logs',
+      region: stack.region,
+      account: stack.account,
+      resource: 'log-group',
+      resourceName: `/aws/lambda/roadmap-family-pilot-broker-${stage}`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
 }
 
 function familyMajorityReconcilerLogGroupArn(stack: Stack, stage: PolicyStage): string {
-  return Arn.format({
-    partition: Aws.PARTITION,
-    service: 'logs',
-    region: stack.region,
-    account: stack.account,
-    resource: 'log-group',
-    resourceName: `/aws/lambda/roadmap-family-majority-reconciler-${stage}`,
-    arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-  }, stack);
+  return Arn.format(
+    {
+      partition: Aws.PARTITION,
+      service: 'logs',
+      region: stack.region,
+      account: stack.account,
+      resource: 'log-group',
+      resourceName: `/aws/lambda/roadmap-family-majority-reconciler-${stage}`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    },
+    stack,
+  );
 }
 
 function accessCodeParameterArn(stack: Stack, stage: PolicyStage): string {
@@ -540,6 +546,25 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         sid: 'AppendOnlyAuditEvents',
         actions: ['dynamodb:PutItem'],
         resources: [auditTableArn(stack, stage)],
+      }),
+      new iam.PolicyStatement({
+        sid: 'UseIndependentPrivacyState',
+        actions: [
+          'dynamodb:GetItem',
+          'dynamodb:Query',
+          'dynamodb:PutItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:ConditionCheckItem',
+        ],
+        resources: [
+          resourceArn(stack, 'dynamodb', 'table', `roadmap-privacy-${stage}`),
+          resourceArn(stack, 'dynamodb', 'table', `roadmap-privacy-${stage}/index/gsi1`),
+        ],
+      }),
+      new iam.PolicyStatement({
+        sid: 'MaintainOnlyClassifiedAudit',
+        actions: ['dynamodb:Query', 'dynamodb:DeleteItem', 'dynamodb:UpdateItem'],
+        resources: [auditTableArn(stack, stage), `${auditTableArn(stack, stage)}/index/gsi1`],
       }),
       ...(usesAccessCodeSsm(stage)
         ? [
@@ -862,7 +887,11 @@ function createCorePolicies(
           'dynamodb:UpdateTimeToLive',
           ...destructiveTableActions,
         ],
-        resources: [...primaryTableArns(stack, stage), auditTableArn(stack, stage)],
+        resources: [
+          ...primaryTableArns(stack, stage),
+          auditTableArn(stack, stage),
+          resourceArn(stack, 'dynamodb', 'table', `roadmap-privacy-${stage}`),
+        ],
       }),
       new iam.PolicyStatement({
         sid: 'ManageOnlyAccountClosureQueues',

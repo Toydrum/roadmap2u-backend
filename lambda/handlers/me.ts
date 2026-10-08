@@ -19,10 +19,13 @@ export function profileView(item: ProfileItem): UserProfile {
     accountType: item.accountType,
     socialEnabled: item.socialEnabled,
     createdAt: item.createdAt,
+    ...(item.privacyMode ? { privacyMode: item.privacyMode, majorityAt: item.majorityAt } : {}),
   };
 }
 
 export async function getMe(ctx: Ctx): Promise<MeResponse> {
+  if (ctx.caller.privacyMode)
+    return { profile: profileView(ctx.caller), family: { guardians: [], minors: [] } };
   const [guardianLinks, minorLinks] = await Promise.all([
     guardiansOf(ctx.deps, ctx.callerId),
     minorsOf(ctx.deps, ctx.callerId),
@@ -31,14 +34,26 @@ export async function getMe(ctx: Ctx): Promise<MeResponse> {
   const guardians: FamilyLinkView[] = [];
   for (const link of guardianLinks) {
     const other = await profileOfConsistent(ctx.deps, link.guardianId);
-    if (!other || (other.status !== undefined && other.status !== 'active')) continue;
-    guardians.push({ linkId: link.linkId, kind: link.kind, user: toPublic(other, false), createdAt: link.createdAt });
+    if (!other || other.privacyMode || (other.status !== undefined && other.status !== 'active'))
+      continue;
+    guardians.push({
+      linkId: link.linkId,
+      kind: link.kind,
+      user: toPublic(other, false),
+      createdAt: link.createdAt,
+    });
   }
   const minors: FamilyLinkView[] = [];
   for (const link of minorLinks) {
     const other = await profileOfConsistent(ctx.deps, link.minorId);
-    if (!other || (other.status !== undefined && other.status !== 'active')) continue;
-    minors.push({ linkId: link.linkId, kind: link.kind, user: toPublic(other, true), createdAt: link.createdAt });
+    if (!other || other.privacyMode || (other.status !== undefined && other.status !== 'active'))
+      continue;
+    minors.push({
+      linkId: link.linkId,
+      kind: link.kind,
+      user: toPublic(other, true),
+      createdAt: link.createdAt,
+    });
   }
   return { profile: profileView(ctx.caller), family: { guardians, minors } };
 }
@@ -49,7 +64,8 @@ export async function patchMe(ctx: Ctx, body: { displayName?: string }): Promise
     const current = await requireWritableOwner(ctx, ctx.callerId);
     return profileView(current);
   }
-  if (!displayName || displayName.length > 40) throw new ApiError('VALIDATION', 'displayName 1-40 chars');
+  if (!displayName || displayName.length > 40)
+    throw new ApiError('VALIDATION', 'displayName 1-40 chars');
   try {
     await ctx.deps.ddb.send(
       new TransactWriteCommand({

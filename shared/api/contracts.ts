@@ -7,6 +7,7 @@ import {
   TreeNode,
   TimerSession,
 } from '../db/schema';
+import type { Dict } from '../i18n/es';
 
 /**
  * THE backend contract — normative and single-source. Three implementations
@@ -20,6 +21,132 @@ import {
  */
 
 // ── Commercial catalog & access ─────────────────────────────────────────────
+
+/** Version identifiers refer to immutable ES/EN documents, independently of sync schema. */
+export const ADULT_PRIVACY_VERSIONS = Object.freeze({
+  noticeVersion: 'privacy-2026-10-07-v2',
+  termsVersion: 'terms-2026-10-07-v2',
+  cloudConsentVersion: 'cloud-consent-2026-10-07-v2',
+});
+
+/** The same immutable text is displayed by the UI and retained by the server. */
+export function adultPrivacyDocument(
+  language: 'es' | 'en',
+  dictionary: Pick<Dict, 'legal' | 'privacy'>,
+) {
+  return {
+    versions: ADULT_PRIVACY_VERSIONS,
+    language,
+    notice: dictionary.legal.privacy,
+    terms: dictionary.legal.terms,
+    declaration: {
+      adult: dictionary.privacy.adultCheckbox,
+      terms: dictionary.privacy.termsCheckbox,
+    },
+    cloud: {
+      title: dictionary.privacy.cloudTitle,
+      body: dictionary.privacy.cloudBody,
+      sensitive: dictionary.privacy.cloudSensitive,
+      authorization: dictionary.privacy.cloudCheckbox,
+    },
+    adolescent: {
+      version: 'private-adolescent-2026-10-07-v2',
+      explanation: dictionary.privacy.adolescentBody,
+      authorizationModel: dictionary.privacy.automaticAuthorization,
+      declaredName: dictionary.privacy.guardianName,
+      declaredRelationship: dictionary.privacy.guardianRelationship,
+      parentRelationship: dictionary.privacy.parentRelationship,
+      legalGuardianRelationship: dictionary.privacy.legalGuardianRelationship,
+      understanding: dictionary.privacy.adolescentCheckbox,
+      representation: dictionary.privacy.representationCheckbox,
+      authorization: dictionary.privacy.guardianCheckbox,
+    },
+  };
+}
+
+export type PrivacyConsentState = 'absent' | 'granted' | 'revoked' | 'version_review_required';
+export type CloudErasureState = 'none' | 'requested' | 'purging' | 'blocked' | 'completed';
+export interface PrivacyStatus {
+  userId: string;
+  scope: 'adult' | 'adolescent_private' | 'unsupported';
+  enforcement: 'off' | 'enforce';
+  revision: number;
+  adultDeclared: boolean;
+  cloudConsent: PrivacyConsentState;
+  canUseCloud: boolean;
+  erasure: CloudErasureState;
+  versions: typeof ADULT_PRIVACY_VERSIONS;
+  documentHash: string;
+  updatedAt: number | null;
+  privateOnly?: boolean;
+  majorityAt?: string;
+  guardianConsent?: 'granted' | 'revoked' | 'version_review_required' | 'ended';
+  invitationId?: string;
+  adolescentUnderstood?: boolean;
+  /** Cloud capacity derived from the authorized responsible account, without Premium or family membership for this account. */
+  cloudCoverage?: {
+    kind: 'responsible_premium';
+    state: 'active' | 'unavailable';
+    validUntil: number | null;
+  };
+}
+export interface PrivacyCommandBase {
+  commandId: string;
+  expectedRevision: number;
+  language: 'es' | 'en';
+  noticeVersion: string;
+  termsVersion: string;
+  cloudConsentVersion: string;
+  documentHash: string;
+}
+export type PrivacyConsentCommand = PrivacyCommandBase &
+  (
+    | { action: 'declare_adult'; declareAdult: true; acceptTerms: true }
+    | { action: 'grant_cloud'; accepted: true }
+    | { action: 'revoke_cloud' | 'erase_cloud' }
+    | {
+        action: 'accept_adolescent';
+        invitationId: string;
+        acceptTerms: true;
+        understandsPrivacy: true;
+      }
+  );
+export interface PrivateAdolescentInvitationCommand extends PrivacyCommandBase {
+  recipientUsername: string;
+  majorityAt: string;
+  guardianName: string;
+  guardianRelationship: 'parent' | 'legal_guardian';
+  representsMinor: true;
+  authorizesCloud: true;
+}
+export interface PrivateAdolescentInvitation {
+  invitationId: string;
+  recipientUsername: string;
+  majorityAt: string;
+  state: 'pending_verification' | 'authorized' | 'accepted' | 'revoked' | 'expired';
+  revision: number;
+  expiresAt: number;
+  /** An authenticated declaration does not establish documentary identity or parentage. */
+  authorizationMethod?: 'account_attestation' | 'operator_verified';
+  adolescentId?: string;
+  /** Own representative metadata; contains no forest records. */
+  consentRevision?: number;
+  guardianConsent?: 'granted' | 'revoked' | 'version_review_required' | 'ended';
+}
+export type PrivateAdolescentGuardianCommand = PrivacyCommandBase &
+  (
+    | { action: 'grant_guardian'; representsMinor: true; authorizesCloud: true }
+    | { action: 'revoke_guardian' }
+  );
+export interface PrivacyExportPage {
+  formatVersion: 1;
+  userId: string;
+  exportedAt: number;
+  account: { username: string; displayName: string; email?: string; createdAt: number };
+  records: SyncRecord[];
+  privacy: Readonly<Record<string, unknown>>[];
+  cursor: string | null;
+}
 
 export type PlanKey = 'free' | 'premium';
 
@@ -267,9 +394,11 @@ export interface UserProfile {
   /** What family and friends see. */
   displayName: string;
   accountType: AccountType;
-  /** Adults: always true. Minors: guardian-controlled, default false. */
+  /** Private accounts remain false; ordinary minors are guardian controlled. */
   socialEnabled: boolean;
   createdAt: number;
+  privacyMode?: 'adolescent_private';
+  majorityAt?: string;
 }
 
 /** What OTHER people see of a user. `socialEnabled` only on minors you guard. */
@@ -456,8 +585,7 @@ export interface CreateMinorLinkCodeRequest {
 
 export interface ApproveMinorLinkRequest extends FamilyCommandBase {}
 
-export const CURRENT_MINOR_LINK_RESPONSIBILITY_VERSION =
-  'minor-link-responsibility-v1' as const;
+export const CURRENT_MINOR_LINK_RESPONSIBILITY_VERSION = 'minor-link-responsibility-v1' as const;
 export const CURRENT_MINOR_LINK_PRIVACY_VERSION = 'minor-link-privacy-v1' as const;
 
 export interface AcceptMinorLinkRequest extends FamilyCommandBase {
@@ -767,6 +895,10 @@ export const SERVER_API_ERROR_CODES = Object.freeze([
   'ACCOUNT_TYPE_INCOMPATIBLE',
   'RESPONSIBLE_SCOPE_REQUIRED',
   'CONSENT_INCOMPLETE',
+  'ADULT_DECLARATION_REQUIRED',
+  'CLOUD_CONSENT_REQUIRED',
+  'PRIVACY_REVISION_CONFLICT',
+  'PRIVACY_ERASURE_PENDING',
   'MINOR_ALREADY_COVERED',
   'HOUSEHOLD_CAPACITY_EXCEEDED',
   'CURRENT_PRIMARY_APPROVAL_REQUIRED',
@@ -776,6 +908,7 @@ export const SERVER_API_ERROR_CODES = Object.freeze([
   'SUBSCRIPTION_CONFLICT',
   'PAYMENT_REQUIRED',
   'REAUTHENTICATION_REQUIRED',
+  'EMAIL_VERIFICATION_REQUIRED',
   'STALE_REVISION',
 ] as const);
 
@@ -822,6 +955,17 @@ export const LIMITS = Object.freeze({
 // ── The API surface ─────────────────────────────────────────────────────────
 
 export interface RoadmapApi {
+  getPrivacyStatus(language?: 'es' | 'en'): Promise<PrivacyStatus>;
+  changePrivacyConsent(command: PrivacyConsentCommand): Promise<PrivacyStatus>;
+  exportOwnPrivacy(cursor?: string): Promise<PrivacyExportPage>;
+  createPrivateAdolescentInvitation(
+    command: PrivateAdolescentInvitationCommand,
+  ): Promise<PrivateAdolescentInvitation>;
+  listPrivateAdolescentInvitations(): Promise<PrivateAdolescentInvitation[]>;
+  changePrivateAdolescentGuardianConsent(
+    adolescentId: string,
+    command: PrivateAdolescentGuardianCommand,
+  ): Promise<PrivacyStatus>;
   // commercial access
   getPlans(): Promise<PlanCatalog>;
   getAccess(): Promise<AccessSummary>;
@@ -927,6 +1071,12 @@ export interface RoadmapApi {
 
 /** REST paths under `${apiBaseUrl}/v1` — HttpApi and the Lambda router share them. */
 export const API_PATHS = Object.freeze({
+  privacyStatus: '/privacy/status',
+  privacyAdolescents: '/privacy/adolescents',
+  privacyAdolescentGuardian: (id: string) =>
+    `/privacy/adolescents/${encodeURIComponent(id)}/consents`,
+  privacyConsents: '/privacy/consents',
+  privacyExport: '/privacy/export',
   plans: '/plans',
   access: '/access',
   accessCodesRedeem: '/access-codes/redeem',

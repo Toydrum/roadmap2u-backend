@@ -3,7 +3,11 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, it } from 'vitest';
 import { RoadmapStack } from '../lib/roadmap-stack';
 import { COMMERCIAL_FLAGS_ATTRIBUTES } from '../lambda/commercial/flags';
-import { createDynamoAccessReaderDeps, createAccessReader, type AccessReaderEvent } from '../lambda/access-reader';
+import {
+  createDynamoAccessReaderDeps,
+  createAccessReader,
+  type AccessReaderEvent,
+} from '../lambda/access-reader';
 import { createCoverageAssignment } from '../lambda/family/model';
 
 const ACCOUNT = '123456789012';
@@ -57,9 +61,7 @@ describe('commercial exact HTTP routes', () => {
     expect(route('GET /v1/access')).toMatchObject({ AuthorizationType: 'JWT' });
     expect(route('GET /v1/access').AuthorizerId).toBeDefined();
     expect(route('DELETE /v1/me')).toMatchObject({ AuthorizationType: 'JWT' });
-    expect(route('DELETE /v1/me').AuthorizerId).toEqual(
-      route('GET /v1/access').AuthorizerId,
-    );
+    expect(route('DELETE /v1/me').AuthorizerId).toEqual(route('GET /v1/access').AuthorizerId);
   }, 20_000);
 
   it('gives every exact commercial route its own integration ahead of the greedy proxy', () => {
@@ -103,24 +105,33 @@ describe('commercial route runtime isolation', () => {
     const now = Date.parse('2026-10-05T02:18:00Z');
     const ownerSub = 'synthetic-minor';
     const profile = {
-      pk: `USER#${ownerSub}`, sk: 'PROFILE', userId: ownerSub,
-      status: 'active', accountType: 'minor', majorityAt: '2035-01-01',
+      pk: `USER#${ownerSub}`,
+      sk: 'PROFILE',
+      userId: ownerSub,
+      status: 'active',
+      accountType: 'minor',
+      majorityAt: '2035-01-01',
     };
     const coverage = createCoverageAssignment({
-      householdId: 'synthetic-household', accountId: ownerSub, seatType: 'minor',
-      source: 'sponsored_pilot', now: now - 1_000,
+      householdId: 'synthetic-household',
+      accountId: ownerSub,
+      seatType: 'minor',
+      source: 'sponsored_pilot',
+      now: now - 1_000,
     });
     const commands: any[] = [];
-    const item = (key: any) => key.sk === 'PROFILE' ? profile
-      : key.sk === 'COVERAGE#FAMILY' ? coverage : undefined;
+    const item = (key: any) =>
+      key.sk === 'PROFILE' ? profile : key.sk === 'COVERAGE#FAMILY' ? coverage : undefined;
     const ddb = {
       async send(command: any) {
         commands.push(command);
         if (command.constructor.name === 'TransactGetCommand') {
-          return { Responses: command.input.TransactItems.map(({ Get }: any) => {
-            const value = item(Get.Key);
-            return value ? { Item: value } : {};
-          }) };
+          return {
+            Responses: command.input.TransactItems.map(({ Get }: any) => {
+              const value = item(Get.Key);
+              return value ? { Item: value } : {};
+            }),
+          };
         }
         if (command.constructor.name === 'GetCommand') {
           const value = item(command.input.Key);
@@ -131,39 +142,55 @@ describe('commercial route runtime isolation', () => {
         throw new Error(`unexpected command ${command.constructor.name}`);
       },
     };
-    const reader = createAccessReader(createDynamoAccessReaderDeps({
-      ddb: ddb as any, tableName: 'roadmap-dev', now: () => now,
-    }));
-    const response = await reader({ requestContext: {
-      authorizer: { jwt: { claims: { sub: ownerSub } } },
-    } } as unknown as AccessReaderEvent);
+    const reader = createAccessReader(
+      createDynamoAccessReaderDeps({
+        ddb: ddb as any,
+        tableName: 'roadmap-dev',
+        now: () => now,
+      }),
+    );
+    const response = await reader({
+      requestContext: {
+        authorizer: { jwt: { claims: { sub: ownerSub } } },
+      },
+    } as unknown as AccessReaderEvent);
     expect(response.statusCode).toBe(200);
     expect(JSON.parse(response.body).effectivePlanKey).toBe('premium');
 
-    const attributes = (sid: string) => bySid(sid).Condition[
-      'ForAllValues:StringEquals'
-    ]['dynamodb:Attributes'];
+    const attributes = (sid: string) =>
+      bySid(sid).Condition['ForAllValues:StringEquals']['dynamodb:Attributes'];
     const projected = (request: any) => Object.values(request.ExpressionAttributeNames ?? {});
     for (const command of commands) {
-      const requests = command.constructor.name === 'TransactGetCommand'
-        ? command.input.TransactItems.map(({ Get }: any) => Get)
-        : [command.input];
+      const requests =
+        command.constructor.name === 'TransactGetCommand'
+          ? command.input.TransactItems.map(({ Get }: any) => Get)
+          : [command.input];
       if (['GetCommand', 'TransactGetCommand', 'QueryCommand'].includes(command.constructor.name)) {
-        const sid = command.constructor.name === 'QueryCommand'
-          ? 'QueryCommercialAccessGrants' : 'ReadCommercialAccessItems';
-        for (const request of requests) for (const attribute of projected(request)) {
-          expect(attributes(sid), `${sid} must allow projected ${attribute}`).toContain(attribute);
-        }
+        const sid =
+          command.constructor.name === 'QueryCommand'
+            ? 'QueryCommercialAccessGrants'
+            : 'ReadCommercialAccessItems';
+        for (const request of requests)
+          for (const attribute of projected(request)) {
+            expect(attributes(sid), `${sid} must allow projected ${attribute}`).toContain(
+              attribute,
+            );
+          }
       }
     }
-    const transaction = commands.find((command) => command.constructor.name === 'TransactWriteCommand');
+    const transaction = commands.find(
+      (command) => command.constructor.name === 'TransactWriteCommand',
+    );
     expect(transaction).toBeDefined();
     for (const operation of transaction.input.TransactItems) {
       const request = operation.ConditionCheck ?? operation.Put;
       const required = operation.Put ? Object.keys(request.Item) : projected(request);
       if (request.ConditionExpression?.includes('majorityAt')) required.push('majorityAt');
       for (const attribute of required) {
-        expect(attributes('MaterializeCommercialAccess'), `materialization must allow ${attribute}`).toContain(attribute);
+        expect(
+          attributes('MaterializeCommercialAccess'),
+          `materialization must allow ${attribute}`,
+        ).toContain(attribute);
       }
     }
   }, 20_000);
@@ -176,21 +203,32 @@ describe('commercial route runtime isolation', () => {
     const statements = roleStatements(template, roleId);
     const serialized = JSON.stringify(statements);
 
-    expect(catalog.Properties.Environment.Variables).toEqual({ TABLE_NAME: { Ref: expect.stringMatching(/^Table/) } });
+    expect(catalog.Properties.Environment.Variables).toEqual({
+      TABLE_NAME: { Ref: expect.stringMatching(/^Table/) },
+    });
     expect(role.Properties.ManagedPolicyArns).toHaveLength(1);
     expect(JSON.stringify(role.Properties.ManagedPolicyArns)).toContain(
       'AWSLambdaBasicExecutionRole',
     );
-    expect(statements).toEqual([expect.objectContaining({
-      Sid: 'ReadPublicCatalogFlags', Effect: 'Allow', Action: 'dynamodb:GetItem',
-      Resource: { 'Fn::GetAtt': [expect.stringMatching(/^Table/), 'Arn'] },
-      Condition: {
-        'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['COMMERCIAL#CONFIG'], 'dynamodb:Attributes': [...COMMERCIAL_FLAGS_ATTRIBUTES] },
-        Null: { 'dynamodb:Attributes': 'false' },
-        StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
-      },
-    })]);
-    expect(serialized).not.toMatch(/ssm:|secretsmanager:|cognito-idp:|sqs:|USER#|HOUSEHOLD#|\/index\//i);
+    expect(statements).toEqual([
+      expect.objectContaining({
+        Sid: 'ReadPublicCatalogFlags',
+        Effect: 'Allow',
+        Action: 'dynamodb:GetItem',
+        Resource: { 'Fn::GetAtt': [expect.stringMatching(/^Table/), 'Arn'] },
+        Condition: {
+          'ForAllValues:StringEquals': {
+            'dynamodb:LeadingKeys': ['COMMERCIAL#CONFIG'],
+            'dynamodb:Attributes': [...COMMERCIAL_FLAGS_ATTRIBUTES],
+          },
+          Null: { 'dynamodb:Attributes': 'false' },
+          StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+        },
+      }),
+    ]);
+    expect(serialized).not.toMatch(
+      /ssm:|secretsmanager:|cognito-idp:|sqs:|USER#|HOUSEHOLD#|\/index\//i,
+    );
   }, 20_000);
 
   it('restricts the access reader to owner reads and transaction-enclosed materialization', () => {
@@ -249,7 +287,13 @@ describe('commercial route runtime isolation', () => {
         'grantId',
         'activeTrees',
         'effectivePlanKey',
-        'paidThrough', 'graceUntil', 'householdId', 'seatType', 'entityType', 'sourceId', 'accountId',
+        'paidThrough',
+        'graceUntil',
+        'householdId',
+        'seatType',
+        'entityType',
+        'sourceId',
+        'accountId',
       ]),
     );
     expect(JSON.stringify(safeAttributes)).not.toMatch(
@@ -282,39 +326,49 @@ describe('commercial route runtime isolation', () => {
     };
     expect(bySid('ReadAccountClosureRequestFamilyIndex')).toEqual({
       Sid: 'ReadAccountClosureRequestFamilyIndex',
-      Effect: 'Allow', Action: 'dynamodb:Query',
+      Effect: 'Allow',
+      Action: 'dynamodb:Query',
       Resource: { 'Fn::Join': ['', [tableArn, '/index/gsi1']] },
       Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
     });
     expect(bySid('ReadAccountClosureRequestFamilyState')).toEqual({
       Sid: 'ReadAccountClosureRequestFamilyState',
-      Effect: 'Allow', Action: 'dynamodb:Query', Resource: tableArn,
-      Condition: { 'ForAllValues:StringLike': {
-        'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
-      } },
+      Effect: 'Allow',
+      Action: 'dynamodb:Query',
+      Resource: tableArn,
+      Condition: {
+        'ForAllValues:StringLike': {
+          'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
+        },
+      },
     });
     expect(bySid('ReadAccountClosureRequestFamilyCoverage')).toEqual({
       Sid: 'ReadAccountClosureRequestFamilyCoverage',
-      Effect: 'Allow', Action: 'dynamodb:BatchGetItem', Resource: tableArn,
+      Effect: 'Allow',
+      Action: 'dynamodb:BatchGetItem',
+      Resource: tableArn,
       Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
     });
     expect(bySid('TransactOnlyAccountClosureRequestFamilyChecks')).toEqual({
       Sid: 'TransactOnlyAccountClosureRequestFamilyChecks',
-      Effect: 'Allow', Action: 'dynamodb:ConditionCheckItem', Resource: tableArn,
+      Effect: 'Allow',
+      Action: 'dynamodb:ConditionCheckItem',
+      Resource: tableArn,
       Condition: {
         'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'] },
         StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
       },
     });
     const familyReads = statements.filter((statement) =>
-      [statement.Action].flat().some((action) =>
-        ['dynamodb:Query', 'dynamodb:BatchGetItem'].includes(action),
-      ),
+      [statement.Action]
+        .flat()
+        .some((action) => ['dynamodb:Query', 'dynamodb:BatchGetItem'].includes(action)),
     );
     expect(familyReads.map((statement) => statement.Sid).sort()).toEqual([
       'ReadAccountClosureRequestFamilyCoverage',
       'ReadAccountClosureRequestFamilyIndex',
       'ReadAccountClosureRequestFamilyState',
+      'ReadIndependentPrivacy',
     ]);
     expect(bySid('ReadAccountClosureRequestState')).toMatchObject({
       Action: 'dynamodb:GetItem',
@@ -345,9 +399,7 @@ describe('commercial route runtime isolation', () => {
     });
 
     const serialized = JSON.stringify(statements);
-    expect(serialized).not.toMatch(
-      /dynamodb:(?:Scan|DeleteItem|BatchWriteItem|DescribeTable)/,
-    );
+    expect(serialized).not.toMatch(/dynamodb:(?:Scan|DeleteItem|BatchWriteItem|DescribeTable)/);
     expect(serialized).not.toMatch(/ssm:|secretsmanager:|cognito-idp:/i);
   }, 20_000);
 });

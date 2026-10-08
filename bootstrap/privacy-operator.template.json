@@ -1,0 +1,275 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Prepared private privacy operator for verification, documented holds and closure outbox. Requires a separately approved deployment.",
+  "Parameters": {
+    "Stage": {
+      "Type": "String",
+      "AllowedValues": ["dev", "test", "prod"]
+    },
+    "AuthorizedOperatorArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:aws:iam::765932874577:user/[^*]+"
+    }
+  },
+  "Resources": {
+    "PrivacyOperator": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "roadmap2u-${Stage}-privacy-operator"
+        },
+        "Path": {
+          "Fn::Sub": "/roadmap2u/${Stage}/operators/"
+        },
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "sts:AssumeRole",
+              "Principal": {
+                "AWS": {
+                  "Ref": "AuthorizedOperatorArn"
+                }
+              },
+              "Condition": {
+                "Bool": {
+                  "aws:MultiFactorAuthPresent": "true"
+                },
+                "NumericLessThanEquals": {
+                  "aws:MultiFactorAuthAge": "28800"
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ExactPrivacyCases",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "MetadataOnlyMainReads",
+                  "Effect": "Allow",
+                  "Action": "dynamodb:GetItem",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/roadmap-${Stage}"
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": ["USER#*", "ACCOUNT_CLOSURE#*"]
+                    },
+                    "Null": {
+                      "dynamodb:LeadingKeys": "false",
+                      "dynamodb:Attributes": "false"
+                    },
+                    "ForAllValues:StringEquals": {
+                      "dynamodb:Attributes": [
+                        "pk",
+                        "sk",
+                        "userId",
+                        "username",
+                        "accountType",
+                        "status",
+                        "createdAt",
+                        "privacyMode",
+                        "revision",
+                        "updatedAt",
+                        "adultDeclaredAt",
+                        "declarationLanguage",
+                        "declarationDocumentHash",
+                        "cloudConsent",
+                        "cloudLanguage",
+                        "cloudDocumentHash",
+                        "erasure",
+                        "erasureId",
+                        "erasureRequestedAt",
+                        "erasureCompletedAt",
+                        "gsi2pk",
+                        "gsi2sk",
+                        "subjectKind",
+                        "adolescentAcceptedAt",
+                        "adolescentLanguage",
+                        "adolescentDocumentHash",
+                        "guardianId",
+                        "guardianConsent",
+                        "guardianAuthorization",
+                        "guardianLanguage",
+                        "guardianDocumentHash",
+                        "majorityAt",
+                        "invitationId",
+                        "closureId",
+                        "kind",
+                        "state",
+                        "actorSub",
+                        "requestHash"
+                      ]
+                    },
+                    "StringEqualsIfExists": {
+                      "dynamodb:Select": "SPECIFIC_ATTRIBUTES"
+                    }
+                  }
+                },
+                {
+                  "Sid": "CheckActiveSubjectsAndDecisions",
+                  "Effect": "Allow",
+                  "Action": "dynamodb:ConditionCheckItem",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/roadmap-${Stage}"
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": ["USER#*", "ACCOUNT_CLOSURE#*", "HH#*"]
+                    },
+                    "Null": {
+                      "dynamodb:LeadingKeys": "false"
+                    },
+                    "StringEqualsIfExists": {
+                      "dynamodb:ReturnValues": "NONE"
+                    }
+                  }
+                },
+                {
+                  "Sid": "RequestPrivateClosureOutbox",
+                  "Effect": "Allow",
+                  "Action": "dynamodb:PutItem",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/roadmap-${Stage}"
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": ["ACCOUNT_CLOSURE#*"]
+                    },
+                    "Null": {
+                      "dynamodb:LeadingKeys": "false"
+                    },
+                    "ForAnyValue:StringEquals": {
+                      "dynamodb:EnclosingOperation": ["TransactWriteItems"]
+                    },
+                    "StringEqualsIfExists": {
+                      "dynamodb:ReturnValues": "NONE"
+                    }
+                  }
+                },
+                {
+                  "Sid": "FenceClosingPrivateProfile",
+                  "Effect": "Allow",
+                  "Action": "dynamodb:UpdateItem",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/roadmap-${Stage}"
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": ["USER#*"]
+                    },
+                    "Null": {
+                      "dynamodb:LeadingKeys": "false",
+                      "dynamodb:Attributes": "false"
+                    },
+                    "ForAllValues:StringEquals": {
+                      "dynamodb:Attributes": [
+                        "pk",
+                        "sk",
+                        "userId",
+                        "username",
+                        "accountType",
+                        "privacyMode",
+                        "majorityAt",
+                        "status"
+                      ]
+                    },
+                    "ForAnyValue:StringEquals": {
+                      "dynamodb:EnclosingOperation": ["TransactWriteItems"]
+                    },
+                    "StringEqualsIfExists": {
+                      "dynamodb:ReturnValues": "NONE"
+                    }
+                  }
+                },
+                {
+                  "Sid": "ReadIndependentMetadata",
+                  "Effect": "Allow",
+                  "Action": "dynamodb:GetItem",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/roadmap-privacy-${Stage}"
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": [
+                        "PRIVACY_STATE#*",
+                        "ADOLESCENT_INVITE#*",
+                        "PRIVACY_OPERATOR#*",
+                        "HOLD#*",
+                        "HOLD_AUDIT#*",
+                        "RESTORE#*"
+                      ]
+                    },
+                    "Null": {
+                      "dynamodb:LeadingKeys": "false"
+                    }
+                  }
+                },
+                {
+                  "Sid": "CheckPrivateDecisionAndInvite",
+                  "Effect": "Allow",
+                  "Action": "dynamodb:ConditionCheckItem",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/roadmap-privacy-${Stage}"
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": ["PRIVACY_STATE#*", "ADOLESCENT_INVITE#*"]
+                    },
+                    "Null": {
+                      "dynamodb:LeadingKeys": "false"
+                    },
+                    "StringEqualsIfExists": {
+                      "dynamodb:ReturnValues": "NONE"
+                    }
+                  }
+                },
+                {
+                  "Sid": "WriteOnlyReviewedCasesInTransactions",
+                  "Effect": "Allow",
+                  "Action": "dynamodb:PutItem",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/roadmap-privacy-${Stage}"
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": [
+                        "ADOLESCENT_INVITE#*",
+                        "PRIVACY_OPERATOR#*",
+                        "HOLD#*",
+                        "HOLD_AUDIT#*",
+                        "RESTORE#*"
+                      ]
+                    },
+                    "Null": {
+                      "dynamodb:LeadingKeys": "false"
+                    },
+                    "ForAnyValue:StringEquals": {
+                      "dynamodb:EnclosingOperation": ["TransactWriteItems"]
+                    },
+                    "StringEqualsIfExists": {
+                      "dynamodb:ReturnValues": "NONE"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "PrivacyOperatorArn": {
+      "Value": {
+        "Fn::GetAtt": ["PrivacyOperator", "Arn"]
+      }
+    }
+  }
+}

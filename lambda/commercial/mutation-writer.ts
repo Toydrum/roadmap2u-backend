@@ -4,7 +4,11 @@ import { accountClosureKey } from '../account-closure';
 import { WRITABLE_PROFILE_CONDITION } from '../authz';
 import { K, type ProfileItem } from '../db';
 import type { AccessItem, GrantItem } from './model';
-import { createAccessPutProposal, deriveAccessItem, type PaidAccessSources } from './access-resolver';
+import {
+  createAccessPutProposal,
+  deriveAccessItem,
+  type PaidAccessSources,
+} from './access-resolver';
 import { paidSourceGuards } from './paid-source-guards';
 import {
   flagsForCommercialOperation,
@@ -22,11 +26,11 @@ export interface CommercialMutationSnapshot extends PaidAccessSources {
   readonly grants: readonly GrantItem[];
   readonly flags: CommercialConfigResult;
   readonly usage?: Readonly<Record<string, unknown>>;
-  readonly usageByTree: Readonly<
-    Record<string, Readonly<Record<string, unknown>> | undefined>
-  >;
+  readonly usageByTree: Readonly<Record<string, Readonly<Record<string, unknown>> | undefined>>;
   readonly migration?: Readonly<Record<string, unknown>>;
   readonly deltas: readonly UsageMutationDelta[];
+  /** Trusted handler authority, serialized by its consent and responsible-adult source guards. */
+  readonly cloudSyncAuthority?: 'responsible_premium';
 }
 
 export interface MutationCommitProposal {
@@ -64,9 +68,7 @@ export interface MutationWriterDeps<TRequest extends { readonly ownerSub: string
   readonly emitDecision: (decision: CommercialDecision) => void;
 }
 
-export function usageMigrationKey(
-  ownerSub: string,
-): { pk: string; sk: 'USAGE_MIGRATION' } {
+export function usageMigrationKey(ownerSub: string): { pk: string; sk: 'USAGE_MIGRATION' } {
   return { pk: `USER#${ownerSub}`, sk: 'USAGE_MIGRATION' };
 }
 
@@ -228,7 +230,7 @@ function closureGuard(tableName: string, ownerSub: string): TransactItem {
   };
 }
 
-function migrationGuard(
+export function migrationGuard(
   tableName: string,
   ownerSub: string,
   value: Readonly<Record<string, unknown>> | undefined,
@@ -256,10 +258,7 @@ function migrationGuard(
     generation.trim().length === 0 ||
     !nonNegativeInteger(leaseUntil)
   ) {
-    throw new ApiError(
-      'USAGE_MIGRATION_IN_PROGRESS',
-      'usage migration fence is malformed',
-    );
+    throw new ApiError('USAGE_MIGRATION_IN_PROGRESS', 'usage migration fence is malformed');
   }
   if (state === 'migrating' && leaseUntil > now) {
     throw new ApiError('USAGE_MIGRATION_IN_PROGRESS');
@@ -342,11 +341,7 @@ function assertCurrentAccess(access: AccessItem, ownerSub: string, now: number):
   }
 }
 
-function baseUsageGuard(
-  tableName: string,
-  ownerSub: string,
-  usage: MigratedUsage,
-): TransactItem {
+function baseUsageGuard(tableName: string, ownerSub: string, usage: MigratedUsage): TransactItem {
   return {
     ConditionCheck: {
       TableName: tableName,
@@ -448,8 +443,7 @@ function cloudDelta(deltas: readonly UsageMutationDelta[]): number {
   return Math.min(
     0,
     deltas.reduce(
-      (sum, delta) =>
-        sum + delta.physical.activeTrees + delta.physical.visibleBranches,
+      (sum, delta) => sum + delta.physical.activeTrees + delta.physical.visibleBranches,
       0,
     ),
   );
@@ -460,6 +454,7 @@ function applyCapabilityPolicy(
   result: CommercialConfigResult,
   access: AccessItem,
   deltas: readonly UsageMutationDelta[],
+  privateCloudAuthorized = false,
 ): CommercialFlags | null {
   const flags = flagsForCommercialOperation(result, {
     kind: 'cloud-delta',
@@ -467,7 +462,7 @@ function applyCapabilityPolicy(
   });
   if (!flags) return null;
 
-  const wouldDeny = hasCloudGrowth(deltas) && !access.capabilities.cloudSync;
+  const wouldDeny = hasCloudGrowth(deltas) && !(access.capabilities.cloudSync || privateCloudAuthorized);
   emit({ kind: 'cloudSync', mode: flags.capabilityMode, wouldDeny });
   if (flags.capabilityMode === 'enforce' && wouldDeny) {
     throw new ApiError('CAPABILITY_REQUIRED');
@@ -549,10 +544,7 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const snapshot = await this.deps.readSnapshot(request, { consistentRead: true });
       assertWritableSnapshot(snapshot, request.ownerSub);
-      if (
-        snapshot.deltas.length === 0 ||
-        snapshot.deltas.length > LIMITS.syncMutationGroupMax
-      ) {
+      if (snapshot.deltas.length === 0 || snapshot.deltas.length > LIMITS.syncMutationGroupMax) {
         throw new ApiError('MUTATION_GROUP_INVALID', 'mutation group size is invalid');
       }
       // LWW stale invalidates the entire atomic group, so no mutation remains
@@ -585,6 +577,9 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
         snapshot.flags,
         access,
         snapshot.deltas,
+        snapshot.cloudSyncAuthority === 'responsible_premium' &&
+          snapshot.profile?.accountType === 'minor' &&
+          snapshot.profile?.privacyMode === 'adolescent_private',
       );
 
       const items: TransactItem[] = [
@@ -593,8 +588,10 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
         currentMigrationGuard,
         ...(snapshot.access
           ? [accessGuard(this.deps.tableName, access, accessCheckedAt)]
-          : [createAccessPutProposal(this.deps.tableName, access, undefined),
-            ...paidSourceGuards(this.deps.tableName, request.ownerSub, snapshot)]),
+          : [
+              createAccessPutProposal(this.deps.tableName, access, undefined),
+              ...paidSourceGuards(this.deps.tableName, request.ownerSub, snapshot),
+            ]),
       ];
       if (usage) {
         if (usage.activeTrees + aggregate.physicalActiveTrees < 0) {
@@ -616,10 +613,7 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
           } else if (tree.guardsCounter) {
             if (expected === null) throw new ApiError('CONFLICT', 'usage drift');
             expectedVisibleBranches.set(tree.treeId, expected);
-          } else if (
-            tree.physicalVisibleBranches !== 0 ||
-            tree.quotaVisibleBranches !== 0
-          ) {
+          } else if (tree.physicalVisibleBranches !== 0 || tree.quotaVisibleBranches !== 0) {
             throw new ApiError('CONFLICT', 'tree counter intent is missing');
           }
         }
@@ -649,24 +643,12 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
               throw new ApiError('CONFLICT', 'tree usage would become invalid');
             }
             items.push(
-              treeUsageUpdate(
-                this.deps.tableName,
-                request.ownerSub,
-                tree,
-                usage,
-                expected,
-              ),
+              treeUsageUpdate(this.deps.tableName, request.ownerSub, tree, usage, expected),
             );
           } else if (tree.guardsCounter) {
             if (expected === undefined) throw new ApiError('CONFLICT', 'usage drift');
             items.push(
-              treeUsageGuard(
-                this.deps.tableName,
-                request.ownerSub,
-                tree.treeId,
-                usage,
-                expected,
-              ),
+              treeUsageGuard(this.deps.tableName, request.ownerSub, tree.treeId, usage, expected),
             );
           }
         }

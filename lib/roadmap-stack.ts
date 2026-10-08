@@ -4,6 +4,8 @@ import {
   Aws,
   BootstraplessSynthesizer,
   CfnOutput,
+  CfnParameter,
+  CfnRule,
   Duration,
   Fn,
   RemovalPolicy,
@@ -49,7 +51,13 @@ import { COMMERCIAL_FLAGS_ATTRIBUTES } from '../lambda/commercial/flags';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT_DOMAIN = 'roadmap2u.com';
-const CONTRACT_FILES = ['api/contracts.ts', 'db/schema.ts', 'auth/auth-types.ts'] as const;
+const CONTRACT_FILES = [
+  'api/contracts.ts',
+  'db/schema.ts',
+  'auth/auth-types.ts',
+  'i18n/es.ts',
+  'i18n/en.ts',
+] as const;
 
 export type DeploymentStage = 'dev' | 'test' | 'prod';
 
@@ -347,6 +355,30 @@ export class RoadmapStack extends Stack {
 
     const production = stage === 'prod';
     const removalPolicy = production ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY;
+    const adultPrivacyMode = new CfnParameter(this, 'AdultPrivacyMode', {
+      type: 'String',
+      default: 'off',
+      allowedValues: ['off', 'enforce'],
+      description:
+        'Explicit adult privacy activation; ordinary releases preserve the previous value.',
+    });
+    const privateAdolescentMode = new CfnParameter(this, 'PrivateAdolescentMode', {
+      type: 'String',
+      default: 'off',
+      allowedValues: ['off', 'enforce'],
+      description: 'Explicit activation of verified private adolescent accounts.',
+    });
+    new CfnRule(this, 'PrivateAdolescentsRequireAdultPrivacy', {
+      assertions: [
+        {
+          assert: Fn.conditionOr(
+            Fn.conditionEquals(privateAdolescentMode.valueAsString, 'off'),
+            Fn.conditionEquals(adultPrivacyMode.valueAsString, 'enforce'),
+          ),
+          assertDescription: 'Private adolescents require adult privacy enforcement.',
+        },
+      ],
+    });
     const apiDomain = apiDomainFor(stage);
     const parameterPrefix = `/roadmap2u/${stage}`;
     const accessCodeHmacParameterName = `${parameterPrefix}/access-code-hmac/v1`;
@@ -464,6 +496,78 @@ export class RoadmapStack extends Stack {
       deletionProtection: production,
       removalPolicy,
     });
+    accessAuditTable.addGlobalSecondaryIndex({
+      indexName: 'gsi1',
+      partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
+    });
+    const privacyTable = new dynamodb.Table(this, 'PrivacyTable', {
+      tableName: `roadmap-privacy-${stage}`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: 'ttl',
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: production },
+      deletionProtection: production,
+      removalPolicy: RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
+    });
+    privacyTable.addGlobalSecondaryIndex({
+      indexName: 'gsi1',
+      partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
+    });
+    const grantPrivacy = (
+      role: iam.Role,
+      writes: string[],
+      archive = false,
+      deleteLedger = false,
+    ) => {
+      role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'ReadIndependentPrivacy',
+          actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+          resources: [privacyTable.tableArn],
+          conditions: {
+            'ForAllValues:StringLike': {
+              'dynamodb:LeadingKeys': [
+                'PRIVACY_STATE#*',
+                'RESTORE#*',
+                'HOLD#*',
+                ...(writes.includes('ADOLESCENT_INVITE#*')
+                  ? ['ADOLESCENT_INVITE#*', 'ADOLESCENT_GUARDIAN#*']
+                  : []),
+                ...(archive ? ['CONSENT_ARCHIVE#*'] : []),
+              ],
+            },
+          },
+        }),
+      );
+      role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'TransactOnlyIndependentPrivacy',
+          actions: ['dynamodb:ConditionCheckItem', ...(writes.length ? ['dynamodb:PutItem'] : [])],
+          resources: [privacyTable.tableArn],
+          conditions: {
+            'ForAllValues:StringLike': {
+              'dynamodb:LeadingKeys': writes.length ? writes : ['RESTORE#*'],
+            },
+            StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+          },
+        }),
+      );
+      if (deleteLedger)
+        role.addToPolicy(
+          new iam.PolicyStatement({
+            sid: 'DeleteOnlyClosedDecisionLedger',
+            actions: ['dynamodb:DeleteItem'],
+            resources: [privacyTable.tableArn],
+            conditions: {
+              'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'PRIVACY_STATE#*' },
+              StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+            },
+          }),
+        );
+    };
     denyCommercialConfigWrites(preSignUpRole, table);
     table.addGlobalSecondaryIndex({
       indexName: 'gsi1',
@@ -682,34 +786,42 @@ export class RoadmapStack extends Stack {
       },
       bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
     });
-    familyPilotBrokerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'ReadOnlyFamilyPilotState',
-      actions: ['dynamodb:GetItem'],
-      resources: [table.tableArn],
-      conditions: { 'ForAllValues:StringLike': {
-        'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*', 'ADMIN#FAMILY_PILOT'],
-      } },
-    }));
-    familyPilotBrokerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'TransactOnlyFamilyPilotState',
-      actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
-      resources: [table.tableArn],
-      conditions: {
-        'ForAllValues:StringLike': {
-          'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*', 'ADMIN#FAMILY_PILOT'],
+    familyPilotBrokerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadOnlyFamilyPilotState',
+        actions: ['dynamodb:GetItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*', 'ADMIN#FAMILY_PILOT'],
+          },
         },
-        StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
-      },
-    }));
-    familyPilotBrokerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'TransactOnlyFamilyPilotAudit',
-      actions: ['dynamodb:PutItem'],
-      resources: [accessAuditTable.tableArn],
-      conditions: {
-        'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#FAMILY_PILOT#*' },
-        StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
-      },
-    }));
+      }),
+    );
+    familyPilotBrokerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyFamilyPilotState',
+        actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*', 'ADMIN#FAMILY_PILOT'],
+          },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    familyPilotBrokerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyFamilyPilotAudit',
+        actions: ['dynamodb:PutItem'],
+        resources: [accessAuditTable.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#FAMILY_PILOT#*' },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
     denyCommercialConfigWrites(familyPilotBrokerRole, table);
     const familyPilotBrokerUrl = familyPilotBroker.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.AWS_IAM,
@@ -867,6 +979,14 @@ export class RoadmapStack extends Stack {
     );
 
     const accountClosureReconcilerName = `roadmap-account-closure-reconciler-${stage}`;
+    accountClosureWorker.addEnvironment('PRIVACY_TABLE_NAME', privacyTable.tableName);
+    accountClosureWorker.addEnvironment('ADULT_PRIVACY_MODE', adultPrivacyMode.valueAsString);
+    grantPrivacy(
+      accountClosureWorkerRole,
+      ['RESTORE#*', 'PRIVACY_STATE#*', 'CONSENT_ARCHIVE#*', 'ADOLESCENT_INVITE#*'],
+      true,
+      true,
+    );
     const accountClosureReconcilerRole = createRuntimeRole(
       this,
       'AccountClosureReconcilerRole',
@@ -899,11 +1019,15 @@ export class RoadmapStack extends Stack {
     );
     denyCommercialConfigWrites(accountClosureReconcilerRole, table);
     accountClosureQueue.grantSendMessages(accountClosureReconciler);
-    new events.Rule(this, 'AccountClosureReconcileSchedule', {
-      ruleName: `roadmap-account-closure-reconciler-${stage}`,
-      schedule: events.Schedule.rate(Duration.minutes(5)),
-      targets: [new eventTargets.LambdaFunction(accountClosureReconciler)],
-    });
+    const accountClosureReconcileSchedule = new events.Rule(
+      this,
+      'AccountClosureReconcileSchedule',
+      {
+        ruleName: `roadmap-account-closure-reconciler-${stage}`,
+        schedule: events.Schedule.rate(Duration.minutes(5)),
+        targets: [new eventTargets.LambdaFunction(accountClosureReconciler)],
+      },
+    );
 
     const majorityReconcilerName = `roadmap-family-majority-reconciler-${stage}`;
     const majorityReconcilerRole = createRuntimeRole(this, 'FamilyMajorityReconcilerRole', stage);
@@ -914,46 +1038,67 @@ export class RoadmapStack extends Stack {
       memorySize: 256,
       timeout: Duration.minutes(2),
       role: majorityReconcilerRole,
-      logGroup: createFunctionLogGroup(this, 'FamilyMajorityReconcilerLogs', majorityReconcilerName, stage),
-      environment: { TABLE_NAME: table.tableName, USER_POOL_ID: pool.userPoolId,
-        AUDIT_TABLE_NAME: accessAuditTable.tableName },
+      logGroup: createFunctionLogGroup(
+        this,
+        'FamilyMajorityReconcilerLogs',
+        majorityReconcilerName,
+        stage,
+      ),
+      environment: {
+        TABLE_NAME: table.tableName,
+        USER_POOL_ID: pool.userPoolId,
+        AUDIT_TABLE_NAME: accessAuditTable.tableName,
+      },
       bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
     });
-    majorityReconcilerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'ReadDueMajorityIndex',
-      actions: ['dynamodb:Query'],
-      resources: [`${table.tableArn}/index/gsi2`],
-    }));
-    majorityReconcilerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'ReadFamilyMajorityState',
-      actions: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:BatchGetItem'],
-      resources: [table.tableArn],
-      conditions: { 'ForAllValues:StringLike': {
-        'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
-      } },
-    }));
-    majorityReconcilerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'TransactFamilyMajorityState',
-      actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
-      resources: [table.tableArn],
-      conditions: {
-        'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'] },
-        StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
-      },
-    }));
-    majorityReconcilerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'TransactFamilyMajorityAudit', actions: ['dynamodb:PutItem'],
-      resources: [accessAuditTable.tableArn],
-      conditions: {
-        'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#FAMILY_AGE#*' },
-        StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
-      },
-    }));
-    majorityReconcilerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'UpdateOnlyOwnUserPoolAccountType',
-      actions: ['cognito-idp:AdminUpdateUserAttributes'],
-      resources: [pool.userPoolArn],
-    }));
+    majorityReconcilerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadDueMajorityIndex',
+        actions: ['dynamodb:Query'],
+        resources: [`${table.tableArn}/index/gsi2`],
+      }),
+    );
+    majorityReconcilerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadFamilyMajorityState',
+        actions: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:BatchGetItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'],
+          },
+        },
+      }),
+    );
+    majorityReconcilerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactFamilyMajorityState',
+        actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['USER#*', 'HOUSEHOLD#*'] },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    majorityReconcilerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactFamilyMajorityAudit',
+        actions: ['dynamodb:PutItem'],
+        resources: [accessAuditTable.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#FAMILY_AGE#*' },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    majorityReconcilerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'UpdateOnlyOwnUserPoolAccountType',
+        actions: ['cognito-idp:AdminUpdateUserAttributes'],
+        resources: [pool.userPoolArn],
+      }),
+    );
     denyCommercialConfigWrites(majorityReconcilerRole, table);
     new events.Rule(this, 'FamilyMajorityReconcileSchedule', {
       ruleName: majorityReconcilerName,
@@ -1073,21 +1218,118 @@ export class RoadmapStack extends Stack {
     denyCommercialConfigWrites(accountClosureWorkerRole, table);
 
     const catalogName = `roadmap-catalog-${stage}`;
+    router.addEnvironment('PRIVACY_TABLE_NAME', privacyTable.tableName);
+    router.addEnvironment('ADULT_PRIVACY_MODE', adultPrivacyMode.valueAsString);
+    router.addEnvironment('PRIVATE_ADOLESCENT_MODE', privateAdolescentMode.valueAsString);
+    grantPrivacy(routerRole, [
+      'PRIVACY_STATE#*',
+      'RESTORE#*',
+      'ADOLESCENT_INVITE#*',
+      'ADOLESCENT_GUARDIAN#*',
+    ]);
+    routerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadOwnPrivateInvitations',
+        actions: ['dynamodb:Query'],
+        resources: [`${privacyTable.tableArn}/index/gsi1`],
+        conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
+      }),
+    );
+    const privacyWorkerName = `roadmap-account-closure-privacy-${stage}`;
+    const privacyWorkerRole = createRuntimeRole(this, 'PrivacyMaintenanceRole', stage);
+    const privacyWorker = new NodejsFunction(this, 'PrivacyMaintenance', {
+      functionName: privacyWorkerName,
+      entry: join(here, '../lambda/privacy-maintenance.ts'),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 512,
+      timeout: Duration.seconds(60),
+      role: privacyWorkerRole,
+      logGroup: createFunctionLogGroup(this, 'PrivacyMaintenanceLogs', privacyWorkerName, stage),
+      environment: {
+        TABLE_NAME: table.tableName,
+        PRIVACY_TABLE_NAME: privacyTable.tableName,
+        AUDIT_TABLE_NAME: accessAuditTable.tableName,
+        USER_POOL_ID: pool.userPoolId,
+        ADULT_PRIVACY_MODE: adultPrivacyMode.valueAsString,
+        PRIVATE_ADOLESCENT_MODE: privateAdolescentMode.valueAsString,
+      },
+      bundling: bundledAwsSdkEsm(join(here, '../tsconfig.json')),
+    });
+    grantPrivacy(privacyWorkerRole, ['PRIVACY_STATE#*', 'RESTORE#*']);
+    privacyWorkerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadPrivacyErasureState',
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        resources: [table.tableArn],
+        conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'USER#*' } },
+      }),
+    );
+    privacyWorkerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadPrivacyErasureQueue',
+        actions: ['dynamodb:Query'],
+        resources: [`${table.tableArn}/index/gsi2`],
+        conditions: {
+          'ForAllValues:StringLike': {
+            'dynamodb:LeadingKeys': ['PRIVACY#ERASURE', 'PRIVACY#MAJORITY'],
+          },
+        },
+      }),
+    );
+    privacyWorkerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyPrivacyErasure',
+        actions: [
+          'dynamodb:PutItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:UpdateItem',
+          'dynamodb:ConditionCheckItem',
+        ],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['USER#*', 'ACCOUNT_CLOSURE#*'] },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    privacyWorkerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadClassifiedAuditQueue',
+        actions: ['dynamodb:Query'],
+        resources: [`${accessAuditTable.tableArn}/index/gsi1`],
+        conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'RETENTION#AUDIT' } },
+      }),
+    );
+    privacyWorkerRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'TransactOnlyClassifiedAuditErasure',
+        actions: ['dynamodb:DeleteItem', 'dynamodb:UpdateItem'],
+        resources: [accessAuditTable.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'TARGET#USER#*' },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }),
+    );
+    denyCommercialConfigWrites(privacyWorkerRole, table);
+    accountClosureReconcileSchedule.addTarget(new eventTargets.LambdaFunction(privacyWorker));
     const catalogRole = createRuntimeRole(this, 'CatalogRole', stage);
     // IAM scopes partition + attributes; the handler fixes sk=FLAGS, never request data.
-    catalogRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'ReadPublicCatalogFlags',
-      actions: ['dynamodb:GetItem'],
-      resources: [table.tableArn],
-      conditions: {
-        'ForAllValues:StringEquals': {
-          'dynamodb:LeadingKeys': ['COMMERCIAL#CONFIG'],
-          'dynamodb:Attributes': [...COMMERCIAL_FLAGS_ATTRIBUTES],
+    catalogRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadPublicCatalogFlags',
+        actions: ['dynamodb:GetItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringEquals': {
+            'dynamodb:LeadingKeys': ['COMMERCIAL#CONFIG'],
+            'dynamodb:Attributes': [...COMMERCIAL_FLAGS_ATTRIBUTES],
+          },
+          Null: { 'dynamodb:Attributes': 'false' },
+          StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
         },
-        Null: { 'dynamodb:Attributes': 'false' },
-        StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
-      },
-    }));
+      }),
+    );
     const catalog = new NodejsFunction(this, 'Catalog', {
       functionName: catalogName,
       entry: join(here, '../lambda/catalog.ts'),
@@ -1409,7 +1651,17 @@ export class RoadmapStack extends Stack {
       'AccountClosureRequestIntegration',
       accountClosureRequest,
     );
+    accountClosureRequest.addEnvironment('PRIVACY_TABLE_NAME', privacyTable.tableName);
+    accountClosureRequest.addEnvironment('ADULT_PRIVACY_MODE', adultPrivacyMode.valueAsString);
+    grantPrivacy(accountClosureRequestRole, []);
     const routerIntegration = new HttpLambdaIntegration('RouterIntegration', router);
+    for (const [path, method] of [
+      ['/v1/privacy/status', apigatewayv2.HttpMethod.GET],
+      ['/v1/privacy/consents', apigatewayv2.HttpMethod.POST],
+      ['/v1/privacy/export', apigatewayv2.HttpMethod.GET],
+    ] as const) {
+      api.addRoutes({ path, methods: [method], integration: routerIntegration, authorizer });
+    }
     api.addRoutes({
       path: '/v1/plans',
       methods: [apigatewayv2.HttpMethod.GET],
@@ -2199,10 +2451,12 @@ export class RoadmapCiBootstrapStack extends Stack {
     Tags.of(role).add('roadmap2u-project', 'RoadMap2U');
     Tags.of(role).add('roadmap2u-stage', stage);
     Tags.of(role).add('roadmap2u-purpose', 'family-pilot-operator');
-    role.attachInlinePolicy(new iam.Policy(this, `FamilyPilotOperatorPolicy${stage}`, {
-      policyName: `FamilyPilotOperatorPolicy-${stage}`,
-      statements: this.familyPilotBrokerInvokeStatements(stage),
-    }));
+    role.attachInlinePolicy(
+      new iam.Policy(this, `FamilyPilotOperatorPolicy${stage}`, {
+        policyName: `FamilyPilotOperatorPolicy-${stage}`,
+        statements: this.familyPilotBrokerInvokeStatements(stage),
+      }),
+    );
     return role;
   }
 

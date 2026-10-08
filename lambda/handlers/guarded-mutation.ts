@@ -19,10 +19,7 @@ import {
 
 export type TransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
 
-export type EmbeddedOwnerGuards = Record<
-  string,
-  { profile?: true; closure?: true }
->;
+export type EmbeddedOwnerGuards = Record<string, { profile?: true; closure?: true }>;
 
 function uniqueOwnerIds(ownerIds: string[]): string[] {
   return [...new Set(ownerIds)];
@@ -40,11 +37,7 @@ function addressedKey(item: TransactItem): {
   return { table: operation?.TableName, pk: operation?.Key?.['pk'], sk: operation?.Key?.['sk'] };
 }
 
-function sameAddress(
-  item: TransactItem,
-  table: string,
-  key: { pk: string; sk: string },
-): boolean {
+function sameAddress(item: TransactItem, table: string, key: { pk: string; sk: string }): boolean {
   const addressed = addressedKey(item);
   return addressed.table === table && addressed.pk === key.pk && addressed.sk === key.sk;
 }
@@ -70,7 +63,9 @@ function hasEquivalentWritableCondition(expression: string): boolean {
   const required = normalizeCondition(WRITABLE_PROFILE_CONDITION);
   if (normalized === required) return true;
   const prefix = `${required} AND `;
-  return normalized.startsWith(prefix) && isSingleParenthesizedGroup(normalized.slice(prefix.length));
+  return (
+    normalized.startsWith(prefix) && isSingleParenthesizedGroup(normalized.slice(prefix.length))
+  );
 }
 
 function assertEmbeddedProfileGuard(ctx: Ctx, ownerId: string, writes: TransactItem[]): void {
@@ -146,7 +141,31 @@ export async function getConsistent<T>(
 }
 
 async function recheckOwners(ctx: Ctx, ownerIds: string[]): Promise<void> {
-  for (const ownerId of uniqueOwnerIds(ownerIds)) await requireWritableOwner(ctx, ownerId);
+  for (const ownerId of uniqueOwnerIds(ownerIds)) {
+    if ((await requireWritableOwner(ctx, ownerId)).privacyMode) throw new ApiError('FORBIDDEN');
+  }
+}
+
+/** These transactions only serve family/social handlers, never own cloud sync. */
+export function familySocialProfileFences(
+  table: string,
+  items: readonly TransactItem[],
+): TransactItem[] {
+  return items.map((item) => {
+    const operation = item.Update ?? item.ConditionCheck;
+    if (
+      !operation ||
+      operation.TableName !== table ||
+      operation.Key?.['sk'] !== 'PROFILE' ||
+      typeof operation.Key?.['pk'] !== 'string' ||
+      !operation.Key['pk'].startsWith('USER#')
+    )
+      return item;
+    const condition = `(${operation.ConditionExpression}) AND attribute_not_exists(privacyMode)`;
+    return item.Update
+      ? { Update: { ...item.Update, ConditionExpression: condition } }
+      : { ConditionCheck: { ...item.ConditionCheck!, ConditionExpression: condition } };
+  });
 }
 
 export async function guardedWrite(
@@ -156,12 +175,13 @@ export async function guardedWrite(
   classifyCancellation?: () => Promise<void>,
   embedded: EmbeddedOwnerGuards = {},
 ): Promise<void> {
-  const items = [...writes, ...ownerGuards(ctx, ownerIds, writes, embedded)];
+  const items = familySocialProfileFences(ctx.deps.table, [
+    ...writes,
+    ...ownerGuards(ctx, ownerIds, writes, embedded),
+  ]);
   assertUniqueAddresses(items);
   try {
-    await ctx.deps.ddb.send(
-      new TransactWriteCommand({ TransactItems: items }),
-    );
+    await ctx.deps.ddb.send(new TransactWriteCommand({ TransactItems: items }));
   } catch (error) {
     if (!isTransactionCanceled(error)) throw error;
     await recheckOwners(ctx, ownerIds);
@@ -245,10 +265,7 @@ export function exactRequestOperation(
   return operation === 'check' ? { ConditionCheck: common } : { Delete: common };
 }
 
-export function absentConditionCheck(
-  deps: Deps,
-  key: { pk: string; sk: string },
-): TransactItem {
+export function absentConditionCheck(deps: Deps, key: { pk: string; sk: string }): TransactItem {
   return {
     ConditionCheck: {
       TableName: deps.table,

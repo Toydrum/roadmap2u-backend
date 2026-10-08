@@ -138,9 +138,7 @@ function installFamilyReads(
       };
     }
     return {
-      Items: supervisionLinks.filter(
-        (item) => item.pk === pk && item.sk.startsWith(prefix),
-      ),
+      Items: supervisionLinks.filter((item) => item.pk === pk && item.sk.startsWith(prefix)),
     };
   });
   ddbMock.on(BatchGetCommand).callsFake((input) => {
@@ -188,11 +186,7 @@ describe('account closure request', () => {
       return {};
     });
 
-    const receipt = await module!.requestAccountClosure(
-      deps,
-      'adult-1',
-      'request-1',
-    );
+    const receipt = await module!.requestAccountClosure(deps, 'adult-1', 'request-1');
 
     expect(receipt).toEqual({ closureId: 'closure-1', state: 'requested' });
     expect(order).toEqual(['transact', 'enqueue']);
@@ -233,22 +227,28 @@ describe('account closure request', () => {
     expect(profileUpdate?.ConditionExpression).toContain('#status = :active');
     expect(profileUpdate?.ConditionExpression).toContain('username = :username');
     expect(profileUpdate?.ConditionExpression).toContain('friendCode = :friendCode');
-    expect(profileUpdate?.ConditionExpression).toContain('familyFenceVersion = :familyFenceVersion');
+    expect(profileUpdate?.ConditionExpression).toContain(
+      'familyFenceVersion = :familyFenceVersion',
+    );
     expect(profileUpdate?.ConditionExpression).toContain('attribute_not_exists(createdMinorIds)');
     expect(profileUpdate?.ExpressionAttributeValues).toMatchObject({ ':familyFenceVersion': 1 });
 
-    expect(transaction.TransactItems?.find((item) =>
-      item.ConditionCheck?.Key?.['pk'] === FK.familyCoverage('adult-1').pk &&
-      item.ConditionCheck.Key['sk'] === FK.familyCoverage('adult-1').sk
-    )?.ConditionCheck).toMatchObject({
+    expect(
+      transaction.TransactItems?.find(
+        (item) =>
+          item.ConditionCheck?.Key?.['pk'] === FK.familyCoverage('adult-1').pk &&
+          item.ConditionCheck.Key['sk'] === FK.familyCoverage('adult-1').sk,
+      )?.ConditionCheck,
+    ).toMatchObject({
       TableName: 'roadmap-dev',
       Key: FK.familyCoverage('adult-1'),
       ConditionExpression: expect.stringContaining('attribute_not_exists(pk)'),
     });
 
-    expect(transaction.TransactItems?.find(
-      (item) => item.Put?.TableName === 'roadmap-access-audit-dev',
-    )?.Put).toMatchObject({
+    expect(
+      transaction.TransactItems?.find((item) => item.Put?.TableName === 'roadmap-access-audit-dev')
+        ?.Put,
+    ).toMatchObject({
       TableName: 'roadmap-access-audit-dev',
       ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
       Item: {
@@ -290,8 +290,9 @@ describe('account closure request', () => {
       module!.requestAccountClosure(deps, 'adult-1', 'request-family-fence'),
     ).rejects.toMatchObject({ code: 'CONFLICT' });
     expect(enqueue).not.toHaveBeenCalled();
-    const update = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input
-      .TransactItems?.find((item) => item.Update)?.Update;
+    const update = ddbMock
+      .commandCalls(TransactWriteCommand)[0]
+      .args[0].input.TransactItems?.find((item) => item.Update)?.Update;
     expect(update?.ConditionExpression).toContain('familyFenceVersion = :familyFenceVersion');
     expect(update?.ConditionExpression).toContain('attribute_not_exists(createdMinorIds)');
   });
@@ -416,9 +417,10 @@ describe('account closure request', () => {
     conflict.name = 'TransactionCanceledException';
     ddbMock.on(TransactWriteCommand).rejects(conflict);
 
-    await expect(
-      module!.requestAccountClosure(deps, 'adult-1', 'request-race'),
-    ).resolves.toEqual({ closureId: 'closure-winner', state: 'requested' });
+    await expect(module!.requestAccountClosure(deps, 'adult-1', 'request-race')).resolves.toEqual({
+      closureId: 'closure-winner',
+      state: 'requested',
+    });
     expect(closureReads).toBe(2);
     expect(enqueue).toHaveBeenCalledWith({
       sub: 'adult-1',
@@ -440,27 +442,31 @@ describe('account closure request', () => {
     const checks = adultFamilyClosureConditionChecks('roadmap-dev', {
       accountId: 'adult-1',
       coverage: family.coverages.find((item) => item.accountId === 'adult-1')!,
-      snapshots: [{
-        household: family.household,
-        seats: family.seats,
-        supervisionLinks: family.supervisionLinks,
-        coverages: family.coverages,
-      }],
+      snapshots: [
+        {
+          household: family.household,
+          seats: family.seats,
+          supervisionLinks: family.supervisionLinks,
+          coverages: family.coverages,
+        },
+      ],
       indexedSupervisionLinks: [activeLink],
     });
 
-    expect(checks).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        ConditionCheck: expect.objectContaining({
-          Key: FK.supervision('minor-1', 'adult-1'),
-          ConditionExpression: expect.stringContaining('#state = :state'),
-          ExpressionAttributeValues: expect.objectContaining({
-            ':state': 'active',
-            ':revision': activeLink.revision,
+    expect(checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            Key: FK.supervision('minor-1', 'adult-1'),
+            ConditionExpression: expect.stringContaining('#state = :state'),
+            ExpressionAttributeValues: expect.objectContaining({
+              ':state': 'active',
+              ':revision': activeLink.revision,
+            }),
           }),
         }),
-      }),
-    ]));
+      ]),
+    );
   });
 
   it('fails closed when a non-active Household still contains a primary minor seat', () => {
@@ -470,17 +476,21 @@ describe('account closure request', () => {
       minorIds: ['minor-1'],
     });
 
-    expect(adultFamilyClosureBlockReason({
-      accountId: 'adult-1',
-      coverage: family.coverages.find((item) => item.accountId === 'adult-1')!,
-      snapshots: [{
-        household: { ...family.household, state: 'closed', revision: 2, updatedAt: NOW },
-        seats: family.seats,
-        supervisionLinks: family.supervisionLinks,
-        coverages: family.coverages,
-      }],
-      indexedSupervisionLinks: [],
-    })).toBe('incomplete_family_state');
+    expect(
+      adultFamilyClosureBlockReason({
+        accountId: 'adult-1',
+        coverage: family.coverages.find((item) => item.accountId === 'adult-1')!,
+        snapshots: [
+          {
+            household: { ...family.household, state: 'closed', revision: 2, updatedAt: NOW },
+            seats: family.seats,
+            supervisionLinks: family.supervisionLinks,
+            coverages: family.coverages,
+          },
+        ],
+        indexedSupervisionLinks: [],
+      }),
+    ).toBe('incomplete_family_state');
   });
 
   it('blocks a current primary with seated minors even when paid coverage has ended', async () => {
@@ -537,17 +547,24 @@ describe('account closure request', () => {
     async (indexDelayed) => {
       const module = await loadHandlerModule();
       const seeded = familyV2Fixture({
-        now: NOW, primaryId: 'primary-1', minorIds: ['minor-1', 'minor-2'],
-        additionalResponsibleSeat: 1, additionalId: 'adult-1',
+        now: NOW,
+        primaryId: 'primary-1',
+        minorIds: ['minor-1', 'minor-2'],
+        additionalResponsibleSeat: 1,
+        additionalId: 'adult-1',
       });
       const family: FamilyV2Fixture = {
         ...seeded,
         coverages: seeded.coverages.map((coverage) => ({
-          ...coverage, source: 'sponsored_pilot', paidThrough: null, graceUntil: null,
+          ...coverage,
+          source: 'sponsored_pilot',
+          paidThrough: null,
+          graceUntil: null,
         })),
       };
       const personal: FamilyV2Fixture = {
-        ...familyV2Fixture({ now: NOW, primaryId: 'adult-1', minorIds: [] }), coverages: [],
+        ...familyV2Fixture({ now: NOW, primaryId: 'adult-1', minorIds: [] }),
+        coverages: [],
       };
       const enqueue = vi.fn(async () => undefined);
       const deps = closureDeps(enqueue);
@@ -568,7 +585,10 @@ describe('account closure request', () => {
       expect(response.statusCode).toBe(409);
       expect(response.headers['cache-control']).toBe('no-store');
       expect(JSON.parse(response.body)).toMatchObject({
-        error: { code: 'CONFLICT', message: 'additional family authority must be revoked before closure' },
+        error: {
+          code: 'CONFLICT',
+          message: 'additional family authority must be revoked before closure',
+        },
       });
       expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
       expect(enqueue).not.toHaveBeenCalled();
@@ -635,21 +655,23 @@ describe('account closure request', () => {
     ).resolves.toEqual({ closureId: 'closure-1', state: 'requested' });
 
     const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
-    expect(items).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        ConditionCheck: expect.objectContaining({
-          Key: FK.familyCoverage('adult-1'),
-          ConditionExpression: expect.stringContaining('#state = :state'),
-          ExpressionAttributeValues: expect.objectContaining({ ':state': 'ended' }),
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            Key: FK.familyCoverage('adult-1'),
+            ConditionExpression: expect.stringContaining('#state = :state'),
+            ExpressionAttributeValues: expect.objectContaining({ ':state': 'ended' }),
+          }),
         }),
-      }),
-      expect.objectContaining({
-        ConditionCheck: expect.objectContaining({
-          Key: FK.additionalSeat(family.household.householdId),
-          ConditionExpression: expect.stringContaining('accountId = :expectedAccountId'),
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            Key: FK.additionalSeat(family.household.householdId),
+            ConditionExpression: expect.stringContaining('accountId = :expectedAccountId'),
+          }),
         }),
-      }),
-    ]));
+      ]),
+    );
     expect(enqueue).toHaveBeenCalledWith({ sub: 'adult-1', closureId: 'closure-1' });
   });
 });
@@ -719,9 +741,9 @@ describe('account closure worker', () => {
     ddbMock.on(GetCommand).resolves({ Item: closureItem() });
     ddbMock.on(TransactWriteCommand).resolves({});
 
-    await expect(
-      processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' }),
-    ).resolves.toBe('pending');
+    await expect(processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' })).resolves.toBe(
+      'pending',
+    );
 
     const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
     const transition = transaction.TransactItems?.[0]?.Update;
@@ -825,65 +847,73 @@ describe('account closure worker', () => {
     });
     ddbMock.on(TransactWriteCommand).resolves({});
 
-    await expect(
-      processMessage(deps, { sub: 'minor-1', closureId: 'closure-1' }),
-    ).resolves.toBe('pending');
+    await expect(processMessage(deps, { sub: 'minor-1', closureId: 'closure-1' })).resolves.toBe(
+      'pending',
+    );
 
     const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
-    expect(items).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        Update: expect.objectContaining({
-          Key: FK.household(family.household.householdId),
-          UpdateExpression: expect.stringContaining('revision = :nextRevision'),
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Update: expect.objectContaining({
+            Key: FK.household(family.household.householdId),
+            UpdateExpression: expect.stringContaining('revision = :nextRevision'),
+          }),
         }),
-      }),
-      expect.objectContaining({
-        Update: expect.objectContaining({
-          Key: FK.minorSeat(family.household.householdId, 1),
-          UpdateExpression: expect.stringContaining('#state = :empty'),
+        expect.objectContaining({
+          Update: expect.objectContaining({
+            Key: FK.minorSeat(family.household.householdId, 1),
+            UpdateExpression: expect.stringContaining('#state = :empty'),
+          }),
         }),
-      }),
-      expect.objectContaining({
-        Delete: expect.objectContaining({ Key: FK.familyCoverage('minor-1') }),
-      }),
-      expect.objectContaining({
-        Delete: expect.objectContaining({
-          Key: FK.supervision('minor-1', 'adult-1'),
-          ConditionExpression: expect.stringContaining('revision = :revision'),
+        expect.objectContaining({
+          Delete: expect.objectContaining({ Key: FK.familyCoverage('minor-1') }),
         }),
-      }),
-      expect.objectContaining({
-        Delete: expect.objectContaining({
-          Key: FK.supervision('minor-1', 'adult-2'),
+        expect.objectContaining({
+          Delete: expect.objectContaining({
+            Key: FK.supervision('minor-1', 'adult-1'),
+            ConditionExpression: expect.stringContaining('revision = :revision'),
+          }),
         }),
-      }),
-      expect.objectContaining({
-        Update: expect.objectContaining({
-          Key: FK.additionalSeat(family.household.householdId),
-          UpdateExpression: expect.stringContaining('#state = :empty'),
+        expect.objectContaining({
+          Delete: expect.objectContaining({
+            Key: FK.supervision('minor-1', 'adult-2'),
+          }),
         }),
-      }),
-      expect.objectContaining({
-        Update: expect.objectContaining({
-          Key: FK.familyCoverage('adult-2'),
-          UpdateExpression: expect.stringContaining('#state = :ended'),
+        expect.objectContaining({
+          Update: expect.objectContaining({
+            Key: FK.additionalSeat(family.household.householdId),
+            UpdateExpression: expect.stringContaining('#state = :empty'),
+          }),
         }),
-      }),
-      expect.objectContaining({
-        Put: expect.objectContaining({
-          TableName: 'roadmap-access-audit-dev',
-          Item: expect.objectContaining({ action: 'account_closure.family_detached' }),
+        expect.objectContaining({
+          Update: expect.objectContaining({
+            Key: FK.familyCoverage('adult-2'),
+            UpdateExpression: expect.stringContaining('#state = :ended'),
+          }),
         }),
-      }),
-    ]));
-    expect(items.some((item) =>
-      item.Delete?.Key?.['pk'] === FK.supervision('minor-1', 'adult-old').pk &&
-      item.Delete.Key['sk'] === FK.supervision('minor-1', 'adult-old').sk
-    )).toBe(false);
-    expect(ddbMock.commandCalls(UpdateCommand)[1].args[0].input
-      .ExpressionAttributeValues?.[':checkpoint']).toEqual({
-        phase: 'familySupervisionLinks',
-      });
+        expect.objectContaining({
+          Put: expect.objectContaining({
+            TableName: 'roadmap-access-audit-dev',
+            Item: expect.objectContaining({ action: 'account_closure.family_detached' }),
+          }),
+        }),
+      ]),
+    );
+    expect(
+      items.some(
+        (item) =>
+          item.Delete?.Key?.['pk'] === FK.supervision('minor-1', 'adult-old').pk &&
+          item.Delete.Key['sk'] === FK.supervision('minor-1', 'adult-old').sk,
+      ),
+    ).toBe(false);
+    expect(
+      ddbMock.commandCalls(UpdateCommand)[1].args[0].input.ExpressionAttributeValues?.[
+        ':checkpoint'
+      ],
+    ).toEqual({
+      phase: 'familySupervisionLinks',
+    });
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
   });
 
@@ -938,18 +968,27 @@ describe('account closure worker', () => {
       UpdateExpression: expect.stringContaining('#state = :closed'),
       ExpressionAttributeValues: expect.objectContaining({ ':closed': 'closed' }),
     });
-    expect(items.filter((item) => item.ConditionCheck?.Key?.['sk']?.startsWith('SEAT#')))
-      .toHaveLength(3);
-    expect(items.find((item) =>
-      item.ConditionCheck?.Key?.['pk'] === FK.familyEntitlement(family.household.householdId).pk &&
-      item.ConditionCheck.Key['sk'] === FK.familyEntitlement(family.household.householdId).sk
-    )?.ConditionCheck?.ConditionExpression).toBe(
-      'attribute_not_exists(pk) AND attribute_not_exists(sk)',
-    );
-    expect(items.find((item) => item.Put?.TableName === 'roadmap-access-audit-dev')?.Put)
-      .toMatchObject({ Item: expect.objectContaining({ action: 'account_closure.household_closed' }) });
-    expect(ddbMock.commandCalls(UpdateCommand)[1].args[0].input
-      .ExpressionAttributeValues?.[':checkpoint']).toEqual({ phase: 'ownedHousehold' });
+    expect(
+      items.filter((item) => item.ConditionCheck?.Key?.['sk']?.startsWith('SEAT#')),
+    ).toHaveLength(3);
+    expect(
+      items.find(
+        (item) =>
+          item.ConditionCheck?.Key?.['pk'] ===
+            FK.familyEntitlement(family.household.householdId).pk &&
+          item.ConditionCheck.Key['sk'] === FK.familyEntitlement(family.household.householdId).sk,
+      )?.ConditionCheck?.ConditionExpression,
+    ).toBe('attribute_not_exists(pk) AND attribute_not_exists(sk)');
+    expect(
+      items.find((item) => item.Put?.TableName === 'roadmap-access-audit-dev')?.Put,
+    ).toMatchObject({
+      Item: expect.objectContaining({ action: 'account_closure.household_closed' }),
+    });
+    expect(
+      ddbMock.commandCalls(UpdateCommand)[1].args[0].input.ExpressionAttributeValues?.[
+        ':checkpoint'
+      ],
+    ).toEqual({ phase: 'ownedHousehold' });
   });
 
   it('deletes a revoked v2 supervision link exactly and resumes the gsi sweep', async () => {
@@ -998,25 +1037,30 @@ describe('account closure worker', () => {
     await processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' });
 
     const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
-    expect(transaction.TransactItems).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        Delete: expect.objectContaining({
-          Key: FK.supervision('minor-1', 'adult-1'),
-          ConditionExpression: expect.stringContaining('linkId = :linkId'),
+    expect(transaction.TransactItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Delete: expect.objectContaining({
+            Key: FK.supervision('minor-1', 'adult-1'),
+            ConditionExpression: expect.stringContaining('linkId = :linkId'),
+          }),
         }),
-      }),
-    ]));
+      ]),
+    );
     const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
     expect(query).toMatchObject({
       IndexName: 'gsi1',
       Limit: 1,
       ExpressionAttributeValues: { ':pk': K.user('adult-1'), ':prefix': 'SUPERVISION#' },
     });
-    expect(ddbMock.commandCalls(UpdateCommand)[1].args[0].input
-      .ExpressionAttributeValues?.[':checkpoint']).toEqual({
-        phase: 'familySupervisionLinks',
-        quietPasses: 0,
-      });
+    expect(
+      ddbMock.commandCalls(UpdateCommand)[1].args[0].input.ExpressionAttributeValues?.[
+        ':checkpoint'
+      ],
+    ).toEqual({
+      phase: 'familySupervisionLinks',
+      quietPasses: 0,
+    });
   });
 
   it('deletes a friend mirror before checkpointing the paginated user scan', async () => {
@@ -1238,11 +1282,10 @@ describe('account closure worker', () => {
     await processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' });
 
     const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
-    expect(transaction.TransactItems?.find((item) => item.Update)?.Update)
-      .toMatchObject({
-        Key: accountClosureKey('adult-1'),
-        ExpressionAttributeValues: expect.objectContaining({ ':nextState': 'blocked' }),
-      });
+    expect(transaction.TransactItems?.find((item) => item.Update)?.Update).toMatchObject({
+      Key: accountClosureKey('adult-1'),
+      ExpressionAttributeValues: expect.objectContaining({ ':nextState': 'blocked' }),
+    });
     expect(transaction.TransactItems?.some((item) => item.Delete)).toBe(false);
     expect(enqueue).not.toHaveBeenCalled();
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
@@ -1293,9 +1336,7 @@ describe('account closure worker', () => {
 
       expect(ddbMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
       const checkpoint = ddbMock.commandCalls(UpdateCommand)[1].args[0].input;
-      expect(checkpoint.ExpressionAttributeValues?.[':checkpoint']).toEqual(
-        expectedCheckpoint,
-      );
+      expect(checkpoint.ExpressionAttributeValues?.[':checkpoint']).toEqual(expectedCheckpoint);
       expect(checkpoint.ExpressionAttributeValues?.[':nextAttemptAt']).toBe(
         expectedDelay === undefined ? NOW : NOW + 30_000,
       );
@@ -1328,14 +1369,11 @@ describe('account closure worker', () => {
       }),
     });
 
-    await expect(
-      processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' }),
-    ).resolves.toBe('pending');
-
-    expect(enqueue).toHaveBeenCalledWith(
-      { sub: 'adult-1', closureId: 'closure-1' },
-      30,
+    await expect(processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' })).resolves.toBe(
+      'pending',
     );
+
+    expect(enqueue).toHaveBeenCalledWith({ sub: 'adult-1', closureId: 'closure-1' }, 30);
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
@@ -1623,9 +1661,9 @@ describe('account closure worker', () => {
       return {};
     });
 
-    await expect(
-      processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' }),
-    ).resolves.toBe('completed');
+    await expect(processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' })).resolves.toBe(
+      'completed',
+    );
 
     expect(order).toEqual(['get', 'cognito', 'complete']);
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)[0].args[0].input).toEqual({
@@ -1646,7 +1684,7 @@ describe('account closure worker', () => {
       ':nextState': 'completed',
       ':nextRevision': 13,
       ':now': NOW,
-      ':ttl': Math.ceil((NOW + 30 * 24 * 60 * 60 * 1000) / 1000),
+      ':ttl': Math.ceil((NOW + 36 * 24 * 60 * 60 * 1000) / 1000),
     });
     expect(completed?.UpdateExpression).toContain('completedAt = :now');
     expect(completed?.UpdateExpression).toContain('#ttl = :ttl');
@@ -1694,9 +1732,9 @@ describe('account closure worker', () => {
       return {};
     });
 
-    await expect(
-      processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' }),
-    ).resolves.toBe('pending');
+    await expect(processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' })).resolves.toBe(
+      'pending',
+    );
 
     expect(order).toEqual(['get', 'reopen', 'enqueue']);
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
@@ -1744,9 +1782,9 @@ describe('account closure worker', () => {
     cognitoMock.on(AdminDeleteUserCommand).rejects(missing);
     ddbMock.on(TransactWriteCommand).resolves({});
 
-    await expect(
-      processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' }),
-    ).resolves.toBe('completed');
+    await expect(processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' })).resolves.toBe(
+      'completed',
+    );
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(1);
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
@@ -1796,11 +1834,13 @@ describe('account closure worker', () => {
             error.name = 'ValidationException';
             throw error;
           }
-          const attribute = name!.startsWith('#') ? update!.ExpressionAttributeNames?.[name!] : name;
+          const attribute = name!.startsWith('#')
+            ? update!.ExpressionAttributeNames?.[name!]
+            : name;
           expect(attribute).toBeDefined();
           next[attribute!] = values[value!];
         }
-        for (const name of removeClause!.split(',').map(value => value.trim())) delete next[name];
+        for (const name of removeClause!.split(',').map((value) => value.trim())) delete next[name];
         const audit = input.TransactItems?.[1]?.Put?.Item;
         expect(audit).toMatchObject({ targetId: sub, action: 'account_closure.completed' });
         stored = next;
@@ -1816,9 +1856,16 @@ describe('account closure worker', () => {
         state: 'completed',
         revision: 27,
         completedAt: NOW,
-        ttl: Math.ceil((NOW + 30 * 24 * 60 * 60 * 1000) / 1000),
+        ttl: Math.ceil((NOW + 36 * 24 * 60 * 60 * 1000) / 1000),
       });
-      for (const name of ['gsi1pk', 'gsi1sk', 'nextAttemptAt', 'leaseOwner', 'leaseUntil', 'checkpoint']) {
+      for (const name of [
+        'gsi1pk',
+        'gsi1sk',
+        'nextAttemptAt',
+        'leaseOwner',
+        'leaseUntil',
+        'checkpoint',
+      ]) {
         expect(stored).not.toHaveProperty(name);
       }
       await expect(processMessage(deps, message)).resolves.toBe('completed');
@@ -1844,9 +1891,9 @@ describe('account closure worker', () => {
     throttled.name = 'TooManyRequestsException';
     cognitoMock.on(AdminDeleteUserCommand).rejects(throttled);
 
-    await expect(
-      processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' }),
-    ).rejects.toBe(throttled);
+    await expect(processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' })).rejects.toBe(
+      throttled,
+    );
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
     expect(enqueue).not.toHaveBeenCalled();
   });
@@ -1864,9 +1911,9 @@ describe('account closure worker', () => {
     lost.name = 'ConditionalCheckFailedException';
     ddbMock.on(UpdateCommand).rejects(lost);
 
-    await expect(
-      processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' }),
-    ).resolves.toBe('pending');
+    await expect(processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' })).resolves.toBe(
+      'pending',
+    );
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
     expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
@@ -1876,32 +1923,35 @@ describe('account closure worker', () => {
   it.each([
     ['missing', undefined],
     ['unknown', { phase: 'not-a-real-phase' }],
-  ])('fails a purging closure with a %s checkpoint instead of hot-looping', async (_label, checkpoint) => {
-    const module = await loadClosureModule();
-    const processMessage = module?.['processAccountClosureMessage'];
-    expect(processMessage).toBeTypeOf('function');
-    const enqueue = vi.fn(async () => {});
-    const deps = closureDeps(enqueue);
-    const purging = closureItem({ state: 'purging', revision: 8, checkpoint });
-    ddbMock.on(GetCommand).resolves({ Item: purging });
-    ddbMock.on(UpdateCommand).resolves({
-      Attributes: {
-        ...purging,
-        revision: 9,
-        leaseOwner: 'worker-1',
-        leaseUntil: NOW + 60_000,
-      },
-    });
+  ])(
+    'fails a purging closure with a %s checkpoint instead of hot-looping',
+    async (_label, checkpoint) => {
+      const module = await loadClosureModule();
+      const processMessage = module?.['processAccountClosureMessage'];
+      expect(processMessage).toBeTypeOf('function');
+      const enqueue = vi.fn(async () => {});
+      const deps = closureDeps(enqueue);
+      const purging = closureItem({ state: 'purging', revision: 8, checkpoint });
+      ddbMock.on(GetCommand).resolves({ Item: purging });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: {
+          ...purging,
+          revision: 9,
+          leaseOwner: 'worker-1',
+          leaseUntil: NOW + 60_000,
+        },
+      });
 
-    await expect(
-      processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' }),
-    ).rejects.toThrow('invalid account closure checkpoint');
+      await expect(
+        processMessage(deps, { sub: 'adult-1', closureId: 'closure-1' }),
+      ).rejects.toThrow('invalid account closure checkpoint');
 
-    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
-    expect(ddbMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
-    expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
-    expect(enqueue).not.toHaveBeenCalled();
-  });
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+      expect(ddbMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
+      expect(cognitoMock.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('account closure SQS boundary', () => {
@@ -1969,10 +2019,7 @@ describe('account closure SQS boundary', () => {
     };
 
     await expect(handleQueue(event, deps)).resolves.toEqual({
-      batchItemFailures: [
-        { itemIdentifier: 'invalid' },
-        { itemIdentifier: 'error' },
-      ],
+      batchItemFailures: [{ itemIdentifier: 'invalid' }, { itemIdentifier: 'error' }],
     });
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(2);
     expect(log).not.toHaveBeenCalled();
@@ -2108,9 +2155,7 @@ describe('account closure instrumentation', () => {
       ],
     };
 
-    await expect(
-      handler(event, { awsRequestId: 'worker-request-id' }),
-    ).resolves.toEqual({
+    await expect(handler(event, { awsRequestId: 'worker-request-id' })).resolves.toEqual({
       batchItemFailures: [{ itemIdentifier: 'never-log-message-id' }],
     });
 
