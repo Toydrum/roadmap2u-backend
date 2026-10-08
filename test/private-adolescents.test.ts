@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { marshall } from '@aws-sdk/util-dynamodb';
 import {
   DynamoDBDocumentClient,
   GetCommand,
@@ -10,7 +11,7 @@ import {
   type TransactGetCommandInput,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb';
-import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
+import { AdminUpdateUserAttributesCommand, CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { ADULT_PRIVACY_VERSIONS, type PrivacyConsentCommand } from '@app/api/contracts';
 import { K, type ProfileItem } from '../lambda/db';
 import {
@@ -36,8 +37,10 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
 import { CONTRACT_VERSION } from '@app/api/contracts';
 import { SCHEMA_VERSION, newSyncBase } from '@app/db/schema';
 import { FK, householdIdForPrimary } from '../lambda/family/keys';
+import { handleEvent as handleSignup } from '../lambda/post-confirmation';
 const NOW = Date.parse('2026-10-07T16:00:00Z');
 const ddb = mockClient(DynamoDBDocumentClient);
+const cognito = mockClient(CognitoIdentityProviderClient);
 const rows = new Map<string, any>();
 const profile = (id: string): ProfileItem => ({
   ...K.profile(id),
@@ -78,6 +81,8 @@ beforeEach(() => {
   vi.stubEnv('ADULT_PRIVACY_MODE', 'enforce');
   vi.stubEnv('PRIVATE_ADOLESCENT_MODE', 'enforce');
   ddb.reset();
+  cognito.reset();
+  cognito.on(AdminUpdateUserAttributesCommand).resolves({});
   rows.clear();
   for (const id of ['parent', 'teen', 'other']) rows.set(key('main', profile(id)), profile(id));
   rows.set('main/USER#parent/SUBSCRIPTION#INDIVIDUAL', {
@@ -114,6 +119,7 @@ beforeEach(() => {
   ddb.on(TransactWriteCommand).callsFake((input) => {
     for (const item of input.TransactItems ?? []) {
       if (item.Put) rows.set(key(item.Put.TableName!, item.Put.Item), item.Put.Item);
+      if (item.Delete) rows.delete(key(item.Delete.TableName!, item.Delete.Key));
       if (item.Update) {
         const row = { ...rows.get(key(item.Update.TableName!, item.Update.Key)) };
         const set = item.Update.UpdateExpression?.split('REMOVE')[0].replace(/^SET /, '') ?? '';
@@ -169,7 +175,129 @@ const acceptance = (id: string): PrivacyConsentCommand => ({
   acceptTerms: true,
   understandsPrivacy: true,
 });
+async function canonicalTeenSignup(id = 'teen') {
+  rows.delete(`main/USER#${id}/PROFILE`);
+  await handleSignup({
+    version: '1', region: 'us-east-1', callerContext: { awsSdkVersion: 'test', clientId: 'client' }, response: {},
+    triggerSource: 'PostConfirmation_ConfirmSignUp', userName: id, userPoolId: 'pool',
+    request: { userAttributes: { sub: id, name: id, email: `${id}@example.invalid` } },
+  }, ctx(id).deps);
+  return FK.household(householdIdForPrimary(id));
+}
 describe('private adolescent admission', () => {
+  it('admits the exact recipient after canonical signup without keeping its unused family container', async () => {
+    const parentHousehold = await canonicalTeenSignup('parent');
+    const parentRows = structuredClone([...rows.entries()].filter(([, row]) => row.pk === parentHousehold.pk));
+    const householdKey = await canonicalTeenSignup();
+    expect(rows.has(key('main', householdKey))).toBe(true);
+    const signupAccess = rows.get('main/USER#teen/ACCESS');
+    const signupUsage = rows.get('main/USER#teen/USAGE');
+    const protectedRecord = { pk: 'USER#teen', sk: 'REC#checkins#private', owner: 'teen', store: 'checkins', record: { id: 'private', note: 'synthetic private note' } };
+    rows.set(key('main', protectedRecord), protectedRecord);
+    const invite = await invitation();
+    await expect(changePrivacyConsent(ctx('teen'), acceptance(invite.invitationId))).resolves.toMatchObject({
+      scope: 'adolescent_private', cloudConsent: 'absent', privateOnly: true,
+    });
+    expect(rows.get('main/USER#teen/PROFILE')).toMatchObject({ accountType: 'minor', socialEnabled: false });
+    expect([...rows.values()].some(row => row.pk === householdKey.pk)).toBe(false);
+    expect(rows.get('main/USER#teen/ACCESS')).toEqual(signupAccess);
+    expect(rows.get('main/USER#teen/USAGE')).toEqual(signupUsage);
+    expect(rows.get(key('main', protectedRecord))).toEqual(protectedRecord);
+    expect([...rows.entries()].filter(([, row]) => row.pk === parentHousehold.pk)).toEqual(parentRows);
+  });
+  it.each(['advanced-household', 'assigned-seat', 'missing-seat', 'extra-history', 'family-entitlement', 'changed-owner', 'orphan-seats'])('preserves an existing family container with %s', async problem => {
+    const householdKey = await canonicalTeenSignup();
+    const metaKey = key('main', householdKey);
+    const seatKey = key('main', FK.minorSeat(householdIdForPrimary('teen'), 1));
+    if (problem === 'advanced-household') rows.set(metaKey, { ...rows.get(metaKey), revision: 2 });
+    if (problem === 'assigned-seat') rows.set(seatKey, { ...rows.get(seatKey), state: 'assigned', accountId: 'child', revision: 2 });
+    if (problem === 'missing-seat') rows.delete(seatKey);
+    if (problem === 'extra-history') rows.set(`${metaKey}-history`, { ...householdKey, sk: 'EVENT#retained', detail: 'retained history' });
+    if (problem === 'family-entitlement') rows.set(key('main', FK.familyEntitlement(householdIdForPrimary('teen'))), { ...FK.familyEntitlement(householdIdForPrimary('teen')), state: 'active' });
+    if (problem === 'changed-owner') rows.set(metaKey, { ...rows.get(metaKey), primaryResponsibleId: 'other' });
+    if (problem === 'orphan-seats') rows.delete(metaKey);
+    const before = structuredClone([...rows.entries()].filter(([, row]) => row.pk === householdKey.pk));
+    const invite = await invitation();
+    ddb.resetHistory();
+    await expect(changePrivacyConsent(ctx('teen'), acceptance(invite.invitationId))).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect([...rows.entries()].filter(([, row]) => row.pk === householdKey.pk)).toEqual(before);
+    expect(rows.get('main/USER#teen/PROFILE').accountType).toBe('adult');
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+  it('serializes every empty-container delete condition and fences family source absence atomically', async () => {
+    const householdKey = await canonicalTeenSignup();
+    const before = [...rows.values()].filter(row => row.pk === householdKey.pk);
+    const invite = await invitation();
+    ddb.resetHistory();
+    await changePrivacyConsent(ctx('teen'), acceptance(invite.invitationId));
+    const items = ddb.commandCalls(TransactWriteCommand).at(-1)!.args[0].input.TransactItems!;
+    const deletes = items.flatMap(item => item.Delete ? [item.Delete] : []);
+    expect(deletes).toHaveLength(4);
+    for (const deletion of deletes) {
+      expect(deletion.TableName).toBe('main');
+      const row = before.find(row => row.sk === deletion.Key?.sk)!;
+      expect(deletion.Key?.pk).toBe(householdKey.pk);
+      const values = marshall(deletion.ExpressionAttributeValues!, { removeUndefinedValues: true });
+      expect(Object.keys(values).sort()).toEqual([...new Set(deletion.ConditionExpression!.match(/:[A-Za-z0-9_]+/g))].sort());
+      expect(Object.values(deletion.ExpressionAttributeNames!).sort()).toEqual(Object.keys(row).filter(name => name !== 'pk' && name !== 'sk').sort());
+    }
+    for (const Key of [FK.familyCoverage('teen'), FK.familyEntitlement(householdIdForPrimary('teen'))]) {
+      expect(items).toContainEqual({ ConditionCheck: { TableName: 'main', Key, ConditionExpression: 'attribute_not_exists(pk)' } });
+    }
+    const writeKeys = items.map(item => { const part = item.ConditionCheck ?? item.Delete ?? item.Update ?? item.Put!; const key = 'Key' in part ? part.Key : part.Item; return `${part.TableName}/${key!.pk}/${key!.sk}`; });
+    expect(new Set(writeKeys).size).toBe(writeKeys.length);
+    expect(items.length).toBeLessThanOrEqual(100);
+  });
+  it('does not convert the recipient if an empty seat changes before the transaction commits', async () => {
+    const householdKey = await canonicalTeenSignup();
+    const invite = await invitation();
+    ddb.on(TransactWriteCommand).callsFake(input => {
+      const seatKey = FK.minorSeat(householdIdForPrimary('teen'), 1);
+      rows.set(key('main', seatKey), { ...rows.get(key('main', seatKey)), revision: 2, state: 'assigned', accountId: 'child' });
+      const deletes = input.TransactItems.flatMap((item: any) => item.Delete ? [item.Delete] : []);
+      expect(deletes).toHaveLength(4);
+      const stale = deletes.some((item: any) => Object.entries(item.ExpressionAttributeNames).some(([placeholder, name]) => {
+        const token = item.ConditionExpression.split(' AND ').find((clause: string) => clause.startsWith(placeholder + ' = '))?.split(' = ')[1];
+        return !token || JSON.stringify(rows.get(key(item.TableName, item.Key))?.[name as string]) !== JSON.stringify(item.ExpressionAttributeValues[token]);
+      }));
+      expect(stale).toBe(true);
+      throw Object.assign(new Error('changed seat'), { name: 'TransactionCanceledException' });
+    });
+    await expect(changePrivacyConsent(ctx('teen'), acceptance(invite.invitationId))).rejects.toMatchObject({ code: 'PRIVACY_REVISION_CONFLICT' });
+    expect(rows.get('main/USER#teen/PROFILE').accountType).toBe('adult');
+    expect(rows.has(key('main', householdKey))).toBe(true);
+    expect(rows.get(`privacy/ADOLESCENT_INVITE#${invite.invitationId}/STATE`).state).toBe('authorized');
+  });
+  it.each(['account_attestation', 'operator_verified', 'legacy_operator_verified'] as const)(
+    'serializes a complete authorization condition for %s acceptance',
+    async (method) => {
+      const invite = await invitation();
+      if (method !== 'account_attestation') authorize(invite.invitationId);
+      const stored = rows.get(`privacy/ADOLESCENT_INVITE#${invite.invitationId}/STATE`);
+      if (method === 'legacy_operator_verified') delete stored.authorizationMethod;
+      await changePrivacyConsent(ctx('teen'), acceptance(invite.invitationId));
+      const command = ddb.commandCalls(TransactWriteCommand).at(-1)!.args[0];
+      const put = command.input.TransactItems!.find(
+        (item) =>
+          item.Put?.TableName === 'privacy' &&
+          item.Put.Item?.pk === `ADOLESCENT_INVITE#${invite.invitationId}`,
+      )!.Put!;
+      // Exercise the same AWS serialization option as the runtime. A document
+      // client mock accepts undefined values and does not validate expressions.
+      const values = marshall(put.ExpressionAttributeValues!, { removeUndefinedValues: true });
+      const required = [...new Set(put.ConditionExpression!.match(/:[A-Za-z0-9_]+/g))].sort();
+      expect(Object.keys(values).sort()).toEqual(required);
+      if (method === 'account_attestation') {
+        expect(stored.representationVerifiedAt).toBeUndefined();
+        expect(put.ConditionExpression).toMatch(/authorizationMethod\s*=/);
+        expect(put.ConditionExpression).toMatch(/attestation\s*=/);
+        expect(Object.values(put.ExpressionAttributeValues!)).toContainEqual(stored.attestation);
+      } else {
+        expect(put.ConditionExpression).toMatch(/representationVerifiedAt\s*=/);
+        expect(Object.values(put.ExpressionAttributeValues!)).toContain(NOW);
+      }
+    },
+  );
   it.each([true, 'true', false, 'false', undefined, 'True', 1])(
     'takes email confirmation only from verified authorizer claims: %s',
     async (emailVerified) => {

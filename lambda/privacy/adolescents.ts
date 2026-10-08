@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   ApiError,
   adultPrivacyDocument,
@@ -18,8 +19,9 @@ import {
 import { ES } from '@app/i18n/es';
 import { EN } from '@app/i18n/en';
 import { closureAbsenceConditionCheck, requireWritableOwner, type Ctx } from '../authz';
-import { K, type Deps } from '../db';
+import { K, type Deps, type ProfileItem } from '../db';
 import { FK, householdIdForPrimary } from '../family/keys';
+import { createEmptySeatAssignments, createHousehold } from '../family/model';
 import { requireCurrentResponsiblePremium } from './parent-premium';
 import {
   isDeclared,
@@ -505,6 +507,37 @@ export async function listPrivateAdolescentInvitations(
   } while (start);
   return result;
 }
+/** A signup container carries no family authorization. Retire only its exact,
+ * untouched four canonical rows; active or historically used families stay blocked. */
+async function retireUnusedSignupHousehold(ctx: Ctx, profile: ProfileItem): Promise<Item[]> {
+  const householdKey = FK.household(householdIdForPrimary(profile.userId));
+  const result = await ctx.deps.ddb.send(new QueryCommand({
+    TableName: ctx.deps.table, KeyConditionExpression: 'pk = :pk',
+    ExpressionAttributeValues: { ':pk': householdKey.pk }, ConsistentRead: true, Limit: 5,
+  }));
+  if (!result.Items?.length && !result.LastEvaluatedKey) {
+    return [{ ConditionCheck: { TableName: ctx.deps.table, Key: householdKey,
+      ConditionExpression: 'attribute_not_exists(pk)' } }];
+  }
+  const canonical = createHousehold({ primaryResponsibleId: profile.userId, now: profile.createdAt });
+  const expected = [canonical, ...createEmptySeatAssignments(canonical.householdId, profile.createdAt)];
+  if (result.LastEvaluatedKey || result.Items?.length !== expected.length ||
+    expected.some(row => !result.Items?.some(item => isDeepStrictEqual(item, row))))
+    throw new ApiError('CONFLICT');
+  return [
+    ...[FK.familyEntitlement(canonical.householdId), FK.familyCoverage(profile.userId)].map(Key => ({
+      ConditionCheck: { TableName: ctx.deps.table, Key, ConditionExpression: 'attribute_not_exists(pk)' },
+    })),
+    ...expected.map(row => {
+      const fields = Object.entries(row).filter(([name]) => name !== 'pk' && name !== 'sk');
+      return { Delete: { TableName: ctx.deps.table, Key: { pk: row.pk, sk: row.sk },
+        ConditionExpression: fields.map((_, i) => `#f${i} = :v${i}`).join(' AND '),
+        ExpressionAttributeNames: Object.fromEntries(fields.map(([name], i) => [`#f${i}`, name])),
+        ExpressionAttributeValues: Object.fromEntries(fields.map(([, value], i) => [`:v${i}`, value])),
+      } };
+    }),
+  ];
+}
 export async function acceptPrivateAdolescentInvitation(
   ctx: Ctx,
   command: Extract<PrivacyConsentCommand, { action: 'accept_adolescent' }>,
@@ -639,7 +672,7 @@ export async function acceptPrivateAdolescentInvitation(
     if (existing.Items?.length) throw new ApiError('CONFLICT');
   }
   // The initial type is technical, not adult admission. Existing outbound
-  // legacy/v2 relations and a primary household also disqualify conversion.
+  // legacy/v2 relations and any used primary household disqualify conversion.
   const outbound = await ctx.deps.ddb.send(
     new QueryCommand({
       TableName: ctx.deps.table,
@@ -650,11 +683,7 @@ export async function acceptPrivateAdolescentInvitation(
     }),
   );
   if (outbound.Items?.length) throw new ApiError('CONFLICT');
-  const householdKey = FK.household(householdIdForPrimary(ctx.callerId));
-  const household = await ctx.deps.ddb.send(
-    new GetCommand({ TableName: ctx.deps.table, Key: householdKey, ConsistentRead: true }),
-  );
-  if (household.Item) throw new ApiError('CONFLICT');
+  const signupHouseholdChanges = await retireUnusedSignupHousehold(ctx, profile);
   const checks = await parentConditions(ctx, invite.guardianId);
   const premium =
     invite.authorizationMethod === 'account_attestation'
@@ -699,13 +728,7 @@ export async function acceptPrivateAdolescentInvitation(
     ...checks,
     ...(premium?.conditions ?? []),
     closureAbsenceConditionCheck(ctx.deps, ctx.callerId),
-    {
-      ConditionCheck: {
-        TableName: ctx.deps.table,
-        Key: householdKey,
-        ConditionExpression: 'attribute_not_exists(pk)',
-      },
-    },
+    ...signupHouseholdChanges,
     {
       Update: {
         TableName: ctx.deps.table,
@@ -762,13 +785,18 @@ export async function acceptPrivateAdolescentInvitation(
         TableName: privacyTableName(ctx.deps),
         Item: acceptedInvite,
         ConditionExpression:
-          '#state = :authorized AND revision = :revision AND guardianId = :parent AND representationVerifiedAt = :verified',
+          '#state = :authorized AND revision = :revision AND guardianId = :parent AND ' +
+          (invite.authorizationMethod === 'account_attestation'
+            ? 'authorizationMethod = :method AND attestation = :attestation'
+            : 'representationVerifiedAt = :verified'),
         ExpressionAttributeNames: { '#state': 'state' },
         ExpressionAttributeValues: {
           ':authorized': 'authorized',
           ':revision': invite.revision,
           ':parent': invite.guardianId,
-          ':verified': invite.representationVerifiedAt,
+          ...(invite.authorizationMethod === 'account_attestation'
+            ? { ':method': 'account_attestation', ':attestation': invite.attestation! }
+            : { ':verified': invite.representationVerifiedAt! }),
         },
       },
     },
