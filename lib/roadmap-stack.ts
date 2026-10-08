@@ -2611,6 +2611,21 @@ export class RoadmapCiBootstrapStack extends Stack {
     );
     role.addToPolicy(
       new iam.PolicyStatement({
+        sid: `ReadPrivacyFunctionConfiguration${stage}`,
+        actions: ['lambda:GetFunctionConfiguration'],
+        resources: [
+          'roadmap-router',
+          'roadmap-account-closure-privacy',
+          'roadmap-account-closure-request',
+          'roadmap-account-closure-worker',
+        ].map(
+          (name) =>
+            `arn:${Aws.PARTITION}:lambda:${this.region}:${this.account}:function:${name}-${stage}`,
+        ),
+      }),
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
         sid: `ReadReleaseProofAndPublicConfig${stage}`,
         actions: ['ssm:GetParameter', 'ssm:GetParameters'],
         resources: [
