@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { adultPrivacyMode, privateAdolescentMode } from '../lambda/privacy/consent';
+import { resolvePrivacyDeployment } from '../scripts/privacy-deployment.mjs';
 
 function workflow(name: string): string {
   const path = join(process.cwd(), '.github', 'workflows', name);
@@ -44,6 +46,39 @@ function privacyDispatchInputs(contents: string): Record<
 }
 
 describe('backend GitHub Actions', () => {
+  it.each(['keep', 'off', 'enforce'])(
+    'validates a release without inheriting the deployment privacy request %s',
+    (requested) => {
+      const require = createRequire(import.meta.url);
+      const cdkRequire = createRequire(require.resolve('aws-cdk-lib/package.json'));
+      const job = cdkRequire('yaml').parse(workflow('deploy.yml'), { version: '1.1' }).jobs
+        .deploy as { env: Record<string, string>; steps: { name: string; env?: Record<string, string> }[] };
+      const validation = job.steps.find((step) => step.name === 'Validate release');
+      expect(validation).toBeDefined();
+      expect(job.env.ADULT_PRIVACY_MODE).toBe('${{ needs.prepare.outputs.adult_privacy_mode }}');
+      expect(job.env.PRIVATE_ADOLESCENT_MODE).toBe('${{ needs.prepare.outputs.private_adolescent_mode }}');
+      try {
+        for (const key of ['ADULT_PRIVACY_MODE', 'PRIVATE_ADOLESCENT_MODE'])
+          vi.stubEnv(key, validation!.env?.[key] ?? requested);
+        // Run the actual runtime readers with GitHub's step-over-job environment merge.
+        expect(adultPrivacyMode()).toBe('off');
+        expect(privateAdolescentMode()).toBe('off');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      // Validation isolation must not change the requested CloudFormation action.
+      const result = resolvePrivacyDeployment({ stage: 'dev', operation: 'deploy',
+        adult: requested, adolescent: requested,
+        releaseTemplate: { Parameters: { AdultPrivacyMode: { AllowedValues: ['off', 'enforce'] },
+          PrivateAdolescentMode: { AllowedValues: ['off', 'enforce'] } } },
+        currentStack: { Parameters: [{ ParameterKey: 'AdultPrivacyMode', ParameterValue: 'enforce' },
+          { ParameterKey: 'PrivateAdolescentMode', ParameterValue: 'enforce' }] },
+      });
+      expect(result.expected).toEqual({ adult: requested === 'keep' ? 'enforce' : requested,
+        adolescent: requested === 'keep' ? 'enforce' : requested });
+      if (requested === 'keep') expect(result.parameters).toEqual([]);
+    },
+  );
   it.each(['adult_privacy_mode', 'private_adolescent_mode'])(
     'accepts the literal off string for dispatch input %s under YAML 1.1',
     (name) => {

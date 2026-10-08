@@ -204,6 +204,10 @@ jobs:
           --frontend-root "${GITHUB_WORKSPACE}/RoadMap2U"
 
       - name: Validate release
+        env:
+          # Tests use runtime modes; keep is a deployment instruction resolved later.
+          ADULT_PRIVACY_MODE: 'off'
+          PRIVATE_ADOLESCENT_MODE: 'off'
         run: |
           set -euo pipefail
           npm ci --ignore-scripts --no-audit --no-fund
