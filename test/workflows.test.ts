@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -28,7 +29,32 @@ function namedStep(contents: string, name: string): string {
   return contents.slice(start, end === -1 ? contents.length : end);
 }
 
+function privacyDispatchInputs(contents: string): Record<
+  string,
+  { type: string; default: string; options: unknown[] }
+> {
+  // Reuse the YAML parser shipped by the locked CDK dependency. YAML 1.1
+  // resolves plain `off` to false before GitHub validates choice strings.
+  const require = createRequire(import.meta.url);
+  const cdkRequire = createRequire(require.resolve('aws-cdk-lib/package.json'));
+  const yaml = cdkRequire('yaml');
+  const section = contents.match(/^  workflow_dispatch:\r?\n([\s\S]*?)(?=^\S)/m)?.[1];
+  expect(section, 'Missing workflow_dispatch input definitions').toBeDefined();
+  return yaml.parse(section, { version: '1.1' }).inputs;
+}
+
 describe('backend GitHub Actions', () => {
+  it.each(['adult_privacy_mode', 'private_adolescent_mode'])(
+    'accepts the literal off string for dispatch input %s under YAML 1.1',
+    (name) => {
+      const input = privacyDispatchInputs(workflow('deploy.yml'))[name];
+      expect(input.type).toBe('choice');
+      expect(input.default).toBe('keep');
+      expect(input.options).toEqual(['keep', 'off', 'enforce']);
+      expect(input.options).toContain('off');
+      expect(input.options.every((value) => typeof value === 'string')).toBe(true);
+    },
+  );
   it('exposes the three owner-only commercial config CLIs without a generic payments input', () => {
     const packageJson = JSON.parse(repositoryFile('package.json')) as {
       scripts: Record<string, string>;
@@ -120,7 +146,9 @@ describe('backend GitHub Actions', () => {
     const diff = namedStep(contents, 'Review CDK diff');
     const deploy = namedStep(contents, 'Deploy selected stage');
     const verify = namedStep(contents, 'Verify deployed privacy modes');
-    expect(contents.match(/options: \[keep, off, enforce\]/g)).toHaveLength(2);
+    for (const name of ['adult_privacy_mode', 'private_adolescent_mode']) {
+      expect(privacyDispatchInputs(contents)[name].options).toEqual(['keep', 'off', 'enforce']);
+    }
     expect(contents.match(/default: keep/g)).toHaveLength(2);
     expect(contents).toContain('ADULT_PRIVACY_MODE=keep');
     expect(contents).toContain('PRIVATE_ADOLESCENT_MODE=keep');
