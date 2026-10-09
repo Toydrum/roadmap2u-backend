@@ -9,12 +9,16 @@ import {
   TransactWriteCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb';
-import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
+import {
+  AdminUpdateUserAttributesCommand,
+  CognitoIdentityProviderClient,
+} from '@aws-sdk/client-cognito-identity-provider';
 import { handleEvent } from '../lambda/router';
 import { K, type Deps, type ProfileItem } from '../lambda/db';
 import { getSyncChanges, pushSync } from '../lambda/handlers/sync';
 import { getForest } from '../lambda/handlers/forests';
 import { processCloudErasurePage } from '../lambda/privacy/erasure';
+import { handleEvent as handlePostConfirmation } from '../lambda/post-confirmation';
 import { ADULT_PRIVACY_VERSIONS } from '@app/api/contracts';
 
 const NOW = 1_800_000_000_000;
@@ -480,6 +484,74 @@ describe('adult privacy through the authenticated router', () => {
       activeTrees: 0,
       activeGeneration: 'gen',
     });
+  });
+  it.each([
+    ['canonical empty account', 0, 0],
+    ['canonical check-in account', 0, 1],
+    ['legacy unversioned tree usage', 3, 3],
+  ] as const)('completes erasure for %s without inventing a usage generation', async (_label, trees, recordCount) => {
+    const cognito = mockClient(CognitoIdentityProviderClient);
+    cognito.on(AdminUpdateUserAttributesCommand).resolves({});
+    rows.delete(key(K.profile(OWNER)));
+    try {
+      await handlePostConfirmation({
+        triggerSource: 'PostConfirmation_ConfirmSignUp',
+        userName: OWNER,
+        userPoolId: 'pool',
+        request: { userAttributes: { sub: OWNER, name: 'Local synthetic adult' } },
+        response: {},
+      } as unknown as Parameters<typeof handlePostConfirmation>[0], deps());
+    } finally {
+      cognito.restore();
+    }
+    const usageKey = { pk: K.user(OWNER), sk: 'USAGE' };
+    expect(rows.get(key(usageKey))).toEqual({ ...usageKey, state: 'active', activeTrees: 0 });
+    rows.set(key(usageKey), { ...rows.get(key(usageKey)), activeTrees: trees });
+    const foreign = { ...K.rec('foreign', 'checkins', 'preserved'), owner: 'foreign' };
+    rows.set(key(foreign), foreign);
+    for (let index = 0; index < recordCount; index++) {
+      const record = K.rec(OWNER, trees ? 'trees' : 'checkins', `canonical-${index}`);
+      rows.set(key(record), { ...record, owner: OWNER, record: { id: `canonical-${index}` } });
+    }
+    ddb.on(QueryCommand).callsFake((input) => ({
+      Items: [...rows.values()].filter((row) =>
+        row['pk'] === input.ExpressionAttributeValues?.[':pk'] &&
+        String(row['sk']).startsWith(input.ExpressionAttributeValues?.[':prefix'] ?? ''),
+      ).slice(0, input.Limit),
+    }));
+    await enroll();
+    const response = await request('POST', '/privacy/consents', command('erase_cloud', 1));
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ cloudConsent: 'revoked', erasure: 'completed' });
+    expect(rows.get(key(usageKey))).toEqual({ ...usageKey, state: 'active', activeTrees: 0 });
+    expect(rows.get(key(K.profile(OWNER)))).toMatchObject({ userId: OWNER, status: 'active' });
+    expect(rows.get(key(foreign))).toEqual(foreign);
+    expect([...rows.values()].filter((row) => row['pk'] === K.user(OWNER) && String(row['sk']).startsWith('REC#'))).toHaveLength(0);
+    const reset = ddb.commandCalls(TransactWriteCommand).flatMap((call) => call.args[0].input.TransactItems ?? [])
+      .find((item) => item.Put?.Item?.sk === 'USAGE' && item.Put.ConditionExpression?.includes('activeTrees = :trees'))?.Put;
+    expect(reset?.ConditionExpression).toContain('attribute_not_exists(activeGeneration)');
+    expect(reset?.ExpressionAttributeValues).toMatchObject({ ':state': 'active', ':trees': trees });
+    expect(reset?.ExpressionAttributeValues).not.toHaveProperty(':generation');
+  });
+  it.each([
+    { activeGeneration: '' },
+    { activeGeneration: null },
+    { activeGeneration: 7 },
+    { activeTrees: -1 },
+    { state: 'migrating' },
+  ])('does not complete erasure by weakening malformed usage %j', async (invalid) => {
+    await enroll();
+    const usageKey = { pk: K.user(OWNER), sk: 'USAGE' };
+    const usage = { ...usageKey, state: 'active', activeTrees: 0, ...invalid };
+    rows.set(key(usageKey), usage);
+    const response = await request('POST', '/privacy/consents', command('erase_cloud', 1));
+    expect(response.statusCode).toBe(409);
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: 'USAGE_MIGRATION_IN_PROGRESS' } });
+    expect(rows.get(key(usageKey))).toEqual(usage);
+    expect(rows.get(`${K.user(OWNER)}/PRIVACY#ADULT`)?.['erasure']).toBe('requested');
+    expect(rows.get(`RESTORE#${OWNER}/STATE`)).not.toHaveProperty('completedAt');
+    expect(ddb.commandCalls(TransactWriteCommand).flatMap((call) => call.args[0].input.TransactItems ?? [])
+      .some((item) => item.Put?.Item?.sk === 'USAGE')).toBe(false);
   });
   it('keeps an enrolled withdrawal effective during the compatible deployment mode', async () => {
     await enroll();
