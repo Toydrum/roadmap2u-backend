@@ -60,22 +60,32 @@ async function resetUsage(deps: Deps, userId: string): Promise<TransactionItem> 
     usage['pk'] !== key.pk ||
     usage['sk'] !== key.sk ||
     usage['state'] !== 'active' ||
-    typeof usage['activeGeneration'] !== 'string' ||
-    !usage['activeGeneration'].trim() ||
     !Number.isSafeInteger(usage['activeTrees']) ||
     (usage['activeTrees'] as number) < 0
+  )
+    throw new ApiError('USAGE_MIGRATION_IN_PROGRESS');
+  const hasGeneration = Object.prototype.hasOwnProperty.call(usage, 'activeGeneration');
+  if (
+    hasGeneration &&
+    (typeof usage['activeGeneration'] !== 'string' || !usage['activeGeneration'].trim())
   )
     throw new ApiError('USAGE_MIGRATION_IN_PROGRESS');
   return {
     Put: {
       TableName: deps.table,
       Item: { ...usage, activeTrees: 0 },
+      // Signup and legacy counters have no generation. Fence their absence so
+      // a concurrent backfill cannot be overwritten during erasure completion.
       ConditionExpression:
-        '#state = :state AND activeGeneration = :generation AND activeTrees = :trees',
+        '#state = :state AND ' +
+        (hasGeneration
+          ? 'activeGeneration = :generation'
+          : 'attribute_not_exists(activeGeneration)') +
+        ' AND activeTrees = :trees',
       ExpressionAttributeNames: { '#state': 'state' },
       ExpressionAttributeValues: {
         ':state': usage['state'],
-        ':generation': usage['activeGeneration'],
+        ...(hasGeneration ? { ':generation': usage['activeGeneration'] } : {}),
         ':trees': usage['activeTrees'],
       },
     },
