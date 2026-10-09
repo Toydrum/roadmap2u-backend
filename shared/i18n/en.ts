@@ -1141,7 +1141,7 @@ export const EN: Dict = {
     forgotLink: 'Forgot your password?',
     createTitle: 'Create my account',
     createHint:
-      'An account with your own email. At 12 to 17, I need a private invitation with verified representation.',
+      'An account with my own email. At 12 to 17, I need a private invitation authorized through the authenticated declaration of my parent or guardian.',
     displayName: 'What should we call you?',
     email: 'Your email',
     passwordNew: 'Choose a password',
@@ -1562,7 +1562,7 @@ export const EN: Dict = {
       {
         icon: '🤝',
         title: 'Family accounts',
-        body: 'Adults and adolescents aged 12 to 17 have different admission flows. An adolescent needs an invitation for their exact username, parent or guardian authorization with verified representation, their own acceptance and a separate cloud choice. Their forest has no visits or friendships and does not open to the representative. At 18, account and data remain, parental authorization ends and personal adult acceptance is requested; the forest stays private. Family implementation is retained with its controls disabled for this launch. Consent grants neither Premium, a family nor a purchase; sponsored grants are free.',
+        body: 'Adults and adolescents aged 12 to 17 have different admission flows. An adolescent needs an invitation for their exact username, parent or guardian authorization through their authenticated declaration, their own acceptance and a separate cloud choice. That declaration is recorded in their account; admission does not verify parentage or guardianship documents. Their forest has no visits or friendships and does not open to the representative. At 18, account and data remain, parental authorization ends and personal adult acceptance is requested; the forest stays private. Family implementation is retained with its controls disabled for this launch. Consent grants neither Premium, a family nor a purchase; sponsored grants are free.',
       },
     ],
   },
