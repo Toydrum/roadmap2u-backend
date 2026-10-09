@@ -2054,10 +2054,10 @@ export class RoadmapCiBootstrapStack extends Stack {
     );
   }
 
-  private mfaUserPrincipal(principalArn: string): iam.IPrincipal {
+  private mfaUserPrincipal(principalArn: string, maxMfaAgeSeconds = 3600): iam.IPrincipal {
     return new iam.ArnPrincipal(principalArn).withConditions({
       Bool: { 'aws:MultiFactorAuthPresent': 'true' },
-      NumericLessThanEquals: { 'aws:MultiFactorAuthAge': '3600' },
+      NumericLessThanEquals: { 'aws:MultiFactorAuthAge': String(maxMfaAgeSeconds) },
     });
   }
 
@@ -2284,7 +2284,7 @@ export class RoadmapCiBootstrapStack extends Stack {
     const role = new iam.Role(this, `CommercialMigrationRole${stage}`, {
       roleName: `roadmap2u-${stage}-commercial-migration`,
       description: `MFA-only RoadMap2U ${stage} commercial migration operator`,
-      assumedBy: this.mfaUserPrincipal(principalArn),
+      assumedBy: this.mfaUserPrincipal(principalArn, 8 * 60 * 60),
       path: `/roadmap2u/${stage}/operations/`,
       maxSessionDuration: Duration.hours(1),
     });
@@ -2398,7 +2398,7 @@ export class RoadmapCiBootstrapStack extends Stack {
     const role = new iam.Role(this, `CommercialFlagOperatorRole${stage}`, {
       roleName: `roadmap2u-${stage}-commercial-flag-operator`,
       description: `MFA-only RoadMap2U ${stage} commercial flag operator`,
-      assumedBy: this.mfaUserPrincipal(principalArn),
+      assumedBy: this.mfaUserPrincipal(principalArn, 8 * 60 * 60),
       path: `/roadmap2u/${stage}/operations/`,
       maxSessionDuration: Duration.hours(1),
     });
@@ -2444,7 +2444,7 @@ export class RoadmapCiBootstrapStack extends Stack {
     const role = new iam.Role(this, `FamilyPilotOperatorRole${stage}`, {
       roleName: `roadmap2u-${stage}-family-pilot-operator`,
       description: `MFA-only RoadMap2U ${stage} invited-family pilot operator`,
-      assumedBy: this.mfaUserPrincipal(principalArn),
+      assumedBy: this.mfaUserPrincipal(principalArn, 8 * 60 * 60),
       path: `/roadmap2u/${stage}/operations/`,
       maxSessionDuration: Duration.hours(1),
     });
@@ -2467,7 +2467,7 @@ export class RoadmapCiBootstrapStack extends Stack {
     const role = new iam.Role(this, `CommercialE2EFixtureRole${stage}`, {
       roleName: `roadmap2u-${stage}-commercial-e2e-fixture`,
       description: `MFA-only RoadMap2U ${stage} E2E fixture provisioning`,
-      assumedBy: this.mfaUserPrincipal(principalArn),
+      assumedBy: this.mfaUserPrincipal(principalArn, 8 * 60 * 60),
       path: `/roadmap2u/${stage}/operations/`,
       maxSessionDuration: Duration.hours(1),
     });
