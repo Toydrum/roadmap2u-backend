@@ -1144,7 +1144,7 @@ export const ES = {
     forgotLink: '¿Se te olvidó tu contraseña?',
     createTitle: 'Crear mi cuenta',
     createHint:
-      'Cuenta con correo propio. De 12 a 17 años necesito una invitación privada con representación verificada.',
+      'Cuenta con correo propio. De 12 a 17 años necesito una invitación privada autorizada mediante la declaración autenticada de mi padre, madre o tutor.',
     displayName: '¿Cómo te llamamos?',
     email: 'Tu correo',
     passwordNew: 'Elige una contraseña',
@@ -1571,7 +1571,7 @@ export const ES = {
       {
         icon: '🤝',
         title: 'Cuentas familiares',
-        body: 'Adultos y adolescentes de 12 a 17 años tienen admisiones distintas. El adolescente necesita una invitación para su username exacto, autorización de padre, madre o tutor con representación verificada, su propia aceptación y una decisión separada de nube. Su bosque no tiene visitas ni amistades, tampoco se abre al representante. Al cumplir 18 conserva cuenta y datos, termina la autorización parental y solicita su propia aceptación adulta; sigue privado. La implementación familiar se conserva con sus controles desactivados para este lanzamiento. Consentir no concede Premium, familia ni una compra; las concesiones patrocinadas son gratuitas.',
+        body: 'Adultos y adolescentes de 12 a 17 años tienen admisiones distintas. El adolescente necesita una invitación para su username exacto, autorización de padre, madre o tutor mediante su declaración autenticada, su propia aceptación y una decisión separada de nube. Esta declaración queda registrada en su cuenta; el alta no verifica documentos de parentesco o tutela. Su bosque no tiene visitas ni amistades, tampoco se abre al representante. Al cumplir 18 conserva cuenta y datos, termina la autorización parental y solicita su propia aceptación adulta; sigue privado. La implementación familiar se conserva con sus controles desactivados para este lanzamiento. Consentir no concede Premium, familia ni una compra; las concesiones patrocinadas son gratuitas.',
       },
     ],
   },
