@@ -326,6 +326,24 @@ describe('private account closure through verified support', () => {
     });
     expect(updates.some((item) => item.Delete?.Key?.['pk'] === 'PRIVACY_STATE#teen')).toBe(true);
   });
+  it('permits every actual main-table closure fence, including the canonical household partition', async () => {
+    await requestPrivateAdolescentClosure(deps(), command, operator);
+    const transaction = ddb.commandCalls(TransactWriteCommand)[0].args[0].input;
+    const leadingKeys = transaction.TransactItems!
+      .flatMap((item) => (item.ConditionCheck?.TableName === plan.table ? [item.ConditionCheck.Key!.pk as string] : []));
+    expect(leadingKeys.some((pk) => pk.startsWith('HOUSEHOLD#'))).toBe(true);
+    const template = JSON.parse(readFileSync('bootstrap/privacy-operator.template.json', 'utf8'));
+    const fence = template.Resources.PrivacyOperator.Properties.Policies[0].PolicyDocument.Statement.find(
+      (item: any) => item.Sid === 'CheckActiveSubjectsAndDecisions',
+    );
+    expect(fence.Action).toBe('dynamodb:ConditionCheckItem');
+    expect(fence.Condition.Null['dynamodb:LeadingKeys']).toBe('false');
+    const patterns: string[] = fence.Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'];
+    for (const pk of leadingKeys)
+      expect(patterns.some((pattern) => pattern.endsWith('*') && pk.startsWith(pattern.slice(0, -1))), pk).toBe(true);
+    expect(patterns.some((pattern) => 'UNRELATED#teen'.startsWith(pattern.slice(0, -1)))).toBe(false);
+    expect(patterns.some((pattern) => 'HH#synthetic'.startsWith(pattern.slice(0, -1)))).toBe(false);
+  });
   it('prepares stage-scoped IAM metadata reads and prohibits direct deletion, application flags and content access', () => {
     const template = JSON.parse(readFileSync('bootstrap/privacy-operator.template.json', 'utf8'));
     const role = template.Resources.PrivacyOperator.Properties;

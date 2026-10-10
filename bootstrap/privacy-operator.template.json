@@ -121,7 +121,7 @@
                   },
                   "Condition": {
                     "ForAllValues:StringLike": {
-                      "dynamodb:LeadingKeys": ["USER#*", "ACCOUNT_CLOSURE#*", "HH#*"]
+                      "dynamodb:LeadingKeys": ["USER#*", "ACCOUNT_CLOSURE#*", "HOUSEHOLD#*"]
                     },
                     "Null": {
                       "dynamodb:LeadingKeys": "false"
