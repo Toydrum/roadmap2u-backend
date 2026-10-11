@@ -109,6 +109,33 @@ function json(response: { body: string }): unknown {
   return JSON.parse(response.body);
 }
 
+describe('explicit individual billing configuration CAS', () => {
+  beforeEach(() => ddbMock.reset());
+  const changes = { schemaVersion: 2, paymentScope: 'individual', premiumPaymentsEnabled: true, individualCheckoutEnabled: true, checkoutEnabled: false, familyCatalogEnabled: false, subscriptionChangesEnabled: false };
+  it('upgrades only through an explicit versioned actor-authorized CAS transaction with audit', async () => {
+    ddbMock.on(TransactWriteCommand).resolves({});
+    const response = await createBroker()(event({ ...setBody, changes }, FLAG_ACTOR));
+    expect(response.statusCode).toBe(200);
+    const transaction = ddbMock.commandCalls(TransactWriteCommand)[0]!.args[0].input;
+    const update = transaction.TransactItems![0]!.Update!;
+    expect(update.ConditionExpression).toContain('#revision = :expectedRevision');
+    expect(update.ConditionExpression).toContain('attribute_not_exists(#schemaVersion)');
+    expect(update.ExpressionAttributeValues).toMatchObject({ ':schemaVersion': 2, ':paymentScope': 'individual', ':premiumPaymentsEnabled': true, ':individualCheckoutEnabled': true });
+    expect(transaction.TransactItems).toHaveLength(2);
+  });
+  it.each([{ schemaVersion: 1 }, { paymentScope: 'family' }, { checkoutEnabled: true }, { familyCatalogEnabled: true }, { subscriptionChangesEnabled: true }, { schemaVersion: undefined }])('rejects incomplete or family activation %j before any write', async (patch) => {
+    const response = await createBroker()(event({ ...setBody, changes: { ...changes, ...patch } }, FLAG_ACTOR));
+    expect(response.statusCode).toBe(400);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+  it('keeps the original expected revision on conflict without an automatic replay', async () => {
+    ddbMock.on(TransactWriteCommand).rejects(conflict());
+    const response = await createBroker()(event({ ...setBody, changes }, FLAG_ACTOR));
+    expect(response.statusCode).toBe(409);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+});
+
 describe('CommercialConfigBroker authorization and exact request parsing', () => {
   beforeEach(() => ddbMock.reset());
 

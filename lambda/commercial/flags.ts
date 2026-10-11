@@ -31,8 +31,11 @@ export interface CommercialFlags extends FamilyBillingFlags {
   readonly capabilityMode: CommercialMode;
   readonly accessCodeIssuanceEnabled: boolean;
   readonly accessCodeRedemptionEnabled: boolean;
-  /** Payments cannot be enabled during the prepayment launch. */
-  readonly premiumPaymentsEnabled: false;
+  /** Legacy snapshots are always normalized closed; version 2 has explicit individual scope. */
+  readonly premiumPaymentsEnabled: boolean;
+  readonly schemaVersion?: 2;
+  readonly paymentScope?: 'none' | 'individual';
+  readonly individualCheckoutEnabled?: boolean;
   readonly updatedAt: number;
   readonly updatedBy: string;
   readonly reason: string;
@@ -99,11 +102,14 @@ const LEGACY_ITEM_ATTRIBUTES = [
   'updatedBy',
   'reason',
 ] as const;
-export const COMMERCIAL_FLAGS_ATTRIBUTES = [
+const FAMILY_ITEM_ATTRIBUTES = [
   ...LEGACY_ITEM_ATTRIBUTES,
   ...FAMILY_BILLING_FLAG_NAMES,
 ] as const;
+export const INDIVIDUAL_BILLING_FLAG_NAMES = ['schemaVersion', 'paymentScope', 'individualCheckoutEnabled'] as const;
+export const COMMERCIAL_FLAGS_ATTRIBUTES = [...FAMILY_ITEM_ATTRIBUTES, ...INDIVIDUAL_BILLING_FLAG_NAMES] as const;
 const LEGACY_ITEM_KEYS = new Set<string>(LEGACY_ITEM_ATTRIBUTES);
+const FAMILY_ITEM_KEYS = new Set<string>(FAMILY_ITEM_ATTRIBUTES);
 const ITEM_KEYS = new Set<string>(COMMERCIAL_FLAGS_ATTRIBUTES);
 const SAFE_SOCIAL_ACTIONS = new Set<Extract<CommercialOperation, { kind: 'social' }>['action']>([
   'decline',
@@ -123,6 +129,7 @@ function hasExactKeys(value: Record<string, unknown>): boolean {
   // Existing deployments keep their exact legacy shape until the next CAS write.
   return (
     (keys.length === ITEM_KEYS.size && keys.every((key) => ITEM_KEYS.has(key))) ||
+    (keys.length === FAMILY_ITEM_KEYS.size && keys.every((key) => FAMILY_ITEM_KEYS.has(key))) ||
     (keys.length === LEGACY_ITEM_KEYS.size && keys.every((key) => LEGACY_ITEM_KEYS.has(key)))
   );
 }
@@ -153,6 +160,13 @@ function parseFlagsItem(value: unknown): ParsedFlags | null {
   if (typeof value['premiumPaymentsEnabled'] !== 'boolean') return null;
   if (!isTimestamp(value['updatedAt'])) return null;
   if (!isNonBlank(value['updatedBy']) || !isNonBlank(value['reason'])) return null;
+  const versioned = Object.hasOwn(value, 'schemaVersion');
+  if (versioned && (value['schemaVersion'] !== 2 ||
+    !['none', 'individual'].includes(String(value['paymentScope'])) ||
+    typeof value['individualCheckoutEnabled'] !== 'boolean' ||
+    value['checkoutEnabled'] !== false || value['familyCatalogEnabled'] !== false || value['subscriptionChangesEnabled'] !== false ||
+    (value['paymentScope'] === 'none' && (value['premiumPaymentsEnabled'] !== false || value['individualCheckoutEnabled'] !== false)) ||
+    (value['paymentScope'] === 'individual' && value['premiumPaymentsEnabled'] !== true))) return null;
 
   let family: FamilyBillingFlags = FAMILY_BILLING_FLAG_DEFAULTS;
   if (Object.hasOwn(value, 'familyCreationEnabled')) {
@@ -177,12 +191,13 @@ function parseFlagsItem(value: unknown): ParsedFlags | null {
       capabilityMode: value['capabilityMode'],
       accessCodeIssuanceEnabled: value['accessCodeIssuanceEnabled'],
       accessCodeRedemptionEnabled: value['accessCodeRedemptionEnabled'],
-      premiumPaymentsEnabled: false,
+      premiumPaymentsEnabled: versioned ? value['premiumPaymentsEnabled'] : false,
+      ...(versioned ? { schemaVersion: 2 as const, paymentScope: value['paymentScope'] as 'none' | 'individual', individualCheckoutEnabled: value['individualCheckoutEnabled'] as boolean } : {}),
       updatedAt: value['updatedAt'],
       updatedBy: value['updatedBy'],
       reason: value['reason'],
     }),
-    paymentsDrift: value['premiumPaymentsEnabled'],
+    paymentsDrift: !versioned && value['premiumPaymentsEnabled'],
   };
 }
 
@@ -194,6 +209,7 @@ function sameFlags(left: CommercialFlags, right: CommercialFlags): boolean {
     left.accessCodeIssuanceEnabled === right.accessCodeIssuanceEnabled &&
     left.accessCodeRedemptionEnabled === right.accessCodeRedemptionEnabled &&
     left.premiumPaymentsEnabled === right.premiumPaymentsEnabled &&
+    INDIVIDUAL_BILLING_FLAG_NAMES.every((field) => left[field] === right[field]) &&
     FAMILY_BILLING_FLAG_NAMES.every((field) => left[field] === right[field]) &&
     left.updatedAt === right.updatedAt &&
     left.updatedBy === right.updatedBy &&
@@ -344,5 +360,13 @@ export function isCommercialSwitchEnabled(
   if (result.status === 'unavailable') return false;
   if (commercialSwitch === 'issuance') return result.flags.accessCodeIssuanceEnabled;
   if (commercialSwitch === 'redemption') return result.flags.accessCodeRedemptionEnabled;
-  return false;
+  return individualPurchasesEnabled(result);
+}
+
+/** New sales fail closed on invalid/missing/stale configuration. Financial consumers and Portal do not use this gate. */
+export function individualPurchasesEnabled(result: CommercialConfigResult): boolean {
+  return result.status === 'available' && result.freshness !== 'stale' &&
+    result.flags.schemaVersion === 2 && result.flags.paymentScope === 'individual' &&
+    result.flags.premiumPaymentsEnabled === true && result.flags.individualCheckoutEnabled === true &&
+    result.flags.checkoutEnabled === false && result.flags.familyCatalogEnabled === false && result.flags.subscriptionChangesEnabled === false;
 }

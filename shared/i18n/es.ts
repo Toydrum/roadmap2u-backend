@@ -358,7 +358,7 @@ export const ES = {
     support: {
       title: 'Soporte y cuidado',
       intro:
-        'Soporte y privacidad: overseer@roadmap2u.com. Puedes pedir ayuda con tu cuenta, tus decisiones de nube y tus derechos sobre los datos.',
+        'Soporte y privacidad: overseer@roadmap2u.com. Puedes pedir ayuda con tu cuenta, tu suscripción, tus decisiones de nube y tus derechos sobre los datos.',
       sections: [
         {
           title: 'Acceso y representación',
@@ -370,6 +370,12 @@ export const ES = {
           title: 'Privacidad y cancelación',
           paragraphs: [
             'Puedes descargar tus propios datos remotos o solicitar cancelación sin Premium y sin descarga obligatoria. El cierre de una cuenta adolescente privada se tramita por soporte con verificación adecuada al caso. Autorizar la cuenta no permite al representante leer o exportar su bosque cotidianamente. Las copias locales y descargadas se administran por separado.',
+          ],
+        },
+        {
+          title: 'Suscripción individual y CFDI',
+          paragraphs: [
+            'Desde Mi suscripción consulto el periodo pagado y abro el Portal para tarjeta, recibos y cancelación de la renovación, incluso con Premium vencido o compras cerradas. Si un pago sigue en proceso, consulto el resumen o pido ayuda sin iniciar otro pago. Para aclaraciones, devoluciones y CFDI escribo a overseer@roadmap2u.com: el comprobante de Stripe no es un CFDI. No envío datos completos de tarjeta, contraseñas ni tokens. Cerrar la cuenta no solicita automáticamente una devolución.',
           ],
         },
         {
@@ -1129,6 +1135,60 @@ export const ES = {
       },
     },
   },
+  billing: {
+    termsVersion: "individual-subscription-2026-10-11-draft-v1",
+    title: "Mi suscripción",
+    intro: "Aquí puedo conocer mi suscripción y gestionar sus pagos con calma. Mi bosque se conserva.",
+    accountLink: "Veo mi suscripción",
+    settingsHint: "Precios, periodo pagado y gestión de mi cuenta",
+    accountBack: "Vuelvo a mi cuenta",
+    signIn: "Entro a mi cuenta",
+    signInHint: "La suscripción pertenece a mi cuenta adulta con correo confirmado.",
+    adultOnly: "La compra está disponible para mi propia cuenta adulta con correo confirmado.",
+    catalogUnavailable: "La oferta necesita una revisión. Puedo consultar de nuevo o pedir ayuda.",
+    purchasesClosed: "Las nuevas compras están en pausa. Puedo seguir gestionando mi suscripción.",
+    available: "Disponible para cuentas adultas",
+    month: "Cada mes",
+    year: "Cada año",
+    monthly: "{amount} MXN cada mes",
+    yearly: "{amount} MXN cada año",
+    taxIncluded: "Precio final con impuestos incluidos · México",
+    sameCapabilities: "Las mismas capacidades Premium en ambas modalidades.",
+    recurring: "La renovación es automática. Puedo cancelarla al terminar el periodo pagado desde el Portal.",
+    termsTitle: "Condiciones de suscripción",
+    termsDraft: "Borrador comercial para ensayo. Pendiente de aprobación comercial y fiscal antes de cobros reales.",
+    termsRead: "Leo las condiciones",
+    termsAccept: "Acepto las condiciones de suscripción y el cobro recurrente de la modalidad elegida.",
+    countryAccept: "Declaro México como mi país comercial.",
+    checkout: "Elijo Premium y continúo al pago",
+    portal: "Gestiono mi suscripción",
+    refresh: "Consulto de nuevo",
+    loading: "Estoy consultando mi suscripción…",
+    opening: "Estoy preparando mi salida segura a Stripe…",
+    pending: "La confirmación está en proceso. No necesito volver a pagar; consultaré el resumen y mi acceso.",
+    waiting: "La confirmación sigue pendiente. Puedo consultar de nuevo o pedir ayuda sin iniciar otro pago.",
+    support: "Pido ayuda",
+    supportHint: "Soporte, aclaraciones, devoluciones y CFDI: overseer@roadmap2u.com. El comprobante de Stripe no es un CFDI.",
+    paidThrough: "Mi periodo pagado termina el {date}.",
+    nextRenewal: "Mi próxima renovación está prevista para el {date}.",
+    cancellation: "La renovación está cancelada. Conservo el periodo pagado.",
+    accessPremium: "Mi acceso actual es Premium.",
+    accessFree: "Mi acceso actual es Free. Mi bosque se conserva.",
+    sponsor: "El acceso efectivo también puede incluir un patrocinio gratuito.",
+    error: "No pude consultar este paso. Puedo revisar mi resumen antes de continuar.",
+    sessionError: "Mi sesión necesita una nueva entrada a la cuenta.",
+    termsChanged: "Las condiciones cambiaron. Puedo leerlas y decidir de nuevo.",
+    conflict: "Mi suscripción cambió mientras estaba aquí. Estoy consultando su estado actual.",
+    returnNotice: "Ya volví de Stripe. El resumen y mi acceso los confirma el servidor.",
+    none: "Todavía no tengo una suscripción individual.",
+    active: "Mi suscripción está activa.",
+    cancelAtEnd: "Mi suscripción termina al concluir el periodo pagado.",
+    pastDue: "El pago requiere atención. Mi acceso dura únicamente hasta el final del periodo pagado.",
+    expired: "Mi periodo pagado terminó. Mi bosque sigue aquí.",
+    review: "Mi pago está en revisión. Soporte puede acompañarme.",
+    closed: "Mi facturación está cerrada.",
+    termsText: "Premium individual para mi propia cuenta adulta con correo confirmado, en México: $99 MXN cada mes o $949 MXN cada año, precio final con impuestos incluidos. Ambas modalidades ofrecen las mismas capacidades. Autorizo el cobro recurrente con tarjeta mediante Stripe según la modalidad que elija; se renueva automáticamente hasta que cancele. Puedo cancelar la renovación en el Portal y conservar Premium hasta que termine mi periodo pagado. No hay prueba gratuita, cupones, cambios de modalidad durante una suscripción ni días de gracia: un pago pendiente o no confirmado no extiende el acceso. Mi precio se conserva al menos doce meses desde el primer pago exitoso mientras continúe la misma suscripción; una nueva compra tras su cancelación definitiva usa el precio vigente. Soporte revisa devoluciones: la total retira el periodo afectado y la parcial conserva el acceso; una disputa suspende el periodo afectado y detiene futuras renovaciones. Cerrar la cuenta detiene renovaciones y no solicita automáticamente una devolución. El bosque local y otras fuentes de acceso patrocinado se conservan al terminar Premium. La compra no sustituye mis decisiones de privacidad ni concede Premium al adolescente o funciones familiares. El comprobante de Stripe no es un CFDI; solicito CFDI, ayuda, aclaraciones o devolución en overseer@roadmap2u.com. Los datos comerciales tienen una conservación separada del bosque. Estas condiciones son un borrador para ensayo; requieren aprobación comercial y fiscal antes de habilitar cobros reales.",
+  },
   account: {
     welcomeTitle: 'Una llave para tu bosque',
     welcomeBody:
@@ -1429,6 +1489,12 @@ export const ES = {
       LEGAL_REGION_UNSUPPORTED:
         'Por ahora, este camino para menores sólo está disponible en México.',
       OFFER_NOT_ALLOWED: 'Esa oferta no corresponde a la composición actual del hogar.',
+      BILLING_REVISION_CONFLICT: "Mi suscripción cambió. Puedo consultar el estado actual.",
+      BILLING_OPERATION_PENDING: "Mi operación sigue en proceso. Puedo consultar sin volver a pagar.",
+      BILLING_TERMS_OUTDATED: "Las condiciones cambiaron. Puedo leerlas y decidir de nuevo.",
+      BILLING_BUYER_INELIGIBLE: "La compra requiere mi propia cuenta adulta con correo confirmado.",
+      BILLING_SUBSCRIPTION_EXISTS: "Ya tengo una suscripción. Puedo gestionarla desde el Portal.",
+      BILLING_PAYMENT_REVIEW: "Mi pago requiere revisión. Soporte puede acompañarme.",
       CHECKOUT_IN_PROGRESS:
         'Ya hay una compra en curso para este hogar. Puedes retomarla con calma.',
       SUBSCRIPTION_CONFLICT:
@@ -1567,6 +1633,11 @@ export const ES = {
         icon: '🔒',
         title: 'Tus datos',
         body: 'Tu bosque funciona primero en este dispositivo. La cuenta utiliza servicios remotos; la sincronización del bosque requiere autorización separada. En Ajustes puedes exportar o importar tu copia local. Archivar conserva los elementos para recuperarlos; borrar un elemento del archivo, cancelar el bosque remoto y cerrar la cuenta son acciones distintas. Privacidad permite retirar la nube, descargar datos propios y solicitar cancelación sin comprar Premium ni descargar un respaldo obligatorio. Las copias locales y descargadas no se eliminan al cancelar datos remotos.',
+      },
+      {
+        icon: '💳',
+        title: 'Mi suscripción individual',
+        body: 'En Cuenta o Ajustes abro Mi suscripción para consultar la oferta vigente, mi periodo pagado y el Portal. Premium individual cuesta $99 MXN cada mes o $949 MXN cada año, precio final con impuestos incluidos y las mismas capacidades. La renovación es automática y puedo cancelarla al final del periodo pagado. La compra es para mi propia cuenta adulta con correo confirmado, en México, con aceptación expresa de las condiciones recurrentes. Si un pago sigue pendiente, puedo consultar de nuevo o pedir ayuda sin repetirlo. El Portal sigue disponible para una suscripción existente aunque las compras estén cerradas o Premium haya vencido. No hay días de gracia; mi bosque local y los patrocinios vigentes se conservan. Premium no sustituye privacidad ni concede Premium al adolescente o funciones familiares. Soporte, devoluciones y CFDI: overseer@roadmap2u.com; el recibo de Stripe no es un CFDI.',
       },
       {
         icon: '🤝',

@@ -512,6 +512,121 @@ export interface BillingSummary {
   revision: number;
 }
 
+// Individual billing is separate from the legacy household contract.
+export const INDIVIDUAL_BILLING_CONTRACT_VERSION = 1;
+export const INDIVIDUAL_BILLING_STATES = Object.freeze([
+  'none', 'checkout_pending', 'active', 'cancel_at_period_end', 'past_due',
+  'expired', 'payment_review', 'closed',
+] as const);
+export type IndividualBillingState = (typeof INDIVIDUAL_BILLING_STATES)[number];
+export interface IndividualBillingCatalog {
+  contractVersion: typeof INDIVIDUAL_BILLING_CONTRACT_VERSION;
+  catalogVersion: string;
+  currency: 'MXN';
+  taxInclusive: true;
+  country: 'MX';
+  offerKey: 'premium_individual';
+  planKey: 'premium';
+  prices: { month: { amountMinor: 9900 }; year: { amountMinor: 94900 } };
+  purchasesEnabled: boolean;
+  terms: { version: string; hashes: Record<'es' | 'en', string>; urls: Record<'es' | 'en', string> };
+}
+/** Closed local fallback; a draft is never evidence of live legal approval. */
+export const CLOSED_INDIVIDUAL_BILLING_CATALOG: IndividualBillingCatalog = Object.freeze({
+  contractVersion: INDIVIDUAL_BILLING_CONTRACT_VERSION,
+  catalogVersion: 'individual-mx-2026-10-v1', currency: 'MXN', taxInclusive: true, country: 'MX',
+  offerKey: 'premium_individual', planKey: 'premium',
+  prices: { month: { amountMinor: 9900 }, year: { amountMinor: 94900 } }, purchasesEnabled: false,
+  terms: {
+    version: 'individual-subscription-2026-10-11-draft-v1',
+    hashes: { es: '0661b878edf25a8e5b246eebfc6c496228dd059e2a6073aa87a75491dd5b60c3', en: '60d8339c3e3baa2ee5370f924ca092fdac0635f92055faaf764ba51f30d75643' },
+    urls: { es: '/subscription-terms?lang=es', en: '/subscription-terms?lang=en' },
+  },
+} satisfies IndividualBillingCatalog);
+export interface IndividualBillingSummary {
+  contractVersion: typeof INDIVIDUAL_BILLING_CONTRACT_VERSION;
+  state: IndividualBillingState;
+  interval: BillingInterval | null;
+  paidThrough: number | null;
+  nextRenewalAt: number | null;
+  cancelAtPeriodEnd: boolean;
+  processing: 'idle' | 'pending' | 'review';
+  canCheckout: boolean;
+  canOpenPortal: boolean;
+  revision: number;
+}
+export interface IndividualPortalRequest {
+  commandId: string;
+  expectedBillingRevision: number;
+}
+export interface IndividualCheckoutRequest extends IndividualPortalRequest {
+  interval: BillingInterval;
+  catalogVersion: string;
+  country: 'MX';
+  termsAcceptance: { version: string; hash: string; language: 'es' | 'en'; accepted: true };
+}
+export type IndividualBillingCommandResult =
+  | { outcome: 'redirect'; commandId: string; billingRevision: number; url: string; expiresAt: number }
+  | { outcome: 'pending'; commandId: string; billingRevision: number; retryAfterMs: number };
+
+function individualRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+function individualKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return individualRecord(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+function individualText(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 && value === value.trim();
+}
+function individualInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+function individualHash(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+}
+function individualCommand(value: Record<string, unknown>): boolean {
+  return individualText(value['commandId']) && individualInteger(value['expectedBillingRevision']);
+}
+export function isIndividualPortalRequest(value: unknown): value is IndividualPortalRequest {
+  return individualKeys(value, ['commandId', 'expectedBillingRevision']) && individualCommand(value);
+}
+export function isIndividualCheckoutRequest(value: unknown): value is IndividualCheckoutRequest {
+  if (!individualKeys(value, ['commandId', 'expectedBillingRevision', 'interval', 'catalogVersion', 'country', 'termsAcceptance']) || !individualCommand(value)) return false;
+  const terms = value['termsAcceptance'];
+  return (value['interval'] === 'month' || value['interval'] === 'year') && individualText(value['catalogVersion']) && value['country'] === 'MX' &&
+    individualKeys(terms, ['version', 'hash', 'language', 'accepted']) && individualText(terms['version']) && individualHash(terms['hash']) &&
+    (terms['language'] === 'es' || terms['language'] === 'en') && terms['accepted'] === true;
+}
+export function isIndividualBillingCatalog(value: unknown): value is IndividualBillingCatalog {
+  if (!individualKeys(value, ['contractVersion', 'catalogVersion', 'currency', 'taxInclusive', 'country', 'offerKey', 'planKey', 'prices', 'purchasesEnabled', 'terms'])) return false;
+  const prices = value['prices']; const terms = value['terms'];
+  if (!individualKeys(prices, ['month', 'year']) || !individualKeys(prices['month'], ['amountMinor']) || !individualKeys(prices['year'], ['amountMinor'])) return false;
+  if (!individualKeys(terms, ['version', 'hashes', 'urls']) || !individualKeys(terms['hashes'], ['es', 'en']) || !individualKeys(terms['urls'], ['es', 'en'])) return false;
+  return value['contractVersion'] === 1 && individualText(value['catalogVersion']) && value['currency'] === 'MXN' && value['taxInclusive'] === true &&
+    value['country'] === 'MX' && value['offerKey'] === 'premium_individual' && value['planKey'] === 'premium' &&
+    prices['month']['amountMinor'] === 9900 && prices['year']['amountMinor'] === 94900 && typeof value['purchasesEnabled'] === 'boolean' &&
+    individualText(terms['version']) && individualHash(terms['hashes']['es']) && individualHash(terms['hashes']['en']) &&
+    terms['urls']['es'] === '/subscription-terms?lang=es' && terms['urls']['en'] === '/subscription-terms?lang=en';
+}
+export function isIndividualBillingSummary(value: unknown): value is IndividualBillingSummary {
+  if (!individualKeys(value, ['contractVersion', 'state', 'interval', 'paidThrough', 'nextRenewalAt', 'cancelAtPeriodEnd', 'processing', 'canCheckout', 'canOpenPortal', 'revision'])) return false;
+  return value['contractVersion'] === 1 && (INDIVIDUAL_BILLING_STATES as readonly unknown[]).includes(value['state']) &&
+    (value['interval'] === null || value['interval'] === 'month' || value['interval'] === 'year') &&
+    (value['paidThrough'] === null || individualInteger(value['paidThrough'])) &&
+    (value['nextRenewalAt'] === null || individualInteger(value['nextRenewalAt'])) &&
+    typeof value['cancelAtPeriodEnd'] === 'boolean' && ['idle', 'pending', 'review'].includes(String(value['processing'])) &&
+    typeof value['canCheckout'] === 'boolean' && typeof value['canOpenPortal'] === 'boolean' && individualInteger(value['revision']);
+}
+export function isIndividualBillingCommandResult(value: unknown): value is IndividualBillingCommandResult {
+  if (!individualRecord(value) || !individualText(value['commandId']) || !individualInteger(value['billingRevision'])) return false;
+  if (value['outcome'] === 'pending') return individualKeys(value, ['outcome', 'commandId', 'billingRevision', 'retryAfterMs']) && individualInteger(value['retryAfterMs']) && value['retryAfterMs'] > 0 && value['retryAfterMs'] <= 60000;
+  if (!individualKeys(value, ['outcome', 'commandId', 'billingRevision', 'url', 'expiresAt']) || value['outcome'] !== 'redirect' || typeof value['url'] !== 'string' || !individualInteger(value['expiresAt'])) return false;
+  try {
+    const url = new URL(value['url']);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port && ['checkout.stripe.com', 'billing.stripe.com'].includes(url.hostname);
+  } catch { return false; }
+}
+
 export interface BillingCommandBase {
   householdId: string;
   expectedHouseholdRevision: number;
@@ -909,6 +1024,12 @@ export const SERVER_API_ERROR_CODES = Object.freeze([
   'PAYMENT_REQUIRED',
   'REAUTHENTICATION_REQUIRED',
   'EMAIL_VERIFICATION_REQUIRED',
+  'BILLING_REVISION_CONFLICT',
+  'BILLING_OPERATION_PENDING',
+  'BILLING_TERMS_OUTDATED',
+  'BILLING_BUYER_INELIGIBLE',
+  'BILLING_SUBSCRIPTION_EXISTS',
+  'BILLING_PAYMENT_REVIEW',
   'STALE_REVISION',
 ] as const);
 
@@ -1052,6 +1173,10 @@ export interface RoadmapApi {
   removeMinorFriendship(friendshipId: string): Promise<void>;
 
   // billing v1
+  getIndividualBillingCatalog(): Promise<IndividualBillingCatalog>;
+  getIndividualBillingSummary(): Promise<IndividualBillingSummary>;
+  createIndividualCheckout(req: IndividualCheckoutRequest): Promise<IndividualBillingCommandResult>;
+  createIndividualPortalSession(req: IndividualPortalRequest): Promise<IndividualBillingCommandResult>;
   getBillingSummary(): Promise<BillingSummary>;
   createCheckout(req: CreateCheckoutRequest): Promise<BillingRedirectView>;
   previewSubscriptionChange(
@@ -1126,6 +1251,11 @@ export const API_PATHS = Object.freeze({
   socialMinorFriendRequestReject: (id: string) => `/social/minor-friend-requests/${id}/reject`,
   socialMinorFriendship: (id: string) => `/social/minor-friendships/${id}`,
   billingSummary: '/billing/summary',
+  individualBillingCatalog: '/billing/individual/catalog',
+  individualBillingSummary: '/billing/individual/summary',
+  individualBillingCheckout: '/billing/individual/checkout',
+  individualBillingPortal: '/billing/individual/portal',
+  stripeWebhook: '/billing/stripe/webhook',
   billingCheckout: '/billing/checkout',
   billingChangePreview: '/billing/change-preview',
   billingChange: '/billing/change',
