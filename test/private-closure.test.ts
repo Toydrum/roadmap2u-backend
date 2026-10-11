@@ -201,6 +201,7 @@ describe('private account closure through verified support', () => {
         now: () => now,
         queue: { enqueue: vi.fn(async () => {}) },
         nextWorkerId: () => 'worker',
+        resolveBilling: async () => true,
         nextClosureId: () => 'unused',
         auditWriter: new AuditWriter({ ddb: base.ddb, tableName: 'audit' }),
       };

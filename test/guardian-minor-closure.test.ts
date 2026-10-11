@@ -98,6 +98,7 @@ function closureDeps(enqueue = vi.fn(async () => undefined)) {
     queue: { enqueue },
     nextClosureId: () => 'minor-closure-1',
     nextWorkerId: () => 'worker-1',
+    resolveBilling: async () => true,
   };
 }
 
