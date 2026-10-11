@@ -347,6 +347,9 @@ describe('custom stage CDK bootstrap template', () => {
         'devInventoryRuntimeBoundaryArn',
         'testInventoryRuntimeBoundaryArn',
         'prodInventoryRuntimeBoundaryArn',
+        'devCfnBillingPolicyArn',
+        'testCfnBillingPolicyArn',
+        'prodCfnBillingPolicyArn',
       ],
     });
   });
@@ -395,9 +398,10 @@ describe('custom stage CDK bootstrap template', () => {
       'policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-commercial-access',
     );
     expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-observability');
+    expect(rendered).toContain('policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-billing');
     expect(
       template.Resources.CloudFormationExecutionRole.Properties.ManagedPolicyArns,
-    ).toHaveLength(6);
+    ).toHaveLength(7);
     expect(rendered).not.toContain('AdministratorAccess');
   });
 
@@ -545,7 +549,7 @@ describe('custom stage CDK bootstrap template', () => {
     expect(template.Outputs.BootstrapOperatorRoleArn).toBeDefined();
   });
 
-  it('lets the operator attach only the fifteen stage control-plane policies', () => {
+  it('lets the operator attach only the twenty-one stage workload policies', () => {
     const template = JSON.parse(readFileSync(operatorTemplatePath, 'utf8'));
     const statements =
       template.Resources.BootstrapOperatorRole.Properties.Policies[0].PolicyDocument.Statement;
@@ -570,18 +574,21 @@ describe('custom stage CDK bootstrap template', () => {
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-commercial-access',
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-edge',
       'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-observability',
+      'arn:aws:iam::765932874577:policy/roadmap2u/dev/roadmap2u-dev-cfn-billing',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-core',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-data',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-commercial-access',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-edge',
       'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-observability',
+      'arn:aws:iam::765932874577:policy/roadmap2u/test/roadmap2u-test-cfn-billing',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-core',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-api',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-data',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-commercial-access',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-edge',
       'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-observability',
+      'arn:aws:iam::765932874577:policy/roadmap2u/prod/roadmap2u-prod-cfn-billing',
     ]);
     const roleManagement = statements.find(
       (statement: any) => statement.Sid === 'CreateAndManageRoadMap2URoles',
@@ -896,8 +903,9 @@ describe('custom stage CDK bootstrap template', () => {
     expect(script).toContain('$outputs = $outputsJson | ConvertFrom-Json');
     expect(script).not.toContain('$outputs = @($outputsJson | ConvertFrom-Json)');
     expect(script).toContain("foreach ($stage in @('dev', 'test', 'prod'))");
-    expect(script).toContain('${stage}InventoryRuntimeBoundaryArn');
-    expect(script).toContain('roadmap2u-$stage-inventory-runtime-boundary');
+    expect(script).toContain("@{ Output = 'InventoryRuntimeBoundaryArn'; Suffix = 'inventory-runtime-boundary' }");
+    expect(script).toContain("@{ Output = 'CfnBillingPolicyArn'; Suffix = 'cfn-billing' }");
+    expect(script).toContain('${stage}$($policy.Output)');
     expect(script).toContain('cloudformation describe-stacks');
     expect(script).toContain('iam get-policy');
     expect(script.indexOf('Assert-CommercialInventoryControlPlane')).toBeLessThan(

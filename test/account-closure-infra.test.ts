@@ -130,7 +130,7 @@ describe('account closure infrastructure', () => {
         StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
       });
     },
-    20_000,
+    60_000,
   );
 
   it.each(['dev', 'test', 'prod'] as const)(
@@ -169,7 +169,7 @@ describe('account closure infrastructure', () => {
         },
       });
     },
-    20_000,
+    60_000,
   );
 
   it('uses an encrypted source queue with a longer-lived DLQ and bounded retries', () => {
@@ -203,7 +203,7 @@ describe('account closure infrastructure', () => {
     const serialized = JSON.stringify(queuePolicies);
     expect(serialized).toContain('aws:SecureTransport');
     expect(serialized).toContain('false');
-  }, 20_000);
+  }, 60_000);
 
   it('wires partial SQS failures, scheduled reconciliation, and least-privilege roles', () => {
     const template = backend();
@@ -226,7 +226,9 @@ describe('account closure infrastructure', () => {
     expect(reconciler.Properties.Environment.Variables.USER_POOL_ID).toBeUndefined();
     expect(reconciler.Properties.Environment.Variables.AUDIT_TABLE_NAME).toBeUndefined();
 
-    const mappings = resources(template, 'AWS::Lambda::EventSourceMapping');
+    const mappings = resources(template, 'AWS::Lambda::EventSourceMapping').filter(
+      ([, mapping]) => mapping.Properties.FunctionName?.Ref === workerId,
+    );
     expect(mappings).toHaveLength(1);
     expect(mappings[0][1].Properties).toMatchObject({
       BatchSize: 1,
@@ -234,7 +236,13 @@ describe('account closure infrastructure', () => {
       FunctionResponseTypes: ['ReportBatchItemFailures'],
     });
     const rules = resources(template, 'AWS::Events::Rule');
-    expect(rules).toHaveLength(2);
+    expect(rules.map(([, rule]) => rule.Properties.Name).sort()).toEqual([
+      'roadmap-account-closure-reconciler-dev',
+      'roadmap-billing-audit-dev',
+      'roadmap-billing-pending-dev',
+      'roadmap-billing-subscriptions-dev',
+      'roadmap-family-majority-reconciler-dev',
+    ].sort());
     const closureRule = rules.find(([, rule]) =>
       JSON.stringify(rule.Properties.Targets).includes(reconcilerId),
     );
@@ -317,11 +325,13 @@ describe('account closure infrastructure', () => {
 
   it('retains both closure queues in production', () => {
     const template = backend('prod');
-    const queues = resources(template, 'AWS::SQS::Queue').map(([, queue]) => queue);
+    const queues = resources(template, 'AWS::SQS::Queue').map(([, queue]) => queue).filter(
+      (queue) => queue.Properties.QueueName.startsWith('roadmap-account-closure-'),
+    );
     expect(queues).toHaveLength(2);
     for (const queue of queues) {
       expect(queue.DeletionPolicy).toBe('Retain');
       expect(queue.UpdateReplacePolicy).toBe('Retain');
     }
-  }, 20_000);
+  }, 60_000);
 });

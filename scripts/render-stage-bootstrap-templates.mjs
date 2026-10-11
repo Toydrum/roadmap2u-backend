@@ -57,6 +57,9 @@ operator.Metadata = {
       'devInventoryRuntimeBoundaryArn',
       'testInventoryRuntimeBoundaryArn',
       'prodInventoryRuntimeBoundaryArn',
+      'devCfnBillingPolicyArn',
+      'testCfnBillingPolicyArn',
+      'prodCfnBillingPolicyArn',
     ],
   },
 };

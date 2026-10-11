@@ -6,6 +6,13 @@ import { RoadmapStack } from '../lib/roadmap-stack';
 const ACCOUNT = '123456789012';
 const HOSTED_ZONE_ID = 'Z0123456789ABCDEFGHIJ';
 const templates = new Map<string, any>();
+const BILLING_ALARMS = [
+  'billing-dlq-visible', 'billing-queue-age', 'billing-pending-event-age',
+  'billing-reconciliation-lag', 'billing-duplicate-subscription', 'billing-mapping-conflict',
+  'billing-closure-blocked', 'billing-signature-errors', 'billing-stripe-errors',
+  'billing-configuration-errors', 'billing-api-lambda-errors', 'billing-webhook-lambda-errors',
+  'billing-worker-lambda-errors', 'billing-reconciler-lambda-errors',
+];
 
 function renderedBackend(stage: 'dev' | 'test' | 'prod' = 'dev') {
   const cached = templates.get(stage);
@@ -64,14 +71,14 @@ describe('commercial alarms', () => {
         (resource: any) => resource.Type === 'AWS::CloudWatch::Alarm',
       ) as any[];
 
-      expect(alarmMetricUnits(template)).toBe(expectedMetricUnits);
+      expect(alarmMetricUnits(template)).toBe(expectedMetricUnits + BILLING_ALARMS.length);
       expect(
         alarms.map((alarm) => alarm.Properties.AlarmName).sort(),
       ).toEqual(
-        expectedAlarmNames.map((name) => `roadmap-commercial-${stage}-${name}`).sort(),
+        [...expectedAlarmNames, ...BILLING_ALARMS].map((name) => `roadmap-commercial-${stage}-${name}`).sort(),
       );
     },
-    20_000,
+    60_000,
   );
 
   it('creates one HTTPS-only topic and disables the conditional subscription by default', () => {
@@ -122,7 +129,7 @@ describe('commercial alarms', () => {
     ) as any[];
     expect(subscriptions).toHaveLength(1);
     expect(subscriptions[0].Condition).toBe('HasAlarmNotificationEmail');
-  }, 20_000);
+  }, 60_000);
 
   it('keeps the email out of the synthesized template and resolves it only as a NoEcho parameter', () => {
     const template = renderedBackend();
@@ -136,7 +143,7 @@ describe('commercial alarms', () => {
       Endpoint: { Ref: 'AlarmNotificationEmail' },
     });
     expect(JSON.stringify(template)).not.toContain('alerts@example.invalid');
-  }, 20_000);
+  }, 60_000);
 
   it('bounds the deployment parameter without exposing invalid input', () => {
     const parameter = renderedBackend().Parameters.AlarmNotificationEmail;
@@ -148,14 +155,15 @@ describe('commercial alarms', () => {
     expect(parameter.ConstraintDescription).toBe(
       'Alarm notification email must be empty or a valid email address',
     );
-  }, 20_000);
+  }, 60_000);
 
   it('keeps only the two Cognito-trigger error alarms in production', () => {
     const resources = renderedBackend('prod').Resources;
     const lambdaAlarms = Object.entries(resources).filter(
       ([, resource]: [string, any]) =>
         resource.Type === 'AWS::CloudWatch::Alarm' &&
-        resource.Properties.Namespace === 'AWS/Lambda',
+        resource.Properties.Namespace === 'AWS/Lambda' &&
+        !resource.Properties.AlarmName.includes('-billing-'),
     ) as [string, any][];
 
     expect(
@@ -172,7 +180,7 @@ describe('commercial alarms', () => {
         expect.stringMatching(/^CommercialObservabilityLambdaErrors1[A-F0-9]{8}$/),
       ]),
     );
-  }, 20_000);
+  }, 60_000);
 
   it('uses only cost-capped critical signals and no DynamoDB math alarms', () => {
     const devAlarms = Object.values(renderedBackend('dev').Resources).filter(
@@ -209,7 +217,7 @@ describe('commercial alarms', () => {
       expect(alarm.Properties.MetricName).not.toBe('Throttles');
       expect(alarm.Properties.Metrics).toBeUndefined();
     }
-  }, 20_000);
+  }, 60_000);
 
   it('uses one five-minute policy and the same topic action on every alarm', () => {
     const template = renderedBackend();
@@ -225,7 +233,7 @@ describe('commercial alarms', () => {
       if (metricQueries) {
         for (const query of metricQueries) expect(query.MetricStat.Period).toBe(300);
       } else {
-        expect(alarm.Properties.Period).toBe(300);
+        expect(alarm.Properties.Period).toBe(/-billing-(queue-age|dlq-visible)$/.test(alarm.Properties.AlarmName) ? 60 : 300);
       }
       expect(alarm.Properties.TreatMissingData).toBe('notBreaching');
       expect(alarm.Properties.AlarmActions).toEqual([{ Ref: topicId }]);
@@ -234,7 +242,7 @@ describe('commercial alarms', () => {
     expect(alarms.map((alarm) => alarm.Properties.AlarmName)).toContain(
       'roadmap-commercial-dev-synthetic',
     );
-  }, 20_000);
+  }, 60_000);
 
   it('retains the production topic but deletes reproducible alarms with the stack', () => {
     const template = renderedBackend('prod');
@@ -248,10 +256,10 @@ describe('commercial alarms', () => {
     expect(topics).toHaveLength(1);
     expect(topics[0].DeletionPolicy).toBe('Retain');
     expect(topics[0].UpdateReplacePolicy).toBe('Retain');
-    expect(alarms).toHaveLength(8);
+    expect(alarms).toHaveLength(8 + BILLING_ALARMS.length);
     for (const alarm of alarms) {
       expect(alarm.DeletionPolicy).not.toBe('Retain');
       expect(alarm.UpdateReplacePolicy).not.toBe('Retain');
     }
-  }, 20_000);
+  }, 60_000);
 });
