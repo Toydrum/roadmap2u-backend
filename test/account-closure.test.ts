@@ -85,6 +85,7 @@ function closureDeps(enqueue = vi.fn(async () => {})) {
     queue: { enqueue },
     nextClosureId: () => 'closure-1',
     nextWorkerId: () => 'worker-1',
+    resolveBilling: async () => true,
   };
 }
 

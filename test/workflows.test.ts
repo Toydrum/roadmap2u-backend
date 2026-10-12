@@ -90,7 +90,7 @@ describe('backend GitHub Actions', () => {
       expect(input.options.every((value) => typeof value === 'string')).toBe(true);
     },
   );
-  it('exposes the three owner-only commercial config CLIs without a generic payments input', () => {
+  it('exposes owner-only commercial config CLIs with versioned individual purchase inputs', () => {
     const packageJson = JSON.parse(repositoryFile('package.json')) as {
       scripts: Record<string, string>;
     };
@@ -108,7 +108,10 @@ describe('backend GitHub Actions', () => {
     expect(sources).toContain('AWS4-HMAC-SHA256');
     expect(sources).toContain('commercial-flag-operator');
     expect(sources).toContain('commercial-migration');
-    expect(sources).not.toContain("'premium-payments-enabled'");
+    expect(sources).toContain("'premium-payments-enabled'");
+    expect(sources).toContain("'schema-version'");
+    expect(sources).toContain("'payment-scope'");
+    expect(sources).toContain("'individual-checkout-enabled'");
   });
 
   it('runs reproducible contract, type, test and three-stage synth checks', () => {

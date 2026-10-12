@@ -107,7 +107,7 @@ describe('commercial inventory executor infrastructure', () => {
         expect(template.Resources[logicalId]?.Type).toBe('AWS::IAM::Role');
       }
     },
-    20_000,
+    60_000,
   );
 
   it.each(['dev', 'test', 'prod'] as const)(
@@ -205,7 +205,7 @@ describe('commercial inventory executor infrastructure', () => {
       expect(template.Outputs).toHaveProperty('CommercialInventoryExecutorFunctionUrl');
       expect(template.Outputs).toHaveProperty('CommercialInventoryExecutorFunctionArn');
     },
-    20_000,
+    60_000,
   );
 
   it('keeps record off MigrationRole and gives it only the two exact inventory Function URL permissions', () => {

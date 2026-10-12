@@ -20,6 +20,8 @@ import {
 import { AuditWriter } from '../lambda/commercial/audit';
 import { decisionLedgerPut } from '../lambda/privacy/retention';
 import type { AdultPrivacyItem } from '../lambda/privacy/consent';
+import { processCloudErasurePage } from '../lambda/privacy/erasure';
+import { BillingClosure } from '../lambda/billing/closure';
 const NOW = 1_800_000_000_000;
 const ddb = mockClient(DynamoDBDocumentClient);
 const cognito = mockClient(CognitoIdentityProviderClient);
@@ -47,6 +49,7 @@ const deps = (): AccountClosureDeps => {
     userPoolId: 'pool',
     nextClosureId: () => 'close-1',
     nextWorkerId: () => 'worker',
+    resolveBilling: async () => true,
     auditWriter: new AuditWriter({ ddb: client, tableName: 'audit' }),
     queue: { enqueue: vi.fn(async () => {}) },
   };
@@ -62,6 +65,17 @@ beforeEach(() => {
   cognito.on(AdminDeleteUserCommand).resolves({});
 });
 describe('closure and the independent privacy register', () => {
+  it('forest-only erasure neither resolves billing nor rewrites an individual paid source', async () => {
+    const resolve = vi.spyOn(BillingClosure.prototype, 'resolve');
+    const state = { pk: 'USER#adult', sk: 'PRIVACY#ADULT', userId: 'adult', revision: 2, updatedAt: NOW, cloudConsent: 'revoked', erasure: 'requested', erasureId: 'forest-1' };
+    const ledger = decisionLedgerPut(deps(), state as AdultPrivacyItem).Put!.Item;
+    ddb.on(GetCommand).callsFake((input) => ({ Item: input.Key?.['pk'] === 'USER#adult' && input.Key?.['sk'] === 'PRIVACY#ADULT' ? state : input.Key?.['pk'] === 'PRIVACY_STATE#adult' ? ledger : undefined }));
+    expect((await processCloudErasurePage(deps(), 'adult'))?.erasure).toBe('completed');
+    expect(resolve).not.toHaveBeenCalled();
+    const writes = ddb.commandCalls(TransactWriteCommand).flatMap((call) => call.args[0].input.TransactItems ?? []);
+    expect(writes.some((v) => v.Put?.Item?.['sk'] === 'SUBSCRIPTION#INDIVIDUAL' || String(v.Put?.Item?.['pk'] ?? '').startsWith('BILLING#'))).toBe(false);
+    expect(cognito.commandCalls(AdminDeleteUserCommand)).toHaveLength(0); resolve.mockRestore();
+  });
   it('writes an independent whole-account restore exclusion before and after completion', async () => {
     await expect(
       processAccountClosureMessage(deps(), { sub: 'adult', closureId: 'close-1' }),
@@ -81,7 +95,7 @@ describe('closure and the independent privacy register', () => {
     });
     expect(cognito.commandCalls(AdminDeleteUserCommand)).toHaveLength(1);
   });
-  it('defers destructive closure under an existing, documented forest obligation', async () => {
+  it.each(['forest', 'account'])('stops billing while a documented %s hold defers destructive closure', async (scope) => {
     ddb.on(QueryCommand).callsFake((input) =>
       input.TableName === 'privacy'
         ? {
@@ -91,7 +105,7 @@ describe('closure and the independent privacy register', () => {
                 sk: 'CASE#case',
                 userId: 'adult',
                 caseId: 'case',
-                scope: 'forest',
+                scope,
                 state: 'active',
                 legalBasis: 'specific preservation obligation',
                 expiresAt: NOW + 86400000,
@@ -101,10 +115,11 @@ describe('closure and the independent privacy register', () => {
           }
         : { Items: [] },
     );
-    const dependencies = deps();
+    const dependencies = { ...deps(), resolveBilling: vi.fn(async () => true) };
     await expect(
       processAccountClosureMessage(dependencies, { sub: 'adult', closureId: 'close-1' }),
     ).resolves.toBe('pending');
+    expect(dependencies.resolveBilling).toHaveBeenCalledWith(closure);
     expect(cognito.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
     expect(ddb.commandCalls(BatchWriteCommand)).toHaveLength(0);
     expect(dependencies.queue.enqueue).toHaveBeenCalledWith(

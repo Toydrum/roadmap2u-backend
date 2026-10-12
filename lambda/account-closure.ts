@@ -42,6 +42,7 @@ import type {
 import { readHouseholdSnapshot } from './family/repository';
 import { prepareAccountPrivacyClosure, completeAccountPrivacyClosure } from './privacy/closure';
 import type { RestoreExclusionItem } from './privacy/retention';
+import { resolveAccountBillingBeforePurge } from './billing/closure';
 
 export const ACCOUNT_CLOSURE_OPEN_GSI_PK = 'ACCOUNT_CLOSURE#OPEN';
 type AccountClosureTransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
@@ -131,6 +132,7 @@ export interface AccountClosureDeps extends Deps {
   readonly nextClosureId: () => string;
   readonly nextWorkerId: () => string;
   readonly recordBlocked?: (reason: AccountClosureBlockReason) => void | Promise<void>;
+  readonly resolveBilling?: (closure: AccountClosureItem) => Promise<boolean>;
 }
 
 export const ACCOUNT_CLOSURE_FAMILY_CLEANUP_VERSION = 1 as const;
@@ -1344,6 +1346,14 @@ export async function processAccountClosureMessage(
       Math.max(1, Math.ceil((closure.nextAttemptAt - observedAt) / 1000)),
     );
     await deps.queue.enqueue(message, delaySeconds);
+    return 'pending';
+  }
+  // A preservation hold can defer erasure, but must not prolong future charges.
+  const financialReady = await (deps.resolveBilling
+    ? deps.resolveBilling(closure)
+    : resolveAccountBillingBeforePurge(deps, closure));
+  if (!financialReady) {
+    await deps.queue.enqueue(message, 60);
     return 'pending';
   }
   const privacy = await prepareAccountPrivacyClosure(deps, closure);

@@ -78,6 +78,15 @@ function deps(overrides: Record<string, unknown> = {}) {
 }
 
 describe('commercial config CLI', () => {
+  it('previews an explicit individual-only version2 activation without calling AWS writes', async () => {
+    const { runCommercialConfigCli } = await cliModule();
+    const fixture = deps({ getCallerIdentity: vi.fn(async () => ({ Account: ACCOUNT, Arn: FLAG_ARN })) });
+    const result = await runCommercialConfigCli({ ...fixture.options, command: 'set-flags', argv: ['--stage','dev','--url',URL,'--reason','individual-only synthetic preview','--expected-revision','7','--schema-version','2','--payment-scope','individual','--premium-payments-enabled','true','--individual-checkout-enabled','true','--checkout-enabled','false','--family-catalog-enabled','false','--subscription-changes-enabled','false'] });
+    expect(result).toBe(0);
+    expect(fixture.output.join('\n')).toContain('dryRunHash=');
+    expect(fixture.output.join('\n')).toContain('individualCheckoutEnabled');
+    expect(fixture.options.fetch).not.toHaveBeenCalled();
+  });
   it('previews all seven controls without writes, then serializes them after hash confirmation', async () => {
     const { runCommercialConfigCli } = await cliModule();
     const fixture = deps({ getCallerIdentity: vi.fn(async () => ({ Account: ACCOUNT, Arn: FLAG_ARN })) });
@@ -491,7 +500,7 @@ describe('commercial config CLI', () => {
           '--premium-payments-enabled', 'false',
         ],
       }),
-    ).rejects.toThrow('Unknown option');
+    ).rejects.toThrow('complete version2 configuration');
     await expect(
       runCommercialConfigCli({
         ...fixture.options,

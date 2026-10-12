@@ -51,6 +51,7 @@ interface BootstrapFlagsRequest {
 
 type MutableFlagName =
   | keyof FamilyBillingFlags
+  | 'schemaVersion' | 'paymentScope' | 'premiumPaymentsEnabled' | 'individualCheckoutEnabled'
   | 'quotaMode'
   | 'capabilityMode'
   | 'accessCodeIssuanceEnabled'
@@ -63,6 +64,10 @@ type MutableFlagChanges = Readonly<
       capabilityMode: CommercialMode;
       accessCodeIssuanceEnabled: boolean;
       accessCodeRedemptionEnabled: boolean;
+      schemaVersion: 2;
+      paymentScope: 'none' | 'individual';
+      premiumPaymentsEnabled: boolean;
+      individualCheckoutEnabled: boolean;
     }
   >
 >;
@@ -96,6 +101,7 @@ const MUTABLE_FLAG_NAMES = Object.freeze<readonly MutableFlagName[]>([
   'accessCodeIssuanceEnabled',
   'accessCodeRedemptionEnabled',
   ...FAMILY_BILLING_FLAG_NAMES,
+  'schemaVersion', 'paymentScope', 'premiumPaymentsEnabled', 'individualCheckoutEnabled',
 ]);
 const MUTABLE_FLAG_NAME_SET = new Set<string>(MUTABLE_FLAG_NAMES);
 const MAX_REASON_BYTES = 256;
@@ -158,9 +164,18 @@ function parseChanges(value: unknown): MutableFlagChanges | null {
   if (!isRecord(value)) return null;
   const keys = Object.keys(value);
   if (keys.length === 0 || !keys.every((key) => MUTABLE_FLAG_NAME_SET.has(key))) return null;
+  const versioned = ['schemaVersion', 'paymentScope', 'premiumPaymentsEnabled', 'individualCheckoutEnabled'].some((key) => Object.hasOwn(value, key));
+  if (versioned) {
+    if (value['schemaVersion'] !== 2 || !['none', 'individual'].includes(String(value['paymentScope'])) ||
+      typeof value['premiumPaymentsEnabled'] !== 'boolean' || typeof value['individualCheckoutEnabled'] !== 'boolean' ||
+      value['checkoutEnabled'] !== false || value['familyCatalogEnabled'] !== false || value['subscriptionChangesEnabled'] !== false ||
+      (value['paymentScope'] === 'none' && (value['premiumPaymentsEnabled'] !== false || value['individualCheckoutEnabled'] !== false)) ||
+      (value['paymentScope'] === 'individual' && value['premiumPaymentsEnabled'] !== true)) return null;
+  }
 
   for (const key of keys) {
     const flagValue = value[key];
+    if (key === 'schemaVersion' || key === 'paymentScope') continue;
     if ((key === 'checkoutEnabled' || key === 'subscriptionChangesEnabled') && flagValue !== false) {
       return null;
     }
@@ -326,6 +341,7 @@ async function setFlags(
 ): Promise<CommercialConfigBrokerResponse> {
   const now = deps.now();
   const nextRevision = request.expectedRevision + 1;
+  const versioned = request.changes.schemaVersion === 2;
   const changedFields = MUTABLE_FLAG_NAMES.filter((field) => Object.hasOwn(request.changes, field));
   const expressionParts = [
     '#revision = :nextRevision',
@@ -349,6 +365,10 @@ async function setFlags(
     ':updatedBy': actorArn,
     ':reason': request.reason,
   };
+  if (versioned) {
+    names['#schemaVersion'] = 'schemaVersion';
+    values[':billingSchemaVersion'] = 2;
+  }
   for (const field of changedFields) {
     names[`#${field}`] = field;
     values[`:${field}`] = request.changes[field];
@@ -371,7 +391,9 @@ async function setFlags(
               Key: CONFIG_KEY,
               UpdateExpression: `SET ${expressionParts.join(', ')}`,
               ConditionExpression:
-                'attribute_exists(pk) AND attribute_exists(sk) AND #revision = :expectedRevision AND #premiumPaymentsEnabled = :paymentsDisabled',
+                versioned
+                  ? 'attribute_exists(pk) AND attribute_exists(sk) AND #revision = :expectedRevision AND ((attribute_not_exists(#schemaVersion) AND #premiumPaymentsEnabled = :paymentsDisabled) OR #schemaVersion = :billingSchemaVersion)'
+                  : 'attribute_exists(pk) AND attribute_exists(sk) AND #revision = :expectedRevision AND #premiumPaymentsEnabled = :paymentsDisabled',
               ExpressionAttributeNames: names,
               ExpressionAttributeValues: values,
             },

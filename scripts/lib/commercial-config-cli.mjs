@@ -42,6 +42,10 @@ const COMMAND_OPTIONS = {
     'checkout-enabled',
     'subscription-changes-enabled',
     'billing-enforcement-mode',
+    'schema-version',
+    'payment-scope',
+    'premium-payments-enabled',
+    'individual-checkout-enabled',
   ]),
   'freeze-cutover': new Set(['cutover-at', 'inventory-manifest-hash']),
 };
@@ -323,9 +327,24 @@ function buildRequest(command, options) {
       ['family-catalog-enabled', 'familyCatalogEnabled'],
       ['checkout-enabled', 'checkoutEnabled'],
       ['subscription-changes-enabled', 'subscriptionChangesEnabled'],
+      ['premium-payments-enabled', 'premiumPaymentsEnabled'],
+      ['individual-checkout-enabled', 'individualCheckoutEnabled'],
     ]) {
       const value = options.get(optionName);
       if (value !== undefined) changes[fieldName] = parseBoolean(value, optionName);
+    }
+    if (options.has('schema-version')) {
+      if (options.get('schema-version') !== '2') throw new Error('schema-version must be 2');
+      changes.schemaVersion = 2;
+    }
+    if (options.has('payment-scope')) changes.paymentScope = options.get('payment-scope');
+    if (['schemaVersion', 'paymentScope', 'premiumPaymentsEnabled', 'individualCheckoutEnabled'].some((field) => Object.hasOwn(changes, field))) {
+      if (changes.schemaVersion !== 2 || !['none', 'individual'].includes(changes.paymentScope) ||
+        typeof changes.premiumPaymentsEnabled !== 'boolean' || typeof changes.individualCheckoutEnabled !== 'boolean' ||
+        changes.checkoutEnabled !== false || changes.familyCatalogEnabled !== false || changes.subscriptionChangesEnabled !== false ||
+        (changes.paymentScope === 'none' && (changes.premiumPaymentsEnabled !== false || changes.individualCheckoutEnabled !== false)) ||
+        (changes.paymentScope === 'individual' && changes.premiumPaymentsEnabled !== true))
+        throw new Error('individual payments require explicit complete version2 configuration with legacy sales closed');
     }
     if (Object.keys(changes).length === 0) throw new Error('set-flags requires at least one change');
     return {
@@ -620,6 +639,7 @@ export async function runCommercialConfigCli({
   if (!options.has('apply')) {
     write(`dry-run command=${command} stage=${shared.stage}`);
     write(`dryRunHash=${dryRunHash}`);
+    if (body.changes?.schemaVersion === 2) write(`individualFlagsInventory=${canonicalJson(body.changes)}`);
     return 0;
   }
   if (options.get('confirm-stage') !== shared.stage) {

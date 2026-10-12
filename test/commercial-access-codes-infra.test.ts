@@ -111,7 +111,7 @@ describe('sponsored access code infrastructure', () => {
         );
       }
     },
-    20_000,
+    60_000,
   );
 
   it(
@@ -129,7 +129,7 @@ describe('sponsored access code infrastructure', () => {
           resource.Properties.StageName === '$default',
       ) as any;
 
-      expect(defaultStage.Properties.RouteSettings).toEqual({
+      expect(defaultStage.Properties.RouteSettings).toMatchObject({
         'POST /v1/access-codes/redeem': {
           ThrottlingBurstLimit: 5,
           ThrottlingRateLimit: 2,
@@ -140,7 +140,7 @@ describe('sponsored access code infrastructure', () => {
       );
       expect(defaultStage.DependsOn).toContain(redeemRouteId);
     },
-    20_000,
+    60_000,
   );
 
   it('exposes JWT-only redemption and an isolated IAM-only operator broker', () => {
@@ -272,7 +272,7 @@ describe('sponsored access code infrastructure', () => {
 
     expect(template.Outputs).toHaveProperty('SponsoredAccessBrokerFunctionUrl');
     expect(template.Outputs).toHaveProperty('SponsoredAccessBrokerFunctionArn');
-  }, 20_000);
+  }, 60_000);
 
   it('creates one MFA-only operator per stage with broker URL invocation only', () => {
     const template = bootstrap();

@@ -192,6 +192,9 @@
           },
           {
             "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-observability"
+          },
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-billing"
           }
         ],
         "Tags": [

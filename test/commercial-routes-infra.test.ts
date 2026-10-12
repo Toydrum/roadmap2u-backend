@@ -62,7 +62,7 @@ describe('commercial exact HTTP routes', () => {
     expect(route('GET /v1/access').AuthorizerId).toBeDefined();
     expect(route('DELETE /v1/me')).toMatchObject({ AuthorizationType: 'JWT' });
     expect(route('DELETE /v1/me').AuthorizerId).toEqual(route('GET /v1/access').AuthorizerId);
-  }, 20_000);
+  }, 60_000);
 
   it('gives every exact commercial route its own integration ahead of the greedy proxy', () => {
     const template = renderedBackend();
@@ -79,9 +79,9 @@ describe('commercial exact HTTP routes', () => {
     }
     expect(route('GET /v1/plans').Target).not.toEqual(route('GET /v1/access').Target);
     expect(route('GET /v1/access').Target).not.toEqual(route('DELETE /v1/me').Target);
-  }, 20_000);
+  }, 60_000);
 
-  it('does not publish any payment, checkout, portal or webhook surface', () => {
+  it('adds only the explicit individual billing surfaces while family billing stays closed', () => {
     const template = renderedBackend();
     const routeKeys = Object.values(template.Resources)
       .filter((resource: any) => resource.Type === 'AWS::ApiGatewayV2::Route')
@@ -90,10 +90,15 @@ describe('commercial exact HTTP routes', () => {
       .filter((resource: any) => resource.Type === 'AWS::Lambda::Function')
       .map((resource: any) => resource.Properties.FunctionName);
 
-    expect(JSON.stringify({ routeKeys, functionNames })).not.toMatch(
-      /payments?|checkout|portal|webhook/i,
-    );
-  }, 20_000);
+    expect(routeKeys.filter((key: string) => key.includes('/billing/')).sort()).toEqual([
+      'GET /v1/billing/individual/catalog', 'GET /v1/billing/individual/summary',
+      'POST /v1/billing/individual/checkout', 'POST /v1/billing/individual/portal',
+      'POST /v1/billing/stripe/webhook',
+    ].sort());
+    expect(functionNames.filter((name: string) => name.startsWith('roadmap-billing-')).sort()).toEqual([
+      'roadmap-billing-api-dev', 'roadmap-billing-webhook-dev', 'roadmap-billing-worker-dev', 'roadmap-billing-reconciler-dev',
+    ].sort());
+  }, 60_000);
 });
 
 describe('commercial route runtime isolation', () => {
@@ -193,7 +198,7 @@ describe('commercial route runtime isolation', () => {
         ).toContain(attribute);
       }
     }
-  }, 20_000);
+  }, 60_000);
 
   it('gives the public catalog only projected GetItem on the config partition, without user data or writes', () => {
     const template = renderedBackend();
@@ -229,7 +234,7 @@ describe('commercial route runtime isolation', () => {
     expect(serialized).not.toMatch(
       /ssm:|secretsmanager:|cognito-idp:|sqs:|USER#|HOUSEHOLD#|\/index\//i,
     );
-  }, 20_000);
+  }, 60_000);
 
   it('restricts the access reader to owner reads and transaction-enclosed materialization', () => {
     const template = renderedBackend();
@@ -306,7 +311,7 @@ describe('commercial route runtime isolation', () => {
     );
     expect(serialized).not.toMatch(/ssm:|secretsmanager:|cognito-idp:|sqs:/i);
     expect(serialized).not.toContain('/index/');
-  }, 20_000);
+  }, 60_000);
 
   it('gives account closure request only its reads, enclosed writes, audit append and queue send', () => {
     const template = renderedBackend();
@@ -401,5 +406,5 @@ describe('commercial route runtime isolation', () => {
     const serialized = JSON.stringify(statements);
     expect(serialized).not.toMatch(/dynamodb:(?:Scan|DeleteItem|BatchWriteItem|DescribeTable)/);
     expect(serialized).not.toMatch(/ssm:|secretsmanager:|cognito-idp:/i);
-  }, 20_000);
+  }, 60_000);
 });

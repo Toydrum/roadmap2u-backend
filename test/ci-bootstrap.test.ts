@@ -201,9 +201,9 @@ describe('GitHub OIDC bootstrap', () => {
       (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
     ) as any[];
 
-    expect(managedPolicies).toHaveLength(24);
+    expect(managedPolicies).toHaveLength(27);
     expect(new Set(managedPolicies.map((policy) => policy.Properties.ManagedPolicyName)).size).toBe(
-      24,
+      27,
     );
     for (const stage of ['dev', 'test', 'prod']) {
       const stagePolicies = managedPolicies.filter(
@@ -211,6 +211,7 @@ describe('GitHub OIDC bootstrap', () => {
       );
       expect(stagePolicies.map((policy) => policy.Properties.ManagedPolicyName).sort()).toEqual([
         `roadmap2u-${stage}-cfn-api`,
+        `roadmap2u-${stage}-cfn-billing`,
         `roadmap2u-${stage}-cfn-commercial-access`,
         `roadmap2u-${stage}-cfn-core`,
         `roadmap2u-${stage}-cfn-data`,
@@ -994,6 +995,29 @@ describe('GitHub OIDC bootstrap', () => {
         JSON.stringify(policy.Properties.PolicyDocument).length,
         policy.Properties.ManagedPolicyName,
       ).toBeLessThanOrEqual(6000);
+    }
+  });
+
+  it('isolates billing deployment and exact runtime secrets without growing existing workload policies', () => {
+    const template = bootstrapTemplate().toJSON();
+    const policies = Object.values(template.Resources).filter((r: any) => r.Type === 'AWS::IAM::ManagedPolicy') as any[];
+    for (const stage of ['dev', 'test', 'prod']) {
+      const billing = policies.find((p) => p.Properties.ManagedPolicyName === `roadmap2u-${stage}-cfn-billing`);
+      expect(billing, stage).toBeDefined();
+      const serialized = JSON.stringify(billing.Properties.PolicyDocument);
+      expect(serialized).toContain(`roadmap-billing-events-${stage}`);
+      expect(serialized).toContain(`roadmap-billing-pending-${stage}`);
+      expect(serialized).toContain('logs:PutMetricFilter');
+      expect(serialized).not.toContain('ssm:PutParameter');
+      expect(serialized).not.toContain('secretsmanager:');
+      expect(billing.Properties.PolicyDocument.Statement.every((s: any) => s.Resource !== '*')).toBe(true);
+      expect(template.Outputs).toHaveProperty(`${stage}CfnBillingPolicyArn`);
+      const boundary = policies.find((p) => p.Properties.ManagedPolicyName === `roadmap2u-${stage}-runtime-boundary`);
+      const secrets = boundary.Properties.PolicyDocument.Statement.find((s: any) => s.Sid === 'ReadOnlyStageStripeParameters');
+      expect(secrets.Action).toBe('ssm:GetParameter');
+      expect(JSON.stringify(secrets.Resource)).toContain(`roadmap2u/${stage}/stripe/config`);
+      expect(JSON.stringify(secrets.Resource)).toContain(`roadmap2u/${stage}/stripe/webhook-secret`);
+      expect(JSON.stringify(secrets.Resource)).not.toContain('*');
     }
   });
 

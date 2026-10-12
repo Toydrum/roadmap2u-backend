@@ -8,7 +8,7 @@
       "Qualifier": "rmap2uprd",
       "Stage": "prod",
       "TerminationProtection": true,
-      "SourceTemplateSha256": "545a28577737e1f094acb2a1d9bfd00de3bff1d613cfdb909990f6230742c8a0"
+      "SourceTemplateSha256": "f7fb51af3941708527fc327a7021cdf3f79db038de26fb19817c20d185d05078"
     }
   },
   "Parameters": {
@@ -307,6 +307,9 @@
           },
           {
             "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-observability"
+          },
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/roadmap2u/${Stage}/roadmap2u-${Stage}-cfn-billing"
           }
         ],
         "Tags": [

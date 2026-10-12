@@ -112,21 +112,26 @@ function Assert-CommercialInventoryControlPlane {
   $outputs = $outputsJson | ConvertFrom-Json
 
   foreach ($stage in @('dev', 'test', 'prod')) {
-    $outputKey = "${stage}InventoryRuntimeBoundaryArn"
-    $expectedArn = "arn:aws:iam::$AccountId`:policy/roadmap2u/$stage/roadmap2u-$stage-inventory-runtime-boundary"
-    $matches = @($outputs | Where-Object { $_.OutputKey -ceq $outputKey })
-    if ($matches.Count -ne 1 -or $matches[0].OutputValue -cne $expectedArn) {
-      throw "Roadmap-CiBootstrap must expose exactly $outputKey=$expectedArn before toolkit or workload deployment."
-    }
+    foreach ($policy in @(
+      @{ Output = 'InventoryRuntimeBoundaryArn'; Suffix = 'inventory-runtime-boundary' },
+      @{ Output = 'CfnBillingPolicyArn'; Suffix = 'cfn-billing' }
+    )) {
+      $outputKey = "${stage}$($policy.Output)"
+      $expectedArn = "arn:aws:iam::$AccountId`:policy/roadmap2u/$stage/roadmap2u-$stage-$($policy.Suffix)"
+      $matches = @($outputs | Where-Object { $_.OutputKey -ceq $outputKey })
+      if ($matches.Count -ne 1 -or $matches[0].OutputValue -cne $expectedArn) {
+        throw "Roadmap-CiBootstrap must expose exactly $outputKey=$expectedArn before toolkit or workload deployment."
+      }
 
-    $policyArn = & $awsCli iam get-policy `
-      --region $Region `
-      --policy-arn $expectedArn `
-      --query 'Policy.Arn' `
-      --output text
-    Assert-LastCommand "Reading $stage commercial inventory runtime boundary"
-    if ("$policyArn".Trim() -cne $expectedArn) {
-      throw "Commercial inventory runtime boundary mismatch for $stage."
+      $policyArn = & $awsCli iam get-policy `
+        --region $Region `
+        --policy-arn $expectedArn `
+        --query 'Policy.Arn' `
+        --output text
+      Assert-LastCommand "Reading $stage $($policy.Suffix) policy"
+      if ("$policyArn".Trim() -cne $expectedArn) {
+        throw "Control-plane policy mismatch for $stage/$($policy.Suffix)."
+      }
     }
   }
 }

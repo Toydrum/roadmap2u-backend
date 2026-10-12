@@ -24,6 +24,7 @@ export interface StageManagedPolicies {
   readonly commercialAccess: iam.ManagedPolicy;
   readonly edge: iam.ManagedPolicy;
   readonly observability: iam.ManagedPolicy;
+  readonly billing: iam.ManagedPolicy;
   readonly runtimeBoundary: iam.ManagedPolicy;
   readonly inventoryRuntimeBoundary: iam.ManagedPolicy;
 }
@@ -150,6 +151,18 @@ function lambdaLogGroupArns(stack: Stack, stage: PolicyStage): string[] {
 
 function lambdaLogArns(stack: Stack, stage: PolicyStage): string[] {
   return lambdaLogGroupArns(stack, stage).map((arn) => `${arn}:*`);
+}
+
+function billingLogGroupArns(stack: Stack, stage: PolicyStage): string[] {
+  return ['api', 'webhook', 'worker', 'reconciler'].map((name) => Arn.format({
+    partition: Aws.PARTITION,
+    service: 'logs',
+    region: stack.region,
+    account: stack.account,
+    resource: 'log-group',
+    resourceName: `/aws/lambda/roadmap-billing-${name}-${stage}`,
+    arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+  }, stack));
 }
 
 function commercialHttpLogGroupArns(stack: Stack, stage: PolicyStage): string[] {
@@ -353,6 +366,19 @@ function accountClosureQueueArns(stack: Stack, stage: PolicyStage): string[] {
   ];
 }
 
+function billingQueueArns(stack: Stack, stage: PolicyStage): string[] {
+  return [
+    resourceArn(stack, 'sqs', `roadmap-billing-events-${stage}`),
+    resourceArn(stack, 'sqs', `roadmap-billing-events-dlq-${stage}`),
+  ];
+}
+
+function billingReconcileRuleArns(stack: Stack, stage: PolicyStage): string[] {
+  return ['pending', 'subscriptions', 'audit'].map((mode) =>
+    resourceArn(stack, 'events', 'rule', `roadmap-billing-${mode}-${stage}`),
+  );
+}
+
 function accountClosureReconcileRuleArn(stack: Stack, stage: PolicyStage): string {
   return resourceArn(stack, 'events', 'rule', `roadmap-account-closure-reconciler-${stage}`);
 }
@@ -520,6 +546,7 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
         resources: [
           ...lambdaLogArns(stack, stage),
+          ...billingLogGroupArns(stack, stage).map((arn) => `${arn}:*`),
           ...commercialHttpLogArns(stack, stage),
           `${accessCodeRedeemerLogGroupArn(stack, stage)}:*`,
           `${commercialConfigBrokerLogGroupArn(stack, stage)}:*`,
@@ -585,6 +612,13 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
           ]
         : []),
       new iam.PolicyStatement({
+        sid: 'ReadOnlyStageStripeParameters',
+        actions: ['ssm:GetParameter'],
+        resources: ['config', 'webhook-secret'].map((name) =>
+          resourceArn(stack, 'ssm', 'parameter', `roadmap2u/${stage}/stripe/${name}`),
+        ),
+      }),
+      new iam.PolicyStatement({
         sid: 'UseOnlyAccountClosureQueues',
         actions: [
           'sqs:ChangeMessageVisibility',
@@ -594,7 +628,7 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
           'sqs:ReceiveMessage',
           'sqs:SendMessage',
         ],
-        resources: [accountClosureSourceQueueArn(stack, stage)],
+        resources: [accountClosureSourceQueueArn(stack, stage), billingQueueArns(stack, stage)[0]],
       }),
       new iam.PolicyStatement({
         sid: 'AdministerOnlyOwnTaggedUserPool',
@@ -1511,6 +1545,53 @@ function createObservabilityPolicy(stack: Stack, stage: PolicyStage): iam.Manage
   });
 }
 
+function createBillingPolicy(stack: Stack, stage: PolicyStage): iam.ManagedPolicy {
+  const billingLogs = billingLogGroupArns(stack, stage);
+  return new iam.ManagedPolicy(stack, `CfnBillingPolicy${stage}`, {
+    managedPolicyName: `roadmap2u-${stage}-cfn-billing`,
+    path: `/roadmap2u/${stage}/`,
+    description: `CloudFormation billing permissions for RoadMap2U ${stage}`,
+    statements: [
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyIndividualBillingFunctions',
+        actions: [
+          'lambda:AddPermission', 'lambda:CreateFunction', 'lambda:DeleteFunction',
+          'lambda:GetFunction', 'lambda:GetFunctionCodeSigningConfig', 'lambda:GetFunctionConfiguration',
+          'lambda:GetFunctionRecursionConfig', 'lambda:GetFunctionScalingConfig', 'lambda:GetPolicy',
+          'lambda:GetRuntimeManagementConfig', 'lambda:ListTags', 'lambda:RemovePermission',
+          'lambda:TagResource', 'lambda:UntagResource', 'lambda:UpdateFunctionCode', 'lambda:UpdateFunctionConfiguration',
+        ],
+        resources: ['api', 'webhook', 'worker', 'reconciler'].map((kind) => functionArn(stack, stage, `billing-${kind}`)),
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyBillingLogGroups',
+        actions: ['logs:CreateLogGroup', 'logs:DeleteLogGroup', 'logs:PutRetentionPolicy', 'logs:TagResource'],
+        resources: billingLogs.map((arn) => `${arn}:*`),
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyBillingLogGroupTags',
+        actions: ['logs:ListTagsForResource', 'logs:TagResource', 'logs:UntagResource'],
+        resources: billingLogs,
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyBillingMetricFilters',
+        actions: ['logs:DeleteMetricFilter', 'logs:DescribeMetricFilters', 'logs:PutMetricFilter'],
+        resources: [...billingLogs, ...lambdaLogGroupArns(stack, stage).filter((arn) => arn.includes('account-closure-'))],
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyBillingQueues',
+        actions: ['sqs:CreateQueue', 'sqs:GetQueueAttributes', 'sqs:GetQueueUrl', 'sqs:ListQueueTags', 'sqs:SetQueueAttributes', 'sqs:TagQueue', 'sqs:UntagQueue', ...(stage === 'prod' ? [] : ['sqs:DeleteQueue'])],
+        resources: billingQueueArns(stack, stage),
+      }),
+      new iam.PolicyStatement({
+        sid: 'ManageOnlyBillingReconciliationSchedules',
+        actions: ['events:DeleteRule', 'events:DescribeRule', 'events:DisableRule', 'events:EnableRule', 'events:ListTagsForResource', 'events:ListTargetsByRule', 'events:PutRule', 'events:PutTargets', 'events:RemoveTargets', 'events:TagResource', 'events:UntagResource'],
+        resources: billingReconcileRuleArns(stack, stage),
+      }),
+    ],
+  });
+}
+
 export function createStageManagedPolicies(
   stack: Stack,
   stage: PolicyStage,
@@ -1522,6 +1603,7 @@ export function createStageManagedPolicies(
   const commercialAccess = createCommercialAccessPolicy(stack, stage);
   const edge = createEdgePolicy(stack, stage, hostedZoneId);
   const observability = createObservabilityPolicy(stack, stage);
+  const billing = createBillingPolicy(stack, stage);
   return {
     core,
     api,
@@ -1529,6 +1611,7 @@ export function createStageManagedPolicies(
     commercialAccess,
     edge,
     observability,
+    billing,
     runtimeBoundary,
     inventoryRuntimeBoundary,
   };

@@ -46,6 +46,7 @@ import {
   usesAccessCodeSsm,
 } from './stage-policies';
 import { createCommercialObservability } from './commercial-observability';
+import { createBillingInfrastructure, createBillingObservability } from './billing-infrastructure';
 import { bundledAwsSdkEsm } from './lambda-bundling';
 import { COMMERCIAL_FLAGS_ATTRIBUTES } from '../lambda/commercial/flags';
 
@@ -1638,6 +1639,18 @@ export class RoadmapStack extends Stack {
       `https://cognito-idp.${this.region}.amazonaws.com/${pool.userPoolId}`,
       { jwtAudience: [webClient.userPoolClientId] },
     );
+    const billing = createBillingInfrastructure(this, {
+      stage,
+      table,
+      privacyTable,
+      api,
+      authorizer,
+      createRole: (id) => createRuntimeRole(this, id, stage),
+      createLogGroup: (id, name) => createFunctionLogGroup(this, id, name, stage),
+      denyConfigWrites: (role) => denyCommercialConfigWrites(role, table),
+      accessAttributes: COMMERCIAL_ACCESS_SAFE_ATTRIBUTES,
+      accountClosureWorker,
+    });
     const catalogIntegration = new HttpLambdaIntegration('CatalogIntegration', catalog);
     const accessReaderIntegration = new HttpLambdaIntegration(
       'AccessReaderIntegration',
@@ -1723,11 +1736,14 @@ export class RoadmapStack extends Stack {
     const cfnAccessCodeRedeemRoute = accessCodeRedeemRoute.node
       .defaultChild as apigatewayv2.CfnRoute;
     cfnDefaultStage.addDependency(cfnAccessCodeRedeemRoute);
+    for (const route of billing.routes) cfnDefaultStage.addDependency(route.node.defaultChild as apigatewayv2.CfnRoute);
     cfnDefaultStage.routeSettings = {
       'POST /v1/access-codes/redeem': {
         ThrottlingBurstLimit: 5,
         ThrottlingRateLimit: 2,
       },
+      'POST /v1/billing/individual/checkout': { ThrottlingBurstLimit: 5, ThrottlingRateLimit: 2 },
+      'POST /v1/billing/individual/portal': { ThrottlingBurstLimit: 5, ThrottlingRateLimit: 2 },
     };
 
     const apiAlias = route53.RecordTarget.fromAlias(
@@ -1787,6 +1803,7 @@ export class RoadmapStack extends Stack {
       accountClosureQueue,
       accountClosureDlq,
     });
+    createBillingObservability(this, stage, billing, commercialObservability.topic);
     new CfnOutput(this, 'CommercialConfigBrokerFunctionArn', {
       value: commercialConfigBroker.functionArn,
     });
@@ -1995,6 +2012,9 @@ export class RoadmapCiBootstrapStack extends Stack {
       new CfnOutput(this, `${stage}CfnEdgePolicyArn`, { value: policies.edge.managedPolicyArn });
       new CfnOutput(this, `${stage}CfnObservabilityPolicyArn`, {
         value: policies.observability.managedPolicyArn,
+      });
+      new CfnOutput(this, `${stage}CfnBillingPolicyArn`, {
+        value: policies.billing.managedPolicyArn,
       });
       new CfnOutput(this, `${stage}RuntimeBoundaryArn`, {
         value: policies.runtimeBoundary.managedPolicyArn,

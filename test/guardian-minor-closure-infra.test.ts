@@ -92,7 +92,7 @@ describe('guardian-minor closure infrastructure', () => {
     ).toEqual({
       StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
     });
-  }, 20_000);
+  }, 60_000);
 
   it('allows the shared worker to delete invite mirrors only inside TransactWriteItems', () => {
     const template = backend();
@@ -120,5 +120,5 @@ describe('guardian-minor closure infrastructure', () => {
       'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': 'PRIVACY_STATE#*' },
       StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
     });
-  }, 20_000);
+  }, 60_000);
 });

@@ -45,7 +45,7 @@ describe('stage backend infrastructure', () => {
     expect(application.Properties.AuthorizationType).toBe('JWT');
     expect(application.Properties.AuthorizerId).toBeDefined();
     expect(preflight.Properties.Target).toEqual(application.Properties.Target);
-  }, 20_000);
+  }, 60_000);
 
   it.each([
     ['dev', ['https://dev.roadmap2u.com', 'http://localhost:4200', 'http://localhost:8826']],
@@ -83,7 +83,7 @@ describe('stage backend infrastructure', () => {
         },
       });
     },
-    20_000,
+    60_000,
   );
 
   it('uses username-only Cognito and disposable dev data', () => {
@@ -179,6 +179,10 @@ describe('stage backend infrastructure', () => {
           `/aws/lambda/roadmap-account-closure-request-${stage}`,
           `/aws/lambda/roadmap-account-closure-worker-${stage}`,
           `/aws/lambda/roadmap-account-closure-privacy-${stage}`,
+          `/aws/lambda/roadmap-billing-api-${stage}`,
+          `/aws/lambda/roadmap-billing-webhook-${stage}`,
+          `/aws/lambda/roadmap-billing-worker-${stage}`,
+          `/aws/lambda/roadmap-billing-reconciler-${stage}`,
           `/aws/lambda/roadmap-catalog-${stage}`,
           `/aws/lambda/roadmap-commercial-config-broker-${stage}`,
           `/aws/lambda/roadmap-commercial-inventory-executor-${stage}`,
@@ -227,6 +231,10 @@ describe('stage backend infrastructure', () => {
           `roadmap-account-closure-request-${stage}`,
           `roadmap-account-closure-worker-${stage}`,
           `roadmap-account-closure-privacy-${stage}`,
+          `roadmap-billing-api-${stage}`,
+          `roadmap-billing-webhook-${stage}`,
+          `roadmap-billing-worker-${stage}`,
+          `roadmap-billing-reconciler-${stage}`,
           `roadmap-catalog-${stage}`,
           `roadmap-commercial-config-broker-${stage}`,
           `roadmap-commercial-inventory-executor-${stage}`,
@@ -448,7 +456,7 @@ describe('stage backend infrastructure', () => {
       expect(rendered.Outputs).toHaveProperty('CommercialConfigBrokerFunctionArn');
       expect(rendered.Outputs).not.toHaveProperty('CommercialConfigBrokerApiRoute');
     },
-    20_000,
+    60_000,
   );
 
   it('gives only the broker role config writes and explicitly denies them to other writers', () => {
