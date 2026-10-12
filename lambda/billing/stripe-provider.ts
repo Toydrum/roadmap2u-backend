@@ -26,7 +26,8 @@ export class StripeBillingProvider implements BillingProvider {
   async preflight(): Promise<void> {
     const c = this.config;
     const [account, product, month, year, tax, portal] = await Promise.all([this.stripe.accounts.retrieve(null), this.stripe.products.retrieve(c.productId), this.stripe.prices.retrieve(c.monthlyPriceId), this.stripe.prices.retrieve(c.annualPriceId), this.stripe.taxRates.retrieve(c.taxRateId), this.stripe.billingPortal.configurations.retrieve(c.portalConfigurationId)]);
-    if (account.id !== c.accountId || account.country !== 'MX' || !account.charges_enabled || (c.liveMode && (!account.details_submitted || account.requirements?.currently_due?.length))) reject();
+    // Sandbox simulations do not require activating services on a live account.
+    if (account.id !== c.accountId || account.country !== 'MX' || (c.liveMode && (!account.charges_enabled || !account.details_submitted || account.requirements?.currently_due?.length))) reject();
     if ('deleted' in product || !product.active || product.livemode !== c.liveMode || !this.own(product.metadata)) reject();
     for (const [price, interval, amount] of [[month, 'month', 9900], [year, 'year', 94900]] as const) if (!price.active || price.livemode !== c.liveMode || id(price.product) !== c.productId || price.currency !== 'mxn' || price.unit_amount !== amount || price.tax_behavior !== 'inclusive' || price.type !== 'recurring' || price.recurring?.interval !== interval || price.recurring.interval_count !== 1 || price.recurring.usage_type !== 'licensed') reject();
     if (!tax.active || !tax.inclusive || tax.country !== 'MX' || tax.livemode !== c.liveMode || (c.taxRatePercentage !== undefined && tax.percentage !== c.taxRatePercentage)) reject();
