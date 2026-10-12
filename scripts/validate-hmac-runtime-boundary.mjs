@@ -38,7 +38,8 @@ function exactResource(statement, expectedResource) {
   if (Object.hasOwn(statement, 'NotResource')) return false;
   if (!Object.hasOwn(statement, 'Resource')) return false;
   const resources = list(statement.Resource, 'Resource');
-  return resources.length === 1 && resources[0] === expectedResource;
+  const expected = Array.isArray(expectedResource) ? expectedResource : [expectedResource];
+  return exactStrings(resources, expected);
 }
 
 function exactStatement(statement, { actions, resource, sid }) {
@@ -47,6 +48,18 @@ function exactStatement(statement, { actions, resource, sid }) {
     !Object.hasOwn(statement, 'Condition') &&
     exactStrings(normalizedActions(statement), actions) &&
     exactResource(statement, resource)
+  );
+}
+
+function stripeResourcesForHmac(mode, expectedHmacResource) {
+  const pattern = mode === 'ssm'
+    ? /^arn:([a-z0-9-]+):ssm:([a-z0-9-]+):([0-9]{12}):parameter\/roadmap2u\/(dev|test|prod)\/access-code-hmac\/v1$/
+    : /^arn:([a-z0-9-]+):secretsmanager:([a-z0-9-]+):([0-9]{12}):secret:roadmap2u\/(dev|test|prod)\/access-code-hmac\/v1-(?:\*|[A-Za-z0-9]{6})$/;
+  const match = expectedHmacResource.match(pattern);
+  if (!match) throw new Error('Cannot derive exact Stripe authority from expected HMAC resource');
+  const [, partition, region, account, stage] = match;
+  return ['config', 'webhook-secret'].map(
+    (name) => `arn:${partition}:ssm:${region}:${account}:parameter/roadmap2u/${stage}/stripe/${name}`,
   );
 }
 
@@ -107,12 +120,28 @@ export function validateHmacRuntimeBoundary({
       actions.some((action) => action.startsWith('secretsmanager:')),
   );
 
+  // Validate the independently scoped Stripe grant; never ignore unknown SSM authority.
+  const stripeAllows = ssmAllows.filter(
+    ({ statement }) => statement.Sid === 'ReadOnlyStageStripeParameters',
+  );
+  if (stripeAllows.length > 1) throw new Error('Duplicate Stripe parameter statements are forbidden');
+  if (stripeAllows.length === 1 && !exactStatement(stripeAllows[0].statement, {
+    actions: ['ssm:getparameter'],
+    resource: stripeResourcesForHmac(mode, mode === 'ssm' ? parameterResource : retainedSecretResource),
+    sid: 'ReadOnlyStageStripeParameters',
+  })) {
+    throw new Error('Stripe parameter statement does not match the exact expected authority');
+  }
+  const hmacSsmAllows = ssmAllows.filter(
+    ({ statement }) => statement.Sid !== 'ReadOnlyStageStripeParameters',
+  );
+
   const expectedSsmCount = mode === 'ssm' ? 1 : 0;
-  if (ssmAllows.length !== expectedSsmCount) {
+  if (hmacSsmAllows.length !== expectedSsmCount) {
     throw new Error(`Expected ${expectedSsmCount} SSM allow statement(s)`);
   }
   if (mode === 'ssm') {
-    const [ssmAllow] = ssmAllows;
+    const [ssmAllow] = hmacSsmAllows;
     if (
       !exactStatement(ssmAllow.statement, {
         actions: ['ssm:getparameter'],

@@ -156,3 +156,106 @@ describe('HMAC runtime-boundary validator', () => {
     ).toThrow();
   });
 });
+
+const STRIPE_PARAMETER_RESOURCES = [
+  'arn:aws:ssm:us-east-1:765932874577:parameter/roadmap2u/dev/stripe/config',
+  'arn:aws:ssm:us-east-1:765932874577:parameter/roadmap2u/dev/stripe/webhook-secret',
+] as const;
+
+function stripeStatement(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    Sid: 'ReadOnlyStageStripeParameters',
+    Effect: 'Allow',
+    Action: 'ssm:GetParameter',
+    Resource: STRIPE_PARAMETER_RESOURCES,
+    ...overrides,
+  };
+}
+
+function boundaryWithStripe(mode: 'ssm' | 'secrets-manager', statement = stripeStatement()) {
+  return [
+    ...(mode === 'ssm' ? [ssmStatement()] : []),
+    secretStatement(),
+    statement,
+  ];
+}
+
+describe('HMAC validation with the installed Stripe parameter authority', () => {
+  it.each(['ssm', 'secrets-manager'] as const)(
+    'accepts the two exact same-stage Stripe parameters in %s mode',
+    async (mode) => {
+      const { validateHmacRuntimeBoundary } = await validatorModule();
+      expect(() => validate(validateHmacRuntimeBoundary, boundaryWithStripe(mode), mode)).not.toThrow();
+    },
+  );
+
+  it('accepts the exact Stripe statement in an SSM stage without a retained secret', async () => {
+    const { validateHmacRuntimeBoundary } = await validatorModule();
+    expect(() => validateHmacRuntimeBoundary({
+      mode: 'ssm',
+      parameterResource: PARAMETER_RESOURCE,
+      policyDocument: { Statement: [ssmStatement(), stripeStatement()] },
+    })).not.toThrow();
+  });
+
+  const invalidStripeAuthorities = [
+    { name: 'resource wildcard', overrides: { Resource: STRIPE_PARAMETER_RESOURCES[0].replace('/config', '/*') } },
+    { name: 'missing signing parameter', overrides: { Resource: [STRIPE_PARAMETER_RESOURCES[0]] } },
+    { name: 'extra parameter', overrides: { Resource: [...STRIPE_PARAMETER_RESOURCES, PARAMETER_RESOURCE] } },
+    { name: 'cross-stage parameter', overrides: { Resource: STRIPE_PARAMETER_RESOURCES.map((r) => r.replace('/dev/', '/test/')) } },
+    { name: 'cross-account parameter', overrides: { Resource: STRIPE_PARAMETER_RESOURCES.map((r) => r.replace('765932874577', '123456789012')) } },
+    { name: 'cross-region parameter', overrides: { Resource: STRIPE_PARAMETER_RESOURCES.map((r) => r.replace('us-east-1', 'us-west-2')) } },
+    { name: 'bulk read', overrides: { Action: ['ssm:GetParameter', 'ssm:GetParameters'] } },
+    { name: 'write permission', overrides: { Action: ['ssm:GetParameter', 'ssm:PutParameter'] } },
+    { name: 'NotResource', overrides: { NotResource: '*' } },
+    { name: 'condition', overrides: { Condition: { StringEquals: { 'aws:RequestedRegion': 'us-east-1' } } } },
+    { name: 'unrecognized Sid', overrides: { Sid: 'OtherSsmAuthority' } },
+    { name: 'duplicate resource', overrides: { Resource: [STRIPE_PARAMETER_RESOURCES[0], STRIPE_PARAMETER_RESOURCES[0]] } },
+  ];
+  for (const mode of ['ssm', 'secrets-manager'] as const) {
+    it.each(invalidStripeAuthorities)(`rejects $name in ${mode} mode`, async ({ overrides }) => {
+      const { validateHmacRuntimeBoundary } = await validatorModule();
+      expect(() => validate(validateHmacRuntimeBoundary, boundaryWithStripe(mode, stripeStatement(overrides)), mode)).toThrow();
+    });
+
+    it(`rejects duplicate Stripe statements in ${mode} mode`, async () => {
+      const { validateHmacRuntimeBoundary } = await validatorModule();
+      expect(() => validate(validateHmacRuntimeBoundary, [...boundaryWithStripe(mode), stripeStatement()], mode)).toThrow();
+    });
+  }
+
+  it('still requires the HMAC parameter in SSM mode when Stripe authority is present', async () => {
+    const { validateHmacRuntimeBoundary } = await validatorModule();
+    expect(() => validate(validateHmacRuntimeBoundary, [secretStatement(), stripeStatement()])).toThrow();
+  });
+
+  it('still forbids HMAC SSM authority in legacy Secrets Manager mode', async () => {
+    const { validateHmacRuntimeBoundary } = await validatorModule();
+    expect(() => validate(validateHmacRuntimeBoundary, boundaryWithStripe('ssm'), 'secrets-manager')).toThrow();
+  });
+
+  it('rejects Stripe authority when its stage cannot be derived from the expected HMAC resource', async () => {
+    const { validateHmacRuntimeBoundary } = await validatorModule();
+    const unknownHmacResource = PARAMETER_RESOURCE.replace('/access-code-hmac/v1', '/other-hmac');
+    expect(() => validateHmacRuntimeBoundary({
+      mode: 'ssm',
+      parameterResource: unknownHmacResource,
+      policyDocument: { Statement: [ssmStatement({ Resource: unknownHmacResource }), stripeStatement()] },
+    })).toThrow();
+  });
+
+  it.each([
+    { name: 'region', find: 'us-east-1', replacement: 'us-east-*' },
+    { name: 'partition', find: 'arn:aws:', replacement: 'arn:aws*:' },
+  ])('rejects wildcard $name in the expected authority context', async ({ find, replacement }) => {
+    const { validateHmacRuntimeBoundary } = await validatorModule();
+    expect(() => validateHmacRuntimeBoundary({
+      mode: 'ssm',
+      parameterResource: PARAMETER_RESOURCE.replace(find, replacement),
+      policyDocument: { Statement: [
+        ssmStatement({ Resource: PARAMETER_RESOURCE.replace(find, replacement) }),
+        stripeStatement({ Resource: STRIPE_PARAMETER_RESOURCES.map((r) => r.replace(find, replacement)) }),
+      ] },
+    })).toThrow();
+  });
+});
