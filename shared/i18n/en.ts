@@ -184,8 +184,8 @@ export const EN: Dict = {
       premium: {
         name: 'Premium',
         badge: 'Coming soon',
-        monthly: '$99 MXN per month',
-        yearly: '$949 MXN per year · save $239 · tax included',
+        monthly: '$114.84 MXN per month',
+        yearly: '$1,100.84 MXN per year · save $277.24 · tax included',
         summary: 'Grow your forest beyond the limits of the free plan.',
         features: [
           'Capacity beyond the Free limit',
@@ -373,7 +373,7 @@ export const EN: Dict = {
         {
           title: 'Individual subscription and CFDI',
           paragraphs: [
-            'From My subscription I check my paid period and open the Portal for cards, receipts and cancellation of renewal, including when Premium has expired or purchases are closed. If a payment is still processing, I check the summary or ask for help without starting another payment. For questions, refunds and CFDI I write to overseer@roadmap2u.com: a Stripe receipt is not a CFDI. I do not send full card details, passwords or tokens. Closing my account does not request a refund automatically.',
+            'From My subscription I check my paid period and open the Portal for cards, receipts and cancellation of renewal, including when Premium has expired or purchases are closed. If a payment is still processing, I check the summary or ask for help without starting another payment. For questions and refunds I write to overseer@roadmap2u.com. To request a CFDI I write to jescricdy1@gmail.com with my tax details and delivery email: a Stripe receipt is not a CFDI. I do not send full card details, passwords or tokens. Closing my account does not request a refund automatically.',
           ],
         },
         {
@@ -1133,7 +1133,7 @@ export const EN: Dict = {
     },
   },
   billing: {
-    termsVersion: "individual-subscription-2026-10-11-draft-v1",
+    termsVersion: "individual-subscription-2026-10-12-draft-v2",
     title: "My subscription",
     intro: "I can review my subscription and manage its payments at my own pace. My forest stays here.",
     accountLink: "I view my subscription",
@@ -1165,7 +1165,7 @@ export const EN: Dict = {
     pending: "Confirmation is in progress. I do not need to pay again; my summary and access will be checked.",
     waiting: "Confirmation is still pending. I can check again or ask for help without starting another payment.",
     support: "I ask for help",
-    supportHint: "Support, payment clarification, refunds, and CFDI: overseer@roadmap2u.com. A Stripe receipt is not a CFDI.",
+    supportHint: "Support, payment clarification and refunds: overseer@roadmap2u.com. CFDI requests: jescricdy1@gmail.com; I provide my RFC, registered name or business name, tax postcode, tax regime, CFDI use and email for XML and PDF delivery. A Stripe receipt is not a CFDI.",
     paidThrough: "My paid period ends on {date}.",
     nextRenewal: "My next renewal is expected on {date}.",
     cancellation: "Renewal is canceled. I keep my paid period.",
@@ -1184,7 +1184,7 @@ export const EN: Dict = {
     expired: "My paid period ended. My forest is still here.",
     review: "My payment is under review. Support can help me.",
     closed: "My billing is closed.",
-    termsText: "Individual Premium for my own adult account with a verified email, in Mexico: $99 MXN every month or $949 MXN every year, final price including taxes. Both intervals provide the same capabilities. I authorize recurring card charges through Stripe for the interval I choose; the subscription renews automatically until I cancel. I can cancel renewal in the Portal and keep Premium until my paid period ends. There is no free trial, coupons, interval change during a subscription, or grace period: pending or unconfirmed payment does not extend access. My price is protected for at least twelve months from the first successful payment while the same subscription continues; a new purchase after its final cancellation uses the current price. Support reviews refunds: a full refund removes the affected period and a partial refund keeps access; a dispute suspends the affected period and stops future renewals. Closing the account stops renewals and does not automatically request a refund. My local forest and other sponsored access sources remain when Premium ends. A purchase does not replace my privacy choices or give an adolescent personal Premium or family features. A Stripe receipt is not a CFDI; I request a CFDI, help, payment clarification, or refund at overseer@roadmap2u.com. Commercial records have retention separate from the forest. These terms are a test draft; commercial and tax approval are required before real charges can be enabled.",
+    termsText: "Individual Premium for my own adult account with a verified email, in Mexico: $114.84 MXN every month or $1,100.84 MXN every year, final price including taxes. The annual total is charged in one advance payment. Both intervals provide the same capabilities. I authorize recurring card charges through Stripe for the interval I choose; the subscription renews automatically until I cancel. I can cancel renewal in the Portal and keep Premium until my paid period ends. There is no free trial, coupons, interval change during a subscription, or grace period: pending or unconfirmed payment does not extend access. My price is protected for at least twelve months from the first successful payment while the same subscription continues; a new purchase after its final cancellation uses the current price. Support reviews refunds: a full refund removes the affected period and a partial refund keeps access; a dispute suspends the affected period and stops future renewals. Closing the account stops renewals and does not automatically request a refund. My local forest and other sponsored access sources remain when Premium ends. A purchase does not replace my privacy choices or give an adolescent personal Premium or family features. A Stripe receipt is not a CFDI. I request a CFDI at jescricdy1@gmail.com with my tax details and delivery email; for help, payment clarification or a refund I write to overseer@roadmap2u.com. Commercial records have retention separate from the forest. These terms are a test draft; commercial and tax approval are required before real charges can be enabled.",
   },
   account: {
     welcomeTitle: 'A key for your forest',
@@ -1628,7 +1628,7 @@ export const EN: Dict = {
       {
         icon: '💳',
         title: 'My individual subscription',
-        body: 'From Account or Settings I open My subscription to check the current offer, my paid period and the Portal. Individual Premium costs $99 MXN every month or $949 MXN every year, final price including taxes with the same capabilities. Renewal is automatic and I can cancel it at the end of the paid period. A purchase is for my own adult account with confirmed email, in Mexico, with explicit acceptance of recurring conditions. If a payment is pending, I can check again or ask for help without repeating it. The Portal remains available for an existing subscription even when purchases are closed or Premium has expired. There are no grace days; my local forest and current sponsored grants remain. Premium does not replace privacy or grant Premium to an adolescent or enable family functions. Support, refunds and CFDI: overseer@roadmap2u.com; a Stripe receipt is not a CFDI.',
+        body: 'From Account or Settings I open My subscription to check the current offer, my paid period and the Portal. Individual Premium costs $114.84 MXN every month or $1,100.84 MXN every year, final price including taxes with the same capabilities. Renewal is automatic and I can cancel it at the end of the paid period. A purchase is for my own adult account with confirmed email, in Mexico, with explicit acceptance of recurring conditions. If a payment is pending, I can check again or ask for help without repeating it. The Portal remains available for an existing subscription even when purchases are closed or Premium has expired. There are no grace days; my local forest and current sponsored grants remain. Premium does not replace privacy or grant Premium to an adolescent or enable family functions. Support and refunds: overseer@roadmap2u.com. CFDI requests: jescricdy1@gmail.com, with my tax details and delivery email; a Stripe receipt is not a CFDI.',
       },
       {
         icon: '🤝',

@@ -519,6 +519,26 @@ export const INDIVIDUAL_BILLING_STATES = Object.freeze([
   'expired', 'payment_review', 'closed',
 ] as const);
 export type IndividualBillingState = (typeof INDIVIDUAL_BILLING_STATES)[number];
+export const CURRENT_INDIVIDUAL_BILLING_CATALOG_VERSION = 'individual-mx-2026-10-v2' as const;
+const INDIVIDUAL_PRICE_CATALOGS = Object.freeze({
+  'individual-mx-2026-10-v1': Object.freeze({
+    month: Object.freeze({ amountMinor: 9900 as const }),
+    year: Object.freeze({ amountMinor: 94900 as const }),
+  }),
+  'individual-mx-2026-10-v2': Object.freeze({
+    month: Object.freeze({ amountMinor: 11484 as const }),
+    year: Object.freeze({ amountMinor: 110084 as const }),
+  }),
+});
+export type IndividualBillingPrices = (typeof INDIVIDUAL_PRICE_CATALOGS)[keyof typeof INDIVIDUAL_PRICE_CATALOGS];
+/** Only these versioned inclusive totals can become an individual offer. */
+export function individualBillingPrices(catalogVersion: unknown): IndividualBillingPrices | undefined {
+  switch (catalogVersion) {
+    case 'individual-mx-2026-10-v1': return INDIVIDUAL_PRICE_CATALOGS[catalogVersion];
+    case 'individual-mx-2026-10-v2': return INDIVIDUAL_PRICE_CATALOGS[catalogVersion];
+    default: return undefined;
+  }
+}
 export interface IndividualBillingCatalog {
   contractVersion: typeof INDIVIDUAL_BILLING_CONTRACT_VERSION;
   catalogVersion: string;
@@ -527,19 +547,19 @@ export interface IndividualBillingCatalog {
   country: 'MX';
   offerKey: 'premium_individual';
   planKey: 'premium';
-  prices: { month: { amountMinor: 9900 }; year: { amountMinor: 94900 } };
+  prices: IndividualBillingPrices;
   purchasesEnabled: boolean;
   terms: { version: string; hashes: Record<'es' | 'en', string>; urls: Record<'es' | 'en', string> };
 }
 /** Closed local fallback; a draft is never evidence of live legal approval. */
 export const CLOSED_INDIVIDUAL_BILLING_CATALOG: IndividualBillingCatalog = Object.freeze({
   contractVersion: INDIVIDUAL_BILLING_CONTRACT_VERSION,
-  catalogVersion: 'individual-mx-2026-10-v1', currency: 'MXN', taxInclusive: true, country: 'MX',
+  catalogVersion: CURRENT_INDIVIDUAL_BILLING_CATALOG_VERSION, currency: 'MXN', taxInclusive: true, country: 'MX',
   offerKey: 'premium_individual', planKey: 'premium',
-  prices: { month: { amountMinor: 9900 }, year: { amountMinor: 94900 } }, purchasesEnabled: false,
+  prices: INDIVIDUAL_PRICE_CATALOGS[CURRENT_INDIVIDUAL_BILLING_CATALOG_VERSION], purchasesEnabled: false,
   terms: {
-    version: 'individual-subscription-2026-10-11-draft-v1',
-    hashes: { es: '0661b878edf25a8e5b246eebfc6c496228dd059e2a6073aa87a75491dd5b60c3', en: '60d8339c3e3baa2ee5370f924ca092fdac0635f92055faaf764ba51f30d75643' },
+    version: 'individual-subscription-2026-10-12-draft-v2',
+    hashes: { es: 'e46261ce88c6c7f613baafa157019afd1a78fc9b08e07f90f2a7d192c1e93c59', en: '56569dd3987a4538f4f19c3ffbc7032b9397231cb9e9c5ded91052de98ebb78f' },
     urls: { es: '/subscription-terms?lang=es', en: '/subscription-terms?lang=en' },
   },
 } satisfies IndividualBillingCatalog);
@@ -599,12 +619,14 @@ export function isIndividualCheckoutRequest(value: unknown): value is Individual
 }
 export function isIndividualBillingCatalog(value: unknown): value is IndividualBillingCatalog {
   if (!individualKeys(value, ['contractVersion', 'catalogVersion', 'currency', 'taxInclusive', 'country', 'offerKey', 'planKey', 'prices', 'purchasesEnabled', 'terms'])) return false;
+  const expectedPrices = individualBillingPrices(value['catalogVersion']);
+  if (!expectedPrices) return false;
   const prices = value['prices']; const terms = value['terms'];
   if (!individualKeys(prices, ['month', 'year']) || !individualKeys(prices['month'], ['amountMinor']) || !individualKeys(prices['year'], ['amountMinor'])) return false;
   if (!individualKeys(terms, ['version', 'hashes', 'urls']) || !individualKeys(terms['hashes'], ['es', 'en']) || !individualKeys(terms['urls'], ['es', 'en'])) return false;
   return value['contractVersion'] === 1 && individualText(value['catalogVersion']) && value['currency'] === 'MXN' && value['taxInclusive'] === true &&
     value['country'] === 'MX' && value['offerKey'] === 'premium_individual' && value['planKey'] === 'premium' &&
-    prices['month']['amountMinor'] === 9900 && prices['year']['amountMinor'] === 94900 && typeof value['purchasesEnabled'] === 'boolean' &&
+    prices['month']['amountMinor'] === expectedPrices.month.amountMinor && prices['year']['amountMinor'] === expectedPrices.year.amountMinor && typeof value['purchasesEnabled'] === 'boolean' &&
     individualText(terms['version']) && individualHash(terms['hashes']['es']) && individualHash(terms['hashes']['en']) &&
     terms['urls']['es'] === '/subscription-terms?lang=es' && terms['urls']['en'] === '/subscription-terms?lang=en';
 }

@@ -7,7 +7,7 @@ export const NOW = Date.UTC(2026, 9, 11, 12);
 export const config: BillingConfig = {
   stage: 'dev', purchaseAdmission: { version: 1, mode: 'cohort', ownerSubs: ['adult'] }, accountId: 'acct_fixture', liveMode: false, productId: 'prod_individual',
   monthlyPriceId: 'price_month', annualPriceId: 'price_year', taxRateId: 'txr_fixture', portalConfigurationId: 'bpc_fixture',
-  catalogVersion: 'individual-mx-v1', termsVersion: 'individual-terms-v1', termsHashes: { es: 'a'.repeat(64), en: 'b'.repeat(64) },
+  catalogVersion: 'individual-mx-2026-10-v1', termsVersion: 'individual-terms-v1', termsHashes: { es: 'a'.repeat(64), en: 'b'.repeat(64) },
   termsUrls: { es: '/subscription-terms?lang=es', en: '/subscription-terms?lang=en' },
   successUrl: 'https://dev.example.test/account/subscription?billing=return', cancelUrl: 'https://dev.example.test/account/subscription?billing=cancel', portalReturnUrl: 'https://dev.example.test/account/subscription',
 };

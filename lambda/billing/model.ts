@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { individualBillingPrices } from '../../shared/api/contracts';
 import type { SubscriptionSourceItem } from '../commercial/model';
 import type { PurchaseAdmission } from './admission';
 
@@ -144,6 +145,12 @@ export interface BillingProvider {
 }
 export class BillingError extends Error {
   constructor(readonly code: string, message = code) { super(message); this.name = 'BillingError'; }
+}
+/** Select exact inclusive totals without changing stored subscription terms. */
+export function billingCatalogPrices(config: BillingConfig) {
+  const prices = individualBillingPrices(config.catalogVersion);
+  if (!prices) throw new BillingError('BILLING_PAYMENT_REVIEW');
+  return prices;
 }
 export class BillingHistoryPending extends BillingError {
   readonly continuation = true;
