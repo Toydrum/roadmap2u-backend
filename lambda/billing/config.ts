@@ -1,11 +1,13 @@
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { BillingError, STRIPE_API_VERSION, type BillingConfig } from './model';
 import { parsePurchaseAdmission } from './admission';
+import { individualBillingPrices } from '../../shared/api/contracts';
 
 export interface PrivateBillingConfig extends BillingConfig { version: 1; apiVersion: typeof STRIPE_API_VERSION; apiKey: string; taxRatePercentage: number }
 const required = ['stage', 'accountId', 'productId', 'monthlyPriceId', 'annualPriceId', 'taxRateId', 'portalConfigurationId', 'catalogVersion', 'termsVersion', 'successUrl', 'cancelUrl', 'portalReturnUrl', 'apiKey'] as const;
 /** Approval withdrawal closes sales; it must never disable cancellation or financial recovery. */
 export function purchasesConfigReady(c: BillingConfig): boolean {
+  if (!individualBillingPrices(c.catalogVersion)) return false;
   if (!c.liveMode && ['dev', 'test'].includes(c.stage)) return true;
   return c.liveMode && c.stage === 'prod' && !/draft/i.test(c.termsVersion)
     && [c.fiscalApprovalReference, c.commercialTermsApprovalReference, c.generalCommercialTermsApprovalReference].every((v) => typeof v === 'string' && v.trim().length > 0 && !/draft/i.test(v));

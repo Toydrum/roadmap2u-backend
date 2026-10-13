@@ -6,7 +6,7 @@ export const config: BillingConfig = {
   stage: 'dev', accountId: 'acct_fixture', liveMode: false, purchaseAdmission: { version: 1, mode: 'cohort', ownerSubs: ['adult'] },
   productId: 'prod_individual', monthlyPriceId: 'price_month', annualPriceId: 'price_year',
   taxRateId: 'txr_fixture', portalConfigurationId: 'bpc_fixture',
-  catalogVersion: 'individual-mx-v1', termsVersion: 'individual-terms-v1',
+  catalogVersion: 'individual-mx-2026-10-v1', termsVersion: 'individual-terms-v1',
   termsHashes: { es: 'a'.repeat(64), en: 'b'.repeat(64) },
   termsUrls: { es: '/subscription-terms?lang=es', en: '/subscription-terms?lang=en' },
   successUrl: 'https://dev.example.test/account/subscription?billing=return',

@@ -1,5 +1,5 @@
 import { subscriptionSourceKey, type SubscriptionSourceItem } from '../commercial/model';
-import { BillingError, digest, historyPending, individualSourceId, nonterminal, type BillingConfig, type BillingProvider, type BillingRepository, type BillingState, type InvoiceReceipt, type ProviderInvoice, type ProviderSubscription, type ReservedPriceTerms, type StripeEventEnvelope } from './model';
+import { BillingError, billingCatalogPrices, digest, historyPending, individualSourceId, nonterminal, type BillingConfig, type BillingProvider, type BillingRepository, type BillingState, type InvoiceReceipt, type ProviderInvoice, type ProviderSubscription, type ReservedPriceTerms, type StripeEventEnvelope } from './model';
 
 interface Deps { repository: BillingRepository; provider: BillingProvider; config: BillingConfig; now: () => number; nextWorkerId: () => string; refreshAccess?: (ownerSub: string) => Promise<void> }
 function receipt(ownerSub: string, inv: ProviderInvoice, sub: ProviderSubscription | undefined, terms: ReservedPriceTerms | undefined, now: number): InvoiceReceipt | null {
@@ -70,7 +70,7 @@ export class BillingProjector {
         for (const sub of snapshot.subscriptions) {
           const original = s.priceBindings?.find((b) => b.subscriptionId === sub.id);
           const retainedReservation = reserved?.priceTerms && sub.operationId === reserved.operationId ? reserved.priceTerms : undefined;
-          const terms: ReservedPriceTerms = original ?? retainedReservation ?? { productId: cfg.productId, priceId: sub.interval === 'year' ? cfg.annualPriceId : cfg.monthlyPriceId, interval: sub.interval, amountMinor: sub.interval === 'year' ? 94900 : 9900, currency: 'mxn', taxRateId: cfg.taxRateId, catalogVersion: cfg.catalogVersion };
+          const terms: ReservedPriceTerms = original ?? retainedReservation ?? { productId: cfg.productId, priceId: sub.interval === 'year' ? cfg.annualPriceId : cfg.monthlyPriceId, interval: sub.interval, amountMinor: billingCatalogPrices(cfg)[sub.interval].amountMinor, currency: 'mxn', taxRateId: cfg.taxRateId, catalogVersion: cfg.catalogVersion };
           termsBySub.set(sub.id, terms);
           if (sub.ownerSub !== ownerSub || sub.customerId !== s.customerId || sub.productId !== terms.productId || sub.quantity !== 1 || sub.currency !== terms.currency || sub.priceId !== terms.priceId || sub.interval !== terms.interval || !sub.automaticCollection || sub.trial || sub.configurationValid === false) reasons.add('subscription_configuration');
           const owner = await r.mappedOwner('subscription', sub.id);

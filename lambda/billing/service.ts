@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { individualPurchaseAdmitted } from './admission';
-import { BillingError, digest, eligible, historyPending, nonterminal, operationId, rejectedCheckoutExpiry, type BillingActor, type BillingCommand, type BillingConfig, type BillingProvider, type BillingRepository, type BillingState, type Interval, type ProviderCheckout, type ProviderSnapshot } from './model';
+import { purchasesConfigReady } from './config';
+import { BillingError, billingCatalogPrices, digest, eligible, historyPending, nonterminal, operationId, rejectedCheckoutExpiry, type BillingActor, type BillingCommand, type BillingConfig, type BillingProvider, type BillingRepository, type BillingState, type Interval, type ProviderCheckout, type ProviderSnapshot } from './model';
 
 type CheckoutRequest = { commandId: string; expectedBillingRevision: number; interval: Interval; catalogVersion: string; country: 'MX'; termsAcceptance: { version: string; hash: string; language: 'es' | 'en'; accepted: true } };
 type PortalRequest = { commandId: string; expectedBillingRevision: number };
@@ -30,14 +31,14 @@ export class BillingService {
   constructor(readonly deps: BillingServiceDeps) {}
   async catalog() {
     const c = this.deps.config;
-    return { contractVersion: 1 as const, catalogVersion: c.catalogVersion, currency: 'MXN' as const, taxInclusive: true as const, country: 'MX' as const, offerKey: 'premium_individual' as const, planKey: 'premium' as const, prices: { month: { amountMinor: 9900 as const }, year: { amountMinor: 94900 as const } }, purchasesEnabled: await this.deps.purchasesEnabled() && individualPurchaseAdmitted(c.purchaseAdmission), terms: { version: c.termsVersion, hashes: c.termsHashes, urls: c.termsUrls } };
+    return { contractVersion: 1 as const, catalogVersion: c.catalogVersion, currency: 'MXN' as const, taxInclusive: true as const, country: 'MX' as const, offerKey: 'premium_individual' as const, planKey: 'premium' as const, prices: billingCatalogPrices(c), purchasesEnabled: purchasesConfigReady(c) && await this.deps.purchasesEnabled() && individualPurchaseAdmitted(c.purchaseAdmission), terms: { version: c.termsVersion, hashes: c.termsHashes, urls: c.termsUrls } };
   }
   async summary(ownerSub: string) {
     const [s, actor, enabled] = await Promise.all([this.deps.repository.load(ownerSub), this.deps.repository.actor(ownerSub), this.deps.purchasesEnabled()]);
     if (!actor) throw new BillingError('UNAUTHENTICATED');
     const state = s.paidThrough !== null && s.paidThrough <= this.deps.now() && ['active', 'cancel_at_period_end'].includes(s.state) ? 'expired' : s.state;
     const review = state === 'payment_review';
-    return { contractVersion: 1 as const, state, interval: s.interval, paidThrough: s.paidThrough, nextRenewalAt: !s.cancelAtPeriodEnd && ['active', 'past_due'].includes(state) ? s.paidThrough : null, cancelAtPeriodEnd: s.cancelAtPeriodEnd, processing: review ? 'review' as const : (s.activeCommandId || s.historyPending) ? 'pending' as const : 'idle' as const, canCheckout: enabled && individualPurchaseAdmitted(this.deps.config.purchaseAdmission, ownerSub) && !s.historyPending && eligible(actor) && !s.closingId && !s.closedAt && !review && !s.activeCommandId && !s.subscriptionId, canOpenPortal: !!s.customerId && !s.closedAt && actor.accountType === 'adult', revision: s.revision };
+    return { contractVersion: 1 as const, state, interval: s.interval, paidThrough: s.paidThrough, nextRenewalAt: !s.cancelAtPeriodEnd && ['active', 'past_due'].includes(state) ? s.paidThrough : null, cancelAtPeriodEnd: s.cancelAtPeriodEnd, processing: review ? 'review' as const : (s.activeCommandId || s.historyPending) ? 'pending' as const : 'idle' as const, canCheckout: enabled && purchasesConfigReady(this.deps.config) && individualPurchaseAdmitted(this.deps.config.purchaseAdmission, ownerSub) && !s.historyPending && eligible(actor) && !s.closingId && !s.closedAt && !review && !s.activeCommandId && !s.subscriptionId, canOpenPortal: !!s.customerId && !s.closedAt && actor.accountType === 'adult', revision: s.revision };
   }
   async checkout(ownerSub: string, value: unknown): Promise<BillingResult> {
     const req = parseCheckout(value), { repository: r, provider: p, config: cfg } = this.deps;
@@ -51,7 +52,8 @@ export class BillingService {
       if (existing.status === 'redirect' && existing.expiresAt! > this.deps.now()) return redirect(existing);
       return this.resumeCheckout(ownerSub, existing);
     }
-    if (!await this.deps.purchasesEnabled() || !individualPurchaseAdmitted(cfg.purchaseAdmission, ownerSub)) throw new BillingError('BILLING_DISABLED');
+    if (!purchasesConfigReady(cfg) || !await this.deps.purchasesEnabled() || !individualPurchaseAdmitted(cfg.purchaseAdmission, ownerSub)) throw new BillingError('BILLING_DISABLED');
+    const prices = billingCatalogPrices(cfg);
     if (req.catalogVersion !== cfg.catalogVersion || req.termsAcceptance.version !== cfg.termsVersion || req.termsAcceptance.hash !== cfg.termsHashes[req.termsAcceptance.language]) throw new BillingError('BILLING_TERMS_OUTDATED');
     let state = await r.load(ownerSub);
     if (state.closedAt || state.closingId) throw new BillingError('BILLING_BUYER_INELIGIBLE');
@@ -63,7 +65,7 @@ export class BillingService {
     await p.preflight();
     const now = this.deps.now(), op = operationId(cfg, ownerSub, req.commandId);
     const customerOp = operationId(cfg, ownerSub, 'customer');
-    const command: BillingCommand = { ownerSub, commandId: req.commandId, kind: 'checkout', fingerprint: paramsFingerprint(req), operationId: op, createdAt: now, updatedAt: now, status: 'reserved', customerKey: `r2u:customer:${customerOp}`, customerParams: { ownerSub, operationId: customerOp, ...(actor.email ? { email: actor.email } : {}) }, checkoutKey: `r2u:checkout:${op}`, buyerEmailVerified: true, priceTerms: { priceId: req.interval === 'month' ? cfg.monthlyPriceId : cfg.annualPriceId, productId: cfg.productId, amountMinor: req.interval === 'month' ? 9900 : 94900, interval: req.interval, currency: 'mxn', taxRateId: cfg.taxRateId, catalogVersion: cfg.catalogVersion }, consent: { accountId: ownerSub, acceptedAt: now, version: req.termsAcceptance.version, hash: req.termsAcceptance.hash, language: req.termsAcceptance.language }, interval: req.interval };
+    const command: BillingCommand = { ownerSub, commandId: req.commandId, kind: 'checkout', fingerprint: paramsFingerprint(req), operationId: op, createdAt: now, updatedAt: now, status: 'reserved', customerKey: `r2u:customer:${customerOp}`, customerParams: { ownerSub, operationId: customerOp, ...(actor.email ? { email: actor.email } : {}) }, checkoutKey: `r2u:checkout:${op}`, buyerEmailVerified: true, priceTerms: { priceId: req.interval === 'month' ? cfg.monthlyPriceId : cfg.annualPriceId, productId: cfg.productId, amountMinor: prices[req.interval].amountMinor, interval: req.interval, currency: 'mxn', taxRateId: cfg.taxRateId, catalogVersion: cfg.catalogVersion }, consent: { accountId: ownerSub, acceptedAt: now, version: req.termsAcceptance.version, hash: req.termsAcceptance.hash, language: req.termsAcceptance.language }, interval: req.interval };
     const reserved = { ...state, revision: state.revision + 1, state: 'checkout_pending' as const, activeCommandId: command.commandId, updatedAt: now, nextReconcileAt: now };
     if (!await r.commit({ expectedRevision: state.revision, state: reserved, guard: 'adult', actor, command, commandAbsent: true, auditAction: 'billing.checkout_reserved' })) {
       state = await r.load(ownerSub); const same = await r.command(ownerSub, req.commandId);
