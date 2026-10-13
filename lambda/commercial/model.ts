@@ -6,6 +6,7 @@ import type {
 } from '@app/api/contracts';
 import { ACCESS_OFFLINE_LEASE_MS } from '@app/api/contracts';
 import type { AccountClosureItem as DurableAccountClosureItem } from '../account-closure';
+import type { BillingClockReference } from '../billing/clock';
 
 export { ACCESS_OFFLINE_LEASE_MS };
 
@@ -15,6 +16,8 @@ export type AccessEntitlement = Omit<AccessSummary, 'usage'>;
 
 /** Materialized, derivable entitlement state. Usage remains in USAGE items. */
 export interface AccessItem extends AccessEntitlement {
+  /** Internal marker: online writes still fence the mirror; offline lease stays expired. */
+  readonly simulationOnly?: true;
   readonly pk: string;
   readonly sk: 'ACCESS';
   readonly ownerSub: string;
@@ -55,6 +58,7 @@ export interface ReservedSubscriptionSource extends AccessSource {
 
 /** Normalized individual paid-access source; only a trusted billing writer creates it. */
 export interface SubscriptionSourceItem {
+  readonly testClock?: BillingClockReference;
   readonly pk: string;
   readonly sk: 'SUBSCRIPTION#INDIVIDUAL';
   readonly entityType: 'SubscriptionSource';

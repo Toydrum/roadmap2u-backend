@@ -143,6 +143,7 @@ async function readAccountSnapshot(
   return {
     ...lifecycle,
     ...commercial,
+    billingStage:options.stage,
   };
 }
 
@@ -164,6 +165,9 @@ async function readGrantSnapshot(
     access: snapshot.access,
     subscription: snapshot.subscription,
     coverage: snapshot.coverage,
+    testClock:snapshot.testClock,
+    billingStage:options.stage,
+    ownerProfile:snapshot.ownerProfile,
   };
 }
 

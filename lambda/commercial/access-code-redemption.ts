@@ -196,7 +196,8 @@ export class AccessCodeRedeemer {
       requestId: input.requestId,
       grant,
       access,
-      paidSources: { ...('subscription' in snapshot ? { subscription: snapshot.subscription } : {}),
+      paidSources: { ...(snapshot.testClock !== undefined ? {testClock:snapshot.testClock} : {}),
+        ...('subscription' in snapshot ? { subscription: snapshot.subscription } : {}),
         ...('coverage' in snapshot ? { coverage: snapshot.coverage } : {}) },
       audit: {
         targetKind: 'ACCESS_CODE',

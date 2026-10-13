@@ -10,6 +10,7 @@ import {
 } from '../handlers/guarded-mutation';
 import { emitCommercialMetric, type CommercialMetricStage } from '../observability';
 import type { AccessItem } from './model';
+import { paidSourceGuards } from './paid-source-guards';
 import {
   CommercialFlagsResolver,
   flagsForCommercialOperation,
@@ -26,6 +27,7 @@ export interface SocialCapabilityDecision {
 }
 
 export interface SocialCapabilityResolution {
+  readonly clockGuards: readonly TransactItem[];
   readonly accesses: ReadonlyMap<string, AccessItem>;
   readonly decision: SocialCapabilityDecision;
 }
@@ -93,10 +95,15 @@ export async function resolveSocialCapability(
   const entries = await Promise.all(
     ownerIds.map(async (ownerId) => [
       ownerId,
-      (await accessResolver.resolveFresh(ownerId)).access,
+      await accessResolver.resolveFresh(ownerId),
     ] as const),
   );
-  const accesses = new Map(entries);
+  const accesses = new Map(entries.map(([ownerId,result])=>[ownerId,result.access] as const));
+  const clockGuards = entries.flatMap(([ownerId,result])=> {
+    if (!result.access.simulationOnly) return [];
+    if (!('proposal' in result)) throw new ApiError('ACCESS_REVISION_CONFLICT');
+    return paidSourceGuards(ctx.deps.table,ownerId,result.proposal.paidSources ?? {});
+  });
   // Billing and the existing capability rollout are independent gates. Turning
   // either off must not weaken the other. The resolver combines sources for the
   // exact beneficiary (never the payer), so a remaining grant/individual plan
@@ -106,13 +113,13 @@ export async function resolveSocialCapability(
     kind: 'social',
     action,
     mode: modes.includes('enforce') ? 'enforce' : modes.includes('observe') ? 'observe' : 'off',
-    wouldDeny: entries.some(([, access]) => !access.capabilities.social),
+    wouldDeny: entries.some(([, result]) => !result.access.capabilities.social),
   };
   emitDecision(decision);
   if (decision.mode === 'enforce' && decision.wouldDeny) {
     throw new ApiError('CAPABILITY_REQUIRED');
   }
-  return { accesses, decision };
+  return { accesses, decision, clockGuards };
 }
 
 function socialProfileGuard(ctx: Ctx, ownerId: string): TransactItem {
@@ -209,6 +216,7 @@ export async function guardedSocialWrite(
           ...writes,
           ...socialProfiles,
           ...[...resolution.accesses.values()].map((access) => accessGuard(ctx, access)),
+          ...resolution.clockGuards,
         ],
         classifyCancellation,
         declaredProfiles,

@@ -1,0 +1,17 @@
+# Scoped billing simulation clock
+
+Approved by direct human reply `Apruebo` to the combined PR83/local-clock packet frozen at RoadMap2U root `67dea80a59184068c23be571bad79ece2b1bd274`. Implementation base: backend `2e2a16da2d64110ff95afd92b6af125728f95107`.
+
+Financial time is per synthetic owner. A protected `USER#owner / BILLING#TEST_CLOCK` mirror binds owner, Customer, TestClock, sandbox, stage, explicit synthetic fixture, ready evidence and monotonic revision. Readers validate it; clients cannot write it. Absence disables simulation. Clock-marked state/source without a valid matching mirror fails closed; it never falls back to wall time. PROD rejects simulated sources.
+
+The trusted future publisher must verify Customer/TestClock membership and ready status in the same sandbox and publish monotonic frozen seconds/revision with consistent source fencing. This local change supplies the validation/read protocol, not a cloud publisher or a public set-time endpoint. Future physical setup and Stripe TestClock read permissions require their own authorization.
+
+Ready evidence expires after 15 minutes of wall time. The future physical publisher must invalidate ready evidence before starting an advance, then publish a newer revision only after both provider identities and ready frozen time have been verified. Readers cannot detect an out-of-band remote advance before publication. A previously unbound clock source stays blocked until a separately reviewed repair/installation establishes its immutable binding; it is never silently rebound by a reader.
+
+Paid-at checks, period selection, summary expiry and individual access expiry use financial time. Operational leases, retries, scheduling, observations, event/security/session expiry, Cognito, grants, family coverage and privacy retain wall time. All billing consumers read the same protected mirror. Access uses no Stripe API or secret; it reads the mirror consistently, fences materialization against it, bypasses synthetic cache reuse and grants no offline lease while simulation is marked. Raw provider identifiers stay internal.
+
+Clock absence/mismatch must not prevent cancellation for closing/absent owners or recreate USER data. Protected historical fixtures and source PR83 are unchanged. Normal/live behavior and normal offline tests remain unchanged.
+
+The internal ACCESS simulationOnly marker suppresses offline permission while allowing freshly resolved online operations fenced by the protected mirror. Normal sync transaction limits stay 48/55 keys; only server-built mirror condition checks add their exact cost, bounded to one owner or two supervised participants. The external sync record/group limits do not change. Synthetic Stripe histories are fully re-read within the real operational budget because a wall-time created/covering filter can miss virtual periods. Physical clock fixtures must remain small, new and isolated; normal durable history pagination is preserved.
+
+Acceptance: monthly/yearly expiry and renewal across consumers; late-worker access expiry; PROD/live and owner/customer/clock mismatch rejection; non-ready/missing/stale mirror rejection; wall-time leases/audit/due/session budgets; cache invalidation; no offline lease; sync rejection; restore and closure tests. Scope is local implementation/tests only, with no branch publication, cloud, secrets, identity, flags, deployments or charges.

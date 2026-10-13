@@ -1,8 +1,11 @@
 import type { SubscriptionSourceItem } from '../commercial/model';
+import { isDeepStrictEqual } from 'node:util';
 import { initialState, type BillingActor, type BillingCommit, type BillingCommand, type BillingRepository, type BillingState, type InvoiceReceipt, type StripeEventEnvelope } from './model';
 
 /** Deterministic transactional adapter used by synthetic provider scenarios. */
 export class MemoryBillingRepository implements BillingRepository {
+  readonly testClocks = new Map<string, unknown>();
+  async readTestClock(id: string): Promise<unknown> { return structuredClone(this.testClocks.get(id) ?? null); }
   readonly actors = new Map<string, BillingActor>();
   readonly states = new Map<string, BillingState>();
   readonly commands = new Map<string, BillingCommand>();
@@ -19,6 +22,7 @@ export class MemoryBillingRepository implements BillingRepository {
   async projectionRevision(id: string): Promise<number> { return this.sources.get(id)?.revision ?? 0; }
   async mappedOwner(kind: string, id: string): Promise<string | null> { return this.mappings.get(`${kind}/${id}`) ?? null; }
   async commit(c: BillingCommit): Promise<boolean> {
+    if (c.clockObservation && !isDeepStrictEqual(c.clockObservation.item, await this.readTestClock(c.state.ownerSub))) return false;
     const old = this.states.get(c.state.ownerSub) ?? initialState(c.state.ownerSub);
     if (old.revision !== c.expectedRevision) return false;
     const actor = this.actors.get(c.state.ownerSub);

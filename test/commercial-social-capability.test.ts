@@ -168,9 +168,23 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe('commercial social capability', () => {
+  it('carries the protected mirror fence for online synthetic access without an offline lease',async()=>{
+    vi.stubEnv('COMMERCIAL_STAGE','dev');
+    const caller=profile('adult-clock'), testClock={pk:K.user(caller.userId),sk:'BILLING#TEST_CLOCK',ownerSub:caller.userId,clockRevision:2};
+    const rows=[flags('enforce'),caller,testClock];
+    ddbMock.on(GetCommand).callsFake(({Key})=>({Item:rows.find(row=>row.pk === Key.pk && row.sk === Key.sk)}));
+    ddbMock.on(QueryCommand).resolves({Items:[premiumGrant(caller.userId)]});
+    ddbMock.on(TransactWriteCommand).resolves({});
+    const result=await resolveSocialCapability(ctxOf(caller),'create',[caller.userId],()=>{});
+    expect(result.accesses.get(caller.userId)?.offlineValidUntil).toBe(NOW);
+    expect(result).toMatchObject({clockGuards:expect.arrayContaining([{ConditionCheck:expect.objectContaining({
+      Key:{pk:K.user(caller.userId),sk:'BILLING#TEST_CLOCK'},ExpressionAttributeValues:expect.objectContaining({':clockRevision':2}),
+    })}])});
+  });
   it.each(['create', 'accept', 'visit'] as const)(
     'billing enforce blocks %s after family coverage ends without deleting relationships',
     async (action) => {

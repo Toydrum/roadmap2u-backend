@@ -28,6 +28,7 @@ import {
   type CloudConsentGuard,
 } from '../privacy/consent';
 import { createDynamoAccessResolver, readStableAccessSnapshot } from '../access-reader';
+import { TEST_CLOCK_SK } from '../billing/clock';
 import { CommercialFlagsResolver } from '../commercial/flags';
 import { inspectHeartTransition, type HeartInspection } from '../commercial/heart';
 import {
@@ -384,7 +385,11 @@ function transactItemKey(item: TransactItem): string {
 function assertMutationTransaction(items: readonly TransactItem[], guardianWrite: boolean): void {
   // Two paid-source guards; supervised coverage shares a key with the scope guard.
   // Up to six Household v2 facts plus the responsible's profile and closure.
-  const maximum = guardianWrite ? 55 : 48;
+  const clockGuards = items.filter(item=> item.ConditionCheck?.Key?.['sk'] === TEST_CLOCK_SK).length;
+  // Only server-built mirror condition checks add capacity. Client group/record
+  // limits and the ordinary 48/55 budgets remain unchanged.
+  if (clockGuards > (guardianWrite ? 2 : 1)) throw new ApiError('LIMIT_EXCEEDED');
+  const maximum = (guardianWrite ? 55 : 48) + clockGuards;
   if (items.length > maximum || items.length > 100) {
     throw new ApiError('LIMIT_EXCEEDED', 'mutation transaction is too large');
   }
@@ -678,6 +683,8 @@ async function readCommercialGroupSnapshot(
     profile,
     closure,
     access: accessSnapshot.access,
+    testClock: accessSnapshot.testClock,
+    billingStage: accessSnapshot.billingStage,
     grants: accessSnapshot.grants,
     subscription: accessSnapshot.subscription,
     coverage: accessSnapshot.coverage,

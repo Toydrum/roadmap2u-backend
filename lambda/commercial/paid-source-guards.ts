@@ -1,5 +1,6 @@
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import type { PaidAccessSources } from './access-resolver';
+import { testClockGuard } from '../billing/clock';
 
 const COMMON_ATTRIBUTES = [
   'pk',
@@ -15,6 +16,7 @@ export const SUBSCRIPTION_SOURCE_ATTRIBUTES = [
   ...COMMON_ATTRIBUTES,
   'ownerSub',
   'sourceId',
+  'testClock',
 ] as const;
 export const COVERAGE_SOURCE_ATTRIBUTES = [
   ...COMMON_ATTRIBUTES,
@@ -30,7 +32,7 @@ export function paidSourceGuards(
   ownerSub: string,
   sources: PaidAccessSources,
 ): NonNullable<TransactWriteCommandInput['TransactItems']> {
-  return [
+  const guards: NonNullable<TransactWriteCommandInput['TransactItems']> = [
     {
       sk: 'SUBSCRIPTION#INDIVIDUAL',
       item: sources.subscription,
@@ -64,4 +66,8 @@ export function paidSourceGuards(
       },
     };
   });
+  // Ordinary owners keep their existing transaction budget. Marked sources
+  // still fence a missing mirror; losing it must never authorize wall-time access.
+  return sources.testClock || sources.subscription?.testClock !== undefined
+    ? [...guards, testClockGuard(tableName, ownerSub, sources.testClock)] : guards;
 }
