@@ -138,7 +138,7 @@ async function readAccountSnapshot(
 ): Promise<RedemptionAccountSnapshot> {
   const [lifecycle, commercial] = await Promise.all([
     readProfileClosure(options, ownerSub),
-    readStableAccessSnapshot(options.ddb, options.tableName, ownerSub),
+    readStableAccessSnapshot(options.ddb, options.tableName, ownerSub, options.stage),
   ]);
   return {
     ...lifecycle,
@@ -154,7 +154,7 @@ async function readGrantSnapshot(
   const code = await readCode(options, issuanceId);
   const ownerSub = code?.redeemerSub;
   if (!code || code.status !== 'redeemed' || !ownerSub) return undefined;
-  const snapshot = await readStableAccessSnapshot(options.ddb, options.tableName, ownerSub);
+  const snapshot = await readStableAccessSnapshot(options.ddb, options.tableName, ownerSub, options.stage);
   const grant = snapshot.grants.find((candidate) => candidate.grantId === `code-${issuanceId}`);
   if (!snapshot.access || !grant) return undefined;
   return {
@@ -166,6 +166,7 @@ async function readGrantSnapshot(
     subscription: snapshot.subscription,
     coverage: snapshot.coverage,
     testClock:snapshot.testClock,
+    testClockObserved:snapshot.testClockObserved,
     billingStage:options.stage,
     ownerProfile:snapshot.ownerProfile,
   };

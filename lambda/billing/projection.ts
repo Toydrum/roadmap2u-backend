@@ -1,5 +1,5 @@
 import { subscriptionSourceKey, type SubscriptionSourceItem } from '../commercial/model';
-import { resolveFinancialClock } from './clock';
+import { canReadTestClock, resolveFinancialClock } from './clock';
 import { BillingError, billingCatalogPrices, digest, historyPending, individualSourceId, nonterminal, type BillingConfig, type BillingProvider, type BillingRepository, type BillingState, type InvoiceReceipt, type ProviderInvoice, type ProviderSubscription, type ReservedPriceTerms, type StripeEventEnvelope } from './model';
 
 interface Deps { repository: BillingRepository; provider: BillingProvider; config: BillingConfig; now: () => number; nextWorkerId: () => string; refreshAccess?: (ownerSub: string) => Promise<void> }
@@ -54,7 +54,9 @@ export class BillingProjector {
         let s = await r.load(ownerSub);
         if (!s.customerId) return;
         // Observe before provider facts; commit fences any concurrent publication.
-        const mirror = await r.readTestClock(ownerSub);
+        const clockObserved = canReadTestClock({ownerSub,customerId:s.customerId,stage:cfg.stage,
+          accountId:cfg.accountId,liveMode:cfg.liveMode,reference:s.testClock});
+        const mirror = clockObserved ? await r.readTestClock(ownerSub) : undefined;
         const [snapshot, actor, previous, projectionRevision] = await Promise.all([p.snapshot(s.customerId, { event, ownerSub, lease }), r.actor(ownerSub), r.receipts(ownerSub), r.projectionRevision(ownerSub)]);
         const reasons = new Set<string>();
         // Checkout collects the first billing address. An unfunded customer can
@@ -127,7 +129,7 @@ export class BillingProjector {
         while (historical.length + mappings.length + covering.length > 75) {
           const invoices = historical.splice(0, 35), pageMappings = mappings.splice(0, 35);
           const next = { ...s, ...(clock.mode !== 'real' ? {testClock:clock.reference} : {}), revision: s.revision + 1, updatedAt: now(), nextReconcileAt: now() };
-          if (!await r.commit({ expectedRevision: s.revision, state: next, guard: 'none', invoices, mappings: pageMappings, clockObservation:{item:mirror}, lease: { ...lease, now: now() }, auditAction: 'billing.history_checkpoint' })) throw new BillingError('BILLING_REVISION_CONFLICT');
+          if (!await r.commit({ expectedRevision: s.revision, state: next, guard: 'none', invoices, mappings: pageMappings, ...(clockObserved ? {clockObservation:{item:mirror}} : {}), lease: { ...lease, now: now() }, auditAction: 'billing.history_checkpoint' })) throw new BillingError('BILLING_REVISION_CONFLICT');
           s = next;
         }
         const activeCommandId = active.length || current ? undefined : s.activeCommandId;
@@ -135,7 +137,7 @@ export class BillingProjector {
         const coveredSub = snapshot.subscriptions.find((v) => v.id === current?.subscriptionId);
         const source: SubscriptionSourceItem | undefined = closed ? undefined : { ...subscriptionSourceKey(ownerSub), entityType: 'SubscriptionSource', ownerSub, sourceId: individualSourceId(cfg, ownerSub, current?.subscriptionId ?? disputed?.subscriptionId ?? last?.subscriptionId ?? selectedSub?.id ?? 'unfunded'), state: current ? coveredSub?.cancelAtPeriodEnd ? 'scheduled_end' : 'active' : 'ended', paidThrough: current?.end ?? disputed?.end ?? last?.end ?? 0, graceUntil: null, revision: state.revision, updatedAt: now() };
         if (clock.mode !== 'real') {state.testClock=clock.reference;if (source) Object.assign(source,{testClock:clock.reference});}
-        const committed = await r.commit({ expectedRevision: s.revision, state, guard: 'none', source, clockObservation:{item:mirror}, invoices: [...historical, ...covering], mappings, lease: { ...lease, now: now() }, auditAction: closed ? 'billing.closed_event_observed' : reasons.size ? 'billing.payment_review' : 'billing.financial_projected' });
+        const committed = await r.commit({ expectedRevision: s.revision, state, guard: 'none', source, ...(clockObserved ? {clockObservation:{item:mirror}} : {}), invoices: [...historical, ...covering], mappings, lease: { ...lease, now: now() }, auditAction: closed ? 'billing.closed_event_observed' : reasons.size ? 'billing.payment_review' : 'billing.financial_projected' });
         if (!committed) { if (attempt === 1) throw new BillingError('BILLING_REVISION_CONFLICT'); continue; }
         // Suspension and its exact pending cancellation command are durable before Stripe mutation.
         for (const stop of renewalStops) {

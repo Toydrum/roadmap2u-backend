@@ -175,7 +175,11 @@ describe('commercial social capability', () => {
   it('carries the protected mirror fence for online synthetic access without an offline lease',async()=>{
     vi.stubEnv('COMMERCIAL_STAGE','dev');
     const caller=profile('adult-clock'), testClock={pk:K.user(caller.userId),sk:'BILLING#TEST_CLOCK',ownerSub:caller.userId,clockRevision:2};
-    const rows=[flags('enforce'),caller,testClock];
+    const reference={ownerSub:caller.userId,customerId:'cus_clock',testClockId:'clock_qa',bindingId:'binding-qa',stage:'dev',
+      stripeAccountId:'acct_qa',syntheticFixture:'stripe_clock_dev_social',clockRevision:1,frozenTimeSeconds:NOW/1000};
+    const bound={pk:K.user(caller.userId),sk:'SUBSCRIPTION#INDIVIDUAL',entityType:'SubscriptionSource',ownerSub:caller.userId,
+      sourceId:'qa-bound',state:'ended',paidThrough:0,graceUntil:null,revision:1,updatedAt:NOW,testClock:reference};
+    const rows=[flags('enforce'),caller,testClock,bound];
     ddbMock.on(GetCommand).callsFake(({Key})=>({Item:rows.find(row=>row.pk === Key.pk && row.sk === Key.sk)}));
     ddbMock.on(QueryCommand).resolves({Items:[premiumGrant(caller.userId)]});
     ddbMock.on(TransactWriteCommand).resolves({});

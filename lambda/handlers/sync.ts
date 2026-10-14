@@ -684,6 +684,7 @@ async function readCommercialGroupSnapshot(
     closure,
     access: accessSnapshot.access,
     testClock: accessSnapshot.testClock,
+    testClockObserved: accessSnapshot.testClockObserved,
     billingStage: accessSnapshot.billingStage,
     grants: accessSnapshot.grants,
     subscription: accessSnapshot.subscription,

@@ -31,7 +31,7 @@ function source(m = mirror()) {
     revision: 1, updatedAt: NOW, testClock: reference(m) } as SubscriptionSourceItem & { testClock: ReturnType<typeof reference> };
 }
 function sources(m: unknown = mirror(), s = source(), stage = 'dev') {
-  return { subscription: s, testClock: m, billingStage: stage, ownerProfile: { accountType: 'adult' as const } };
+  return { subscription: s, testClock: m, testClockObserved:true as const, billingStage: stage, ownerProfile: { accountType: 'adult' as const } };
 }
 describe('scoped financial time in the existing AccessResolver', () => {
   it('expires individual access at simulated paid end even when the worker is late', () => {
@@ -93,6 +93,7 @@ describe('financial and operational clocks in billing consumers', () => {
     const customerId = (await f.repository.load('adult')).customerId!;
     const m = mirror(NOW+DAY);
     m.customerId=customerId; m.providerReadyEvidence.customerId=customerId;
+    f.repository.states.set('adult',{...await f.repository.load('adult'),testClock:reference(m)});
     Object.assign(f.repository, {readTestClock:async()=>m});
     Object.assign(f.provider.customers.get(customerId)!, {testClockId:m.testClockId});
     f.provider.subscriptions.set('sub_1', subscription(customerId));
@@ -115,6 +116,7 @@ describe('financial and operational clocks in billing consumers', () => {
     const publish=(time:number,revision:number)=>{m={...m,frozenTimeSeconds:time/1000,clockRevision:revision,
       providerReadyEvidence:{...m.providerReadyEvidence,frozenTimeSeconds:time/1000}};repository.testClocks.set('adult',m);};
     publish(NOW,1);
+    repository.states.set('adult',{...await repository.load('adult'),testClock:reference(m)});
     Object.assign(provider.customers.get(customerId)!,{testClockId:m.testClockId});
     const priceId=interval === 'month' ? cfg.monthlyPriceId : cfg.annualPriceId;
     const amount=interval === 'month' ? 11484 : 110084;
@@ -128,7 +130,7 @@ describe('financial and operational clocks in billing consumers', () => {
     provider.invoices.set('in_initial',paid('in_initial',NOW,end));
     const projector=new BillingProjector({repository,provider,config:cfg,now:f.now,nextWorkerId:()=> 'qa-clock-worker'});
     const access=async()=> (await new AccessResolver({tableName:'qa',now:f.now,
-      readSnapshot:async()=>({grants:[],subscription:repository.sources.get('adult'),testClock:await repository.readTestClock('adult'),
+      readSnapshot:async()=>({grants:[],subscription:repository.sources.get('adult'),testClock:await repository.readTestClock('adult'),testClockObserved:true,
         billingStage:cfg.stage,ownerProfile:{accountType:'adult'}}),materializeAccess:async()=> 'committed'}).resolveFresh('adult')).access;
     await projector.reconcileOwner('adult');
     expect((await access()).effectivePlanKey).toBe('premium');
@@ -188,6 +190,7 @@ describe('financial and operational clocks in billing consumers', () => {
     const customerId=(await f.repository.load('adult')).customerId!;
     const initial=mirror();initial.customerId=customerId;initial.providerReadyEvidence.customerId=customerId;
     f.repository.testClocks.set('adult',initial);
+    f.repository.states.set('adult',{...await f.repository.load('adult'),testClock:reference(initial)});
     Object.assign(f.provider.customers.get(customerId)!,{testClockId:initial.testClockId});
     f.provider.subscriptions.set('sub_1',subscription(customerId));f.provider.invoices.set('in_1',invoice(customerId));
     const end=f.provider.invoices.get('in_1')!.lines[0].end;

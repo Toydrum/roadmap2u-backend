@@ -196,7 +196,8 @@ export class AccessCodeRedeemer {
       requestId: input.requestId,
       grant,
       access,
-      paidSources: { ...(snapshot.testClock !== undefined ? {testClock:snapshot.testClock} : {}),
+      paidSources: { ...(snapshot.testClockObserved ? {testClockObserved:true as const} : {}),
+        ...(snapshot.testClock !== undefined ? {testClock:snapshot.testClock} : {}),
         ...('subscription' in snapshot ? { subscription: snapshot.subscription } : {}),
         ...('coverage' in snapshot ? { coverage: snapshot.coverage } : {}) },
       audit: {

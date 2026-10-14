@@ -60,6 +60,14 @@ function mark(m: BillingClockReference): BillingClockReference {
     stage:m.stage,stripeAccountId:m.stripeAccountId,syntheticFixture:m.syntheticFixture,
     clockRevision:m.clockRevision,frozenTimeSeconds:m.frozenTimeSeconds };
 }
+/** Only an already bound synthetic source can request a protected mirror read. */
+export function canReadTestClock(c: Omit<ClockContext, 'now' | 'providerTestClockId'>): boolean {
+  const r = c.reference;
+  return ['dev','test'].includes(c.stage) && !c.liveMode && reference(r)
+    && r.ownerSub === c.ownerSub && r.customerId === c.customerId && r.stage === c.stage
+    && r.stripeAccountId === c.accountId && r.customerId.startsWith('cus_') && r.testClockId.startsWith('clock_')
+    && r.syntheticFixture.startsWith(`stripe_clock_${c.stage}_`);
+}
 /** No secrets, provider requests, global clock overrides or client-controlled time. */
 export function resolveFinancialClock(c: ClockContext, mirror: unknown): FinancialClock {
   if (c.reference === undefined && !mirror && (c.providerTestClockId === undefined || c.providerTestClockId === null)) return { mode:'real',now:c.now };

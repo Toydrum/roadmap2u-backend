@@ -40,7 +40,10 @@ export class DynamoBillingRepository implements BillingRepository {
     return { ownerSub, accountType: p.accountType, status: p.status ?? 'active', emailVerified: this.options.authenticatedOwner?.ownerSub === ownerSub && this.options.authenticatedOwner.emailVerified, adultDeclarationCurrent: isDeclared(privacy), ...(p.privacyMode ? { privacyMode: p.privacyMode } : {}), ...(p.email ? { email: p.email } : {}), ...(privacy ? { privacyRevision: privacy.revision, declarationHash: privacy.declarationDocumentHash } : {}), closing: !!closure };
   }
   async load(id: string): Promise<BillingState> { return { ...initialState(id), ...await this.strong<BillingState>(this.stateKey(id)) }; }
-  async readTestClock(id: string): Promise<unknown> { return this.strong({pk:`USER#${id}`,sk:TEST_CLOCK_SK}); }
+  async readTestClock(id: string): Promise<unknown> {
+    if (!['dev','test'].includes(this.options.stage) || this.options.liveMode) return null;
+    return this.strong({pk:`USER#${id}`,sk:TEST_CLOCK_SK});
+  }
   async command(id: string, commandId: string) { return this.strong<BillingCommand>(this.commandKey(id, commandId)); }
   async projectionRevision(id: string): Promise<number> {
     const source = await this.strong<{ revision?: unknown }>({ pk: `USER#${id}`, sk: 'SUBSCRIPTION#INDIVIDUAL' });

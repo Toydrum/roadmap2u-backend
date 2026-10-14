@@ -68,6 +68,6 @@ export function paidSourceGuards(
   });
   // Ordinary owners keep their existing transaction budget. Marked sources
   // still fence a missing mirror; losing it must never authorize wall-time access.
-  return sources.testClock || sources.subscription?.testClock !== undefined
+  return sources.testClockObserved
     ? [...guards, testClockGuard(tableName, ownerSub, sources.testClock)] : guards;
 }

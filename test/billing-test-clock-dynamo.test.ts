@@ -30,8 +30,10 @@ describe('protected clock Dynamo observations and transaction fences',()=>{
   it('preserves protected clock metadata in the sponsored-grant adapter without reading secrets',async()=>{
     const issuanceId='7c9bd8cb-78ce-43c7-a9b8-8e2865f3f47a',m=mirror();
     const access=deriveAccessItem('adult',NOW,undefined,[]);
+    const boundSource={pk:'USER#adult',sk:'SUBSCRIPTION#INDIVIDUAL',entityType:'SubscriptionSource',ownerSub:'adult',
+      sourceId:'qa-bound-source',state:'ended',paidThrough:0,graceUntil:null,revision:1,updatedAt:NOW,testClock:reference()};
     mocked.on(GetCommand).callsFake(({Key})=>({Item:Key.sk === 'CODE' ? {status:'redeemed',redeemerSub:'adult'}
-      : Key.sk === 'ACCESS' ? access : Key.sk === 'BILLING#TEST_CLOCK' ? m : undefined}));
+      : Key.sk === 'ACCESS' ? access : Key.sk === 'BILLING#TEST_CLOCK' ? m : Key.sk === 'SUBSCRIPTION#INDIVIDUAL' ? boundSource : undefined}));
     mocked.on(QueryCommand).resolves({Items:[{grantId:`code-${issuanceId}`}]});
     const secrets=mockClient(SSMClient);secrets.onAnyCommand().rejects(new Error('No secret read allowed'));
     try {
@@ -68,16 +70,16 @@ describe('protected clock Dynamo observations and transaction fences',()=>{
     const tx=mocked.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems!;
     expect(tx.find(item=>item.ConditionCheck?.Key?.['sk'] === 'BILLING#TEST_CLOCK')?.ConditionCheck?.ExpressionAttributeValues?.[':clockRevision']).toBe(2);
   });
-  it('fences mirror absence for a restored clock-marked source in PROD',async()=>{
+  it.each(['dev','prod'])('denies a marked source with no mirror in %s and reads only in DEV',async(stage)=>{
     const source={pk:'USER#adult',sk:'SUBSCRIPTION#INDIVIDUAL',entityType:'SubscriptionSource',ownerSub:'adult',sourceId:'qa-individual',
       state:'active',paidThrough:NOW+60_000,graceUntil:null,revision:1,updatedAt:NOW,testClock:reference()};
     mocked.on(GetCommand).callsFake(({Key})=>({Item:Key.sk === 'SUBSCRIPTION#INDIVIDUAL' ? source : undefined}));
     mocked.on(QueryCommand).resolves({Items:[]});mocked.on(TransactWriteCommand).resolves({});
-    const access=(await createDynamoAccessResolver({ddb:client(),tableName:'qa',now:()=>NOW,stage:'prod'}).resolveFresh('adult')).access;
+    const access=(await createDynamoAccessResolver({ddb:client(),tableName:'qa',now:()=>NOW,stage}).resolveFresh('adult')).access;
     expect(access.effectivePlanKey).toBe('free');expect(access.offlineValidUntil).toBe(NOW);
     const tx=mocked.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems!;
-    expect(tx).toContainEqual({ConditionCheck:{TableName:'qa',Key:{pk:'USER#adult',sk:'BILLING#TEST_CLOCK'},
-      ConditionExpression:'attribute_not_exists(pk) AND attribute_not_exists(sk)'}});
+    expect(mocked.commandCalls(GetCommand).filter(c=>c.args[0].input.Key?.['sk'] === 'BILLING#TEST_CLOCK')).toHaveLength(stage === 'dev' ? 2 : 0);
+    expect(tx.some(item=>item.ConditionCheck?.Key?.['sk'] === 'BILLING#TEST_CLOCK')).toBe(stage === 'dev');
   });
   it('rejects a financial commit after a mirror change without persisting stale facts',async()=>{
     const repository=new MemoryBillingRepository(),observed=mirror();

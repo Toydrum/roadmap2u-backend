@@ -18,6 +18,7 @@ Implement two clocks from the approved design in this isolated backend checkout.
 
 - REQ-001: Only exact DEV/TEST synthetic owner/Customer/TestClock/sandbox bindings with ready evidence select financial time.
 - REQ-002: Individual source expiry and paid-at validation use financial time; all operational time, grants and family coverage use wall time.
+- REQ-003: No protected mirror Get/condition-check for ordinary owners or PROD/live. Only valid preassigned DEV/TEST references may read it; a missing observed mirror is fenced and cannot fall back to wall time.
 - SEC-001: PROD/live, lost/mismatched/stale mirror, restored simulated source and client clock writes fail closed.
 - CON-001: No shared contract edits, dependency updates, cloud calls, secret reads, publication, flags or charges.
 - PAT-001: Extend the existing billing and AccessResolver algorithms; do not introduce a parallel entitlement resolver.
@@ -75,6 +76,8 @@ Implement two clocks from the approved design in this isolated backend checkout.
 - TEST-003: Operational time unchanged; access source clock scoped; no synthetic offline lease/cache resurrection; closure remains possible.
 
 Final local validation: 1,849 tests in 103 files, typecheck success, exact contract checkout Toydrum/RoadMap2U@640647f653bf840e39bc1d258db402e2dbc2e669 verified. Forty-five dedicated clock tests cover domain and Dynamo adapters. Initial failures reproduced missing clock behavior, snapshot races, mirror propagation and the ordinary sync budget regression; the final suite is green. Physical DEV/TEST clocks, publisher execution and ordinary offline acceptance are still pending and are not certified by these tests.
+
+Read-isolation follow-up: the approved design's zero-read requirement was audited after that checkpoint. Eleven new failing cases reproduced unscoped reads; canReadTestClock now gates all consumers and the Dynamo adapter independently denies PROD/live. Fixtures explicitly preassign authority, and read-observation metadata propagates through access, sync, social and grants. Final validation is now **1,872 tests in 104 files**, including **68 clock cases**, plus typecheck and exact contract parity. The original a07d564 candidate stays frozen and is superseded for publication. No frontend contract change is included; the known temporal PWA compatibility gap remains open.
 
 ## 7. Risks & Assumptions
 

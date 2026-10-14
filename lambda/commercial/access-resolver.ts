@@ -16,6 +16,7 @@ import {
 export interface PaidAccessSources {
   /** Protected server observation; never populated from request data. */
   readonly testClock?: unknown;
+  readonly testClockObserved?: true;
   readonly billingStage?: string;
   readonly subscription?: SubscriptionSourceItem;
   readonly coverage?: CoverageAssignmentItem;
@@ -496,6 +497,7 @@ export function createAccessPutProposal(
   const metadata = sources
     ? {
         paidSources: {
+          ...(sources.testClockObserved ? {testClockObserved:true as const} : {}),
           ...(sources.testClock !== undefined ? {testClock:sources.testClock} : {}),
           ...(sources.subscription ? { subscription: sources.subscription } : {}),
           ...(sources.coverage ? { coverage: sources.coverage } : {}),

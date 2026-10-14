@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
@@ -29,6 +29,7 @@ import { installFamilyV2Reads } from './support/family-v2-reads';
 const NOW = 1_800_000_000_000;
 const OWNER = 'rocio';
 const ddbMock = mockClient(DynamoDBDocumentClient);
+afterEach(()=>vi.unstubAllEnvs());
 
 function transactionCanceled(codes: readonly string[]): Error {
   return Object.assign(new Error('transaction cancelled'), {
@@ -917,6 +918,9 @@ describe('sync mutation groups v2', () => {
   });
 
   it.each([false,true])('bounds the maximum self group including paid sources with simulation=%s', async (simulation) => {
+    if (simulation) vi.stubEnv('COMMERCIAL_STAGE','dev');
+    const reference={ownerSub:OWNER,customerId:'cus_clock',testClockId:'clock_qa',bindingId:'binding-qa',stage:'dev',
+      stripeAccountId:'acct_qa',syntheticFixture:'stripe_clock_dev_sync',clockRevision:1,frozenTimeSeconds:NOW/1000};
     const stored: RecordItem[] = [];
     const records = Array.from({ length: 20 }, (_, index) => {
       const treeId = `max-tree-${index}`;
@@ -936,6 +940,10 @@ describe('sync mutation groups v2', () => {
       if (key.pk === K.user(OWNER) && key.sk === 'PROFILE') return { Item: profile() };
       if (simulation && key.pk === K.user(OWNER) && key.sk === 'BILLING#TEST_CLOCK') return {
         Item:{...key,ownerSub:OWNER,clockRevision:1},
+      };
+      if (simulation && key.pk === K.user(OWNER) && key.sk === 'SUBSCRIPTION#INDIVIDUAL') return {
+        Item:{...key,ownerSub:OWNER,entityType:'SubscriptionSource',sourceId:'qa-bound',state:'ended',paidThrough:0,graceUntil:null,
+          revision:1,updatedAt:NOW,testClock:reference},
       };
       if (key.pk === K.user(OWNER) && key.sk === 'USAGE') {
         return {

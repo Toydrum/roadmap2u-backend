@@ -140,9 +140,9 @@ describe('SponsoredAccessBroker', () => {
   beforeEach(() => vi.restoreAllMocks());
   it('retains the protected clock fence when revoking a sponsored grant',async()=>{
     const testClock={ownerSub:OWNER,clockRevision:2};
-    const {broker,proposals}=makeDeps({readGrantSnapshot:async()=>({...premiumSnapshot(),testClock,billingStage:'dev'})});
+    const {broker,proposals}=makeDeps({readGrantSnapshot:async()=>({...premiumSnapshot(),testClock,testClockObserved:true,billingStage:'dev'})});
     await broker.execute(signed({command:'revoke-grant',stage:STAGE,commandId:COMMAND_ID,issuanceId:ISSUANCE_ID,reason:'qa'}),{actorArn:ACTOR,requestId:'request-1'});
-    expect(proposals[0]).toMatchObject({paidSources:{testClock},access:{effectivePlanKey:'free'}});
+    expect(proposals[0]).toMatchObject({paidSources:{testClock,testClockObserved:true},access:{effectivePlanKey:'free'}});
   });
 
   it('revokes only the grant while retaining independent family coverage', async () => {
