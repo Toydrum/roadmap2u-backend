@@ -65,7 +65,8 @@ export class BillingClosure {
         evidence.subscriptionIds = verified.subscriptions.map((v) => v.id); evidence.invoiceIds = verified.invoices.map((v) => v.id);
       }
       const next = { ...s, revision: s.revision + 1, state: 'closed' as const, closedAt: now(), updatedAt: now(), activeCommandId: undefined, subscriptionId: undefined, cancelAtPeriodEnd: false, nextReconcileAt: now() + 900_000, closureEvidence: { ...evidence, checkedAt: now() } };
-      return r.commit({ expectedRevision: s.revision, state: next, guard: 'closure', lease: { ...lease, now: now() }, ...(command ? { command: { ...command, status: 'expired' as const, updatedAt: now(), recoveryEvidence: { checkedAt: now(), accountId: this.deps.config.accountId, stage: this.deps.config.stage, reason: evidence.customerOnlyUncertain ? 'no_checkout_authorized' : 'closure_no_future_collection', sessionIds: evidence.sessionIds, subscriptionIds: evidence.subscriptionIds, invoiceIds: evidence.invoiceIds } } } : {}), auditAction: 'billing.closure_verified' });
+      // The final financial write must finish before finally releases its lease.
+      return await r.commit({ expectedRevision: s.revision, state: next, guard: 'closure', lease: { ...lease, now: now() }, ...(command ? { command: { ...command, status: 'expired' as const, updatedAt: now(), recoveryEvidence: { checkedAt: now(), accountId: this.deps.config.accountId, stage: this.deps.config.stage, reason: evidence.customerOnlyUncertain ? 'no_checkout_authorized' : 'closure_no_future_collection', sessionIds: evidence.sessionIds, subscriptionIds: evidence.subscriptionIds, invoiceIds: evidence.invoiceIds } } } : {}), auditAction: 'billing.closure_verified' });
     } catch (error) { if (!historyPending(error)) billingMetric('AccountClosureBillingBlocked'); return false; }
     finally { await r.releaseLease(ownerSub, worker); }
   }

@@ -86,6 +86,7 @@ export class BillingService {
     const worker = randomUUID(), lease = await r.acquireLease(ownerSub, worker, this.deps.now(), 60_000);
     if (!lease) return pending(command.commandId, (await r.load(ownerSub)).revision);
     const fence = () => ({ ...lease, now: this.deps.now() });
+    // Await terminal writes before finally releases the lease they require.
     try {
       let s = await r.load(ownerSub);
       const current = await r.command(ownerSub, command.commandId);
@@ -99,37 +100,37 @@ export class BillingService {
       if (command.status === 'complete' || command.status === 'expired') return pending(command.commandId, s.revision);
       if (!s.customerId) {
         const found = await p.findCustomers(ownerSub);
-        if (found.length > 1) return this.review(s, 'duplicate_customer', fence());
+        if (found.length > 1) return await this.review(s, 'duplicate_customer', fence());
         if (!found.length && this.deps.now() - command.createdAt >= 23 * 3_600_000) {
-          return this.review(s, 'customer_result_unknown_after_retention', fence());
+          return await this.review(s, 'customer_result_unknown_after_retention', fence());
         }
         const customer = found[0] ?? await p.createCustomer(command.customerParams, command.customerKey);
-        if (customer.ownerSub !== ownerSub || customer.liveMode !== cfg.liveMode) return this.review(s, 'customer_mapping', fence());
+        if (customer.ownerSub !== ownerSub || customer.liveMode !== cfg.liveMode) return await this.review(s, 'customer_mapping', fence());
         const next = { ...s, customerId: customer.id, revision: s.revision + 1, updatedAt: this.deps.now() };
         if (!await r.commit({ expectedRevision: s.revision, state: next, command, guard: 'adult', actor, lease: fence(), mappings: [{ kind: 'customer', id: customer.id }], auditAction: 'billing.customer_bound' })) return pending(command.commandId, (await r.load(ownerSub)).revision);
         s = next;
       }
       if (!command.checkoutParams) {
-        if (this.deps.now() - command.createdAt >= 23 * 3_600_000) return this.expireReservation(s, command, actor, fence(), 'no_checkout_authorized', [], []);
-        if (!command.priceTerms) return this.review(s, 'missing_reserved_price', fence());
+        if (this.deps.now() - command.createdAt >= 23 * 3_600_000) return await this.expireReservation(s, command, actor, fence(), 'no_checkout_authorized', [], []);
+        if (!command.priceTerms) return await this.review(s, 'missing_reserved_price', fence());
         command = { ...command, checkoutParams: { ownerSub, operationId: command.operationId, customerId: s.customerId!, priceId: command.priceTerms.priceId, quantity: 1, mode: 'subscription', taxRateId: command.priceTerms.taxRateId, expiresAt: this.deps.now() + 1_860_000, successUrl: cfg.successUrl, cancelUrl: cfg.cancelUrl }, updatedAt: this.deps.now() };
         const next = { ...s, revision: s.revision + 1, updatedAt: this.deps.now() };
         if (!await r.commit({ expectedRevision: s.revision, state: next, guard: 'adult', actor, lease: fence(), command, auditAction: 'billing.checkout_parameters_reserved' })) return pending(command.commandId, (await r.load(ownerSub)).revision);
         s = next;
       }
       const remote = command.sessionId ? [await p.retrieveCheckout(command.sessionId)] : await p.findCheckouts(s.customerId!, command.operationId);
-      if (remote.length > 1) return this.review(s, 'duplicate_checkout', fence());
+      if (remote.length > 1) return await this.review(s, 'duplicate_checkout', fence());
       if (!remote.length) {
         const [snapshot, allSessions] = await Promise.all([p.snapshot(s.customerId!, { ownerSub, lease }), p.findCheckouts(s.customerId!)]);
-        if (snapshot.customer.ownerSub !== ownerSub || snapshot.customer.liveMode !== cfg.liveMode) return this.review(s, 'customer_mapping', fence());
+        if (snapshot.customer.ownerSub !== ownerSub || snapshot.customer.liveMode !== cfg.liveMode) return await this.review(s, 'customer_mapping', fence());
         if (snapshot.subscriptions.some(nonterminal)) {
           await r.commit({ expectedRevision: s.revision, state: { ...s, revision: s.revision + 1, subscriptionId: snapshot.subscriptions.find(nonterminal)!.id, state: 'payment_review', reviewReasons: ['unmapped_existing_subscription'], nextReconcileAt: this.deps.now(), updatedAt: this.deps.now() }, guard: 'adult', actor, lease: fence(), auditAction: 'billing.remote_subscription_blocked' });
           throw new BillingError('BILLING_SUBSCRIPTION_EXISTS');
         }
-        if (allSessions.some((v) => v.status === 'open')) return this.review(s, 'other_open_checkout', fence());
-        if (snapshot.invoices.some((v) => v.status === 'open' || v.status === 'draft')) return this.review(s, 'unresolved_remote_invoice', fence());
-        if (command.checkoutParams!.expiresAt <= this.deps.now()) return this.expireReservation(s, command, actor, fence(), 'no_remote_after_expiry', allSessions, snapshot.subscriptions, snapshot);
-        if (this.deps.now() - command.createdAt >= 23 * 3_600_000) return this.review(s, 'checkout_result_unknown_after_retention', fence());
+        if (allSessions.some((v) => v.status === 'open')) return await this.review(s, 'other_open_checkout', fence());
+        if (snapshot.invoices.some((v) => v.status === 'open' || v.status === 'draft')) return await this.review(s, 'unresolved_remote_invoice', fence());
+        if (command.checkoutParams!.expiresAt <= this.deps.now()) return await this.expireReservation(s, command, actor, fence(), 'no_remote_after_expiry', allSessions, snapshot.subscriptions, snapshot);
+        if (this.deps.now() - command.createdAt >= 23 * 3_600_000) return await this.review(s, 'checkout_result_unknown_after_retention', fence());
         const latest = await r.load(ownerSub);
         if (latest.revision !== s.revision || latest.leaseOwner !== lease.owner || latest.leaseRevision !== lease.revision || (latest.leaseUntil ?? 0) <= this.deps.now()) return pending(command.commandId, latest.revision);
       }
@@ -142,12 +143,12 @@ export class BillingService {
           // a definitive expiry rejection. Re-read current objects before releasing.
           const [all, snapshot] = await Promise.all([p.findCheckouts(s.customerId!), p.snapshot(s.customerId!, { ownerSub, lease })]);
           const own = all.filter((v) => v.operationId === command.operationId);
-          if (own.length === 1) return this.saveCheckout(s, command, own[0], actor, fence());
-          if (own.length || all.some((v) => v.status === 'open') || snapshot.subscriptions.some(nonterminal) || snapshot.invoices.some((v) => v.status === 'open' || v.status === 'draft')) return this.review(s, 'checkout_expiry_not_proven', fence());
-          return this.expireReservation(s, command, actor, fence(), 'provider_rejected_expiry', all, snapshot.subscriptions, snapshot);
+          if (own.length === 1) return await this.saveCheckout(s, command, own[0], actor, fence());
+          if (own.length || all.some((v) => v.status === 'open') || snapshot.subscriptions.some(nonterminal) || snapshot.invoices.some((v) => v.status === 'open' || v.status === 'draft')) return await this.review(s, 'checkout_expiry_not_proven', fence());
+          return await this.expireReservation(s, command, actor, fence(), 'provider_rejected_expiry', all, snapshot.subscriptions, snapshot);
         }
       }
-      return this.saveCheckout(s, command, session, actor, fence());
+      return await this.saveCheckout(s, command, session, actor, fence());
     } catch (error) {
       if (historyPending(error)) return pending(command.commandId, (await r.load(ownerSub)).revision);
       if (error instanceof BillingError) throw error;
