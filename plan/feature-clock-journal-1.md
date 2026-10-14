@@ -1,0 +1,17 @@
+# Local clock publisher journal and atomic readback
+
+Continue the trusted-publisher component of the approved scoped-clock design from 13f9898. The #84 publication/integration packet and all physical resources remain separate. This is local operator implementation, not approval or a physical executor.
+
+1. Prepare journal data by calling the actual initial-install/transition preparators. Bind the operation, phase, source SHA, exact transaction, canonical storage scope and readback request by hashes. Capture input before asynchronous validation.
+2. Derive TransactGetItems from every Put in the exact transaction: four initial items or two transition items, in order. Verify the whole response against those exact items, including audit; a matching mirror alone cannot prove the transaction. Missing, changed, crossed, stale or non-atomic observations remain uncertain and never permit a retry.
+3. Reserve an attempt in an existing local directory using exclusive file creation and file fsync. Persist only whitelisted identifiers, hashes and real times, never the transaction, snapshots, provider objects, credentials or raw errors. The same operation/phase cannot be reserved again, even with changed payload or after a crash leaves an incomplete file.
+4. Record one sanitized acknowledged/uncertain/rejected delivery receipt and one verified/uncertain readback receipt in separate exclusive files. Acknowledged delivery is not readback proof. Receipts are not physical authorization; all outputs retain physicalExecutionAllowed=false and retryAllowed=false.
+5. Add failing cases first. Exercise the actual install/transition output and reader, temporary local files, malformed/incomplete journals, duplicate attempts, changed payloads and complete atomic responses. Serialize/decode a readback through the actual SDK and an in-memory handler with synthetic credentials. Run new cases with the 195 existing focused cases and types; no repeated full runtime suite without a runtime change.
+
+AWS requires TransactGetItems for an atomic snapshot of transaction items; responses correspond to requests in the same order. Separate consistent Gets are not an atomic snapshot. Sources checked 2026-10-13:
+- https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactGetItems.html
+- https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html
+
+File fsync is tested as a local write barrier, not a universal OS/disk durability guarantee. A corrupt or absent receipt must stop the future executor. Real SDK transport, maxAttempts=1 physical enforcement, credentials/identity, reviewed physical command budget, provider advance, filesystem recovery, actual DynamoDB conditions and temporal PWA acceptance remain required follow-up work.
+
+Local validation completed: 46 cases first failed against an unimplemented module. Two additional review cases reproduced failed/missing SDK HTTP status being accepted as proof; both now remain uncertain. A ready-after-advance case verifies the other transition phase. Final result: 49 journal cases plus the 195 existing focused cases, **244 tests in seven files**, and TypeScript pass. The first green run selected only five files because two filenames were wrong; it is retained as intermediate evidence and does not certify the final scope. The final run names all seven real files. Initial type errors were nullable test assertions, corrected before the final checks. No runtime, dependency, contract, workflow or prior publisher source changed.
