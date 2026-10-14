@@ -19,6 +19,7 @@ export type PublisherMirror = BillingTestClock | (Omit<BillingTestClock, 'provid
 export interface ClockPublisherInput {
   scope: ClockPublisherScope; ownerSub: string; priorMirror: unknown; observation: ProviderClockObservation; realNow: number;
 }
+export type ClockPublisherContext = Pick<ClockPublisherInput,'scope'|'ownerSub'|'realNow'>;
 export interface PreparedClockEvidence {
   kind: 'install' | 'refresh' | 'advance_fence' | 'ready'; reference: BillingClockReference; mirror: PublisherMirror;
   mirrorCondition: ReturnType<typeof testClockGuard>; requiresAtomicReferenceInstall: boolean;
@@ -32,16 +33,16 @@ function reference(f: ClockFixture, revision: number, seconds: number): BillingC
   return {ownerSub:f.ownerSub,customerId:f.customerId,testClockId:f.testClockId,bindingId:f.bindingId,stage:f.stage,
     stripeAccountId:f.stripeAccountId,syntheticFixture:f.syntheticFixture,clockRevision:revision,frozenTimeSeconds:seconds};
 }
-function context(i: ClockPublisherInput, f: ClockFixture, r: BillingClockReference, now = i.realNow) {
+function context(i: ClockPublisherContext, f: ClockFixture, r: BillingClockReference, now = i.realNow) {
   return {ownerSub:f.ownerSub,customerId:f.customerId,stage:i.scope.stage,accountId:i.scope.stripeAccountId,liveMode:i.scope.liveMode,
     reference:r,now,providerTestClockId:f.testClockId};
 }
-function checkedReference(i: ClockPublisherInput, f: ClockFixture, revision: number, seconds: number): BillingClockReference {
+function checkedReference(i: ClockPublisherContext, f: ClockFixture, revision: number, seconds: number): BillingClockReference {
   const r = reference(f,revision,seconds);
   requireCondition(canReadTestClock(context(i,f,r)), 'INVALID_REFERENCE');
   return r;
 }
-function selectFixture(i: ClockPublisherInput): ClockFixture {
+function selectFixture(i: ClockPublisherContext): ClockFixture {
   const s = i.scope;
   requireCondition(['dev','test'].includes(s.stage) && s.liveMode === false && /^acct_[A-Za-z0-9_]+$/.test(s.stripeAccountId), 'SANDBOX_SCOPE_REQUIRED');
   requireCondition(realTimestamp(i.realNow) && typeof s.tableName === 'string' && /^[A-Za-z0-9_.-]{3,255}$/.test(s.tableName), 'INVALID_OPERATIONAL_CONTEXT');
@@ -55,6 +56,8 @@ function selectFixture(i: ClockPublisherInput): ClockFixture {
   requireCondition(f, 'OWNER_NOT_IN_SCOPE');
   return f;
 }
+/** Shared pre-read scope validation; callers receive a copy of the selected binding. */
+export function selectClockPublisherFixture(i: ClockPublisherContext): ClockFixture { return structuredClone(selectFixture(i)); }
 function validateObservation(i: ClockPublisherInput, f: ClockFixture): void {
   const o = i.observation;
   requireCondition(o.stripeAccountId === f.stripeAccountId && o.stage === f.stage && o.liveMode === false, 'OBSERVATION_SCOPE_MISMATCH');
