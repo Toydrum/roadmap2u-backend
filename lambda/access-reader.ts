@@ -32,6 +32,7 @@ import {
   COVERAGE_SOURCE_ATTRIBUTES,
 } from './commercial/paid-source-guards';
 import { instrumentHandler } from './observability';
+import { canReadTestClock, TEST_CLOCK_SK, TEST_CLOCK_ATTRIBUTES } from './billing/clock';
 
 export type AccessReaderEvent = APIGatewayProxyEventV2WithJWTAuthorizer;
 
@@ -51,6 +52,7 @@ export interface AccessReaderDeps {
 }
 
 export interface DynamoAccessReaderOptions {
+  readonly stage?: string;
   readonly ddb: DynamoDBDocumentClient;
   readonly tableName: string;
   readonly now: () => number;
@@ -80,6 +82,7 @@ const PROFILE_PROJECTION = projection(['pk', 'sk', 'userId', 'status', 'accountT
 const CLOSURE_PROJECTION = projection(['pk', 'sk']);
 const USAGE_PROJECTION = projection(['pk', 'sk', 'state', 'activeTrees']);
 const ACCESS_PROJECTION = projection([
+  'simulationOnly',
   'pk',
   'sk',
   'ownerSub',
@@ -335,9 +338,12 @@ export async function readStableAccessSnapshot(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   ownerSub: string,
+  stage = process.env['COMMERCIAL_STAGE'] ?? process.env['STAGE'] ?? '',
 ): Promise<AccessSnapshot> {
   for (let attempt = 0; attempt < ACCESS_SNAPSHOT_ATTEMPTS; attempt += 1) {
     const before = await readAccess(ddb, tableName, ownerSub);
+    const readClock = async () => (await ddb.send(new GetCommand({TableName:tableName,
+      Key:{pk:K.user(ownerSub),sk:TEST_CLOCK_SK},ConsistentRead:true,...projection(TEST_CLOCK_ATTRIBUTES)}))).Item;
     const [grants, subscriptionResult, coverageResult, profileResult] = await Promise.all([
       readAllGrants(ddb, tableName, ownerSub),
       ddb.send(
@@ -361,9 +367,18 @@ export async function readStableAccessSnapshot(
         ...PROFILE_PROJECTION,
       })),
     ]);
+    const subscription = subscriptionResult.Item as SubscriptionSourceItem | undefined;
+    const reference = subscription?.testClock;
+    const clockObserved = subscription?.ownerSub === ownerSub && canReadTestClock({ownerSub,stage,liveMode:stage === 'prod',
+      customerId:reference?.customerId ?? '',accountId:reference?.stripeAccountId ?? '',reference});
+    const clockBefore = clockObserved ? await readClock() : undefined;
     const after = await readAccess(ddb, tableName, ownerSub);
-    if (isDeepStrictEqual(before, after)) {
+    const clockAfter = clockObserved ? await readClock() : undefined;
+    if (isDeepStrictEqual(before, after) && isDeepStrictEqual(clockBefore, clockAfter)) {
       return {
+        ...(clockAfter ? {testClock:clockAfter} : {}),
+        ...(clockObserved ? {testClockObserved:true as const} : {}),
+        ...(stage ? {billingStage:stage} : {}),
         ...(after ? { access: after } : {}),
         grants,
         ...(subscriptionResult.Item
@@ -441,8 +456,10 @@ export function createDynamoAccessResolver(options: DynamoAccessReaderOptions): 
   return new AccessResolver({
     tableName: options.tableName,
     now: options.now,
-    readSnapshot: (ownerSub, _readOptions) =>
-      readStableAccessSnapshot(options.ddb, options.tableName, ownerSub),
+    readSnapshot: async (ownerSub, _readOptions) => ({
+      ...await readStableAccessSnapshot(options.ddb, options.tableName, ownerSub, options.stage),
+      billingStage:options.stage ?? process.env['COMMERCIAL_STAGE'] ?? process.env['STAGE'] ?? '',
+    }),
     materializeAccess: (proposal) => materializeAccess(options, proposal),
   });
 }

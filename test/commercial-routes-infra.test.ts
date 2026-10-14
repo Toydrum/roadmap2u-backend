@@ -249,6 +249,7 @@ describe('commercial route runtime isolation', () => {
 
     expect(access.Properties.Environment.Variables).toEqual({
       TABLE_NAME: { Ref: expect.stringMatching(/^Table/) },
+      COMMERCIAL_STAGE: 'dev',
     });
     expect(bySid('ReadCommercialAccessItems')).toMatchObject({
       Action: 'dynamodb:GetItem',

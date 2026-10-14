@@ -2,6 +2,7 @@ import { ApiError, type AccessSource } from '@app/api/contracts';
 import { LEGACY_PREPAYMENT_CATALOG, PREPAYMENT_CATALOG } from './catalog';
 import type { CoverageAssignmentItem } from '../family/model';
 import { assertFamilyIdentifier } from '../family/keys';
+import { resolveFinancialClock } from '../billing/clock';
 import {
   ACCESS_OFFLINE_LEASE_MS,
   accessKey,
@@ -13,6 +14,10 @@ import {
 } from './model';
 
 export interface PaidAccessSources {
+  /** Protected server observation; never populated from request data. */
+  readonly testClock?: unknown;
+  readonly testClockObserved?: true;
+  readonly billingStage?: string;
   readonly subscription?: SubscriptionSourceItem;
   readonly coverage?: CoverageAssignmentItem;
   readonly ownerProfile?: {
@@ -250,12 +255,12 @@ function combineCapabilities(active: readonly ActiveEntitlement[]): AccessCapabi
 }
 
 /** No inferred grace: only a persisted grace state can extend paidThrough. */
-function paidBoundary(value: unknown, now: number): number | null {
+function paidBoundary(value: unknown, now: number, observedNow = now): number | null {
   if (
     !isRecord(value) ||
     !isRevision(value['revision']) ||
     !isTimestamp(value['updatedAt']) ||
-    value['updatedAt'] > now ||
+    value['updatedAt'] > observedNow ||
     !isTimestamp(value['paidThrough'])
   )
     return null;
@@ -273,6 +278,13 @@ function paidBoundary(value: unknown, now: number): number | null {
     : null;
 }
 
+function individualClock(ownerSub: string, now: number, sources: PaidAccessSources) {
+  const mark = sources.subscription?.testClock;
+  return resolveFinancialClock({ownerSub,now,customerId:mark?.customerId ?? '',
+    accountId:mark?.stripeAccountId ?? '',stage:sources.billingStage ?? '',liveMode:sources.billingStage === 'prod',
+    reference:mark}, sources.testClock);
+}
+
 function paidEntitlements(
   ownerSub: string,
   now: number,
@@ -281,7 +293,8 @@ function paidEntitlements(
   const active: ActiveEntitlement[] = [];
   const plan = PREPAYMENT_CATALOG.plans.premium;
   const individual = sources.subscription;
-  const individualUntil = paidBoundary(individual, now);
+  const clock = individualClock(ownerSub, now, sources);
+  const individualUntil = clock.mode === 'blocked' ? null : paidBoundary(individual, clock.now, now);
   if (
     individualUntil !== null &&
     individual &&
@@ -376,9 +389,12 @@ export function deriveAccessItem(
       left.source.kind.localeCompare(right.source.kind) ||
       left.source.sourceId.localeCompare(right.source.sourceId),
   );
+  const simulated = sources.subscription?.testClock !== undefined || !!sources.testClock;
+  const clock = individualClock(ownerSub, now, sources);
   const boundaries = [
     nextBoundary(eligibleGrants, ownerSub, now),
-    ...active.map(({ source }) => source.validUntil),
+    ...(clock.mode === 'simulation' ? [clock.evidenceValidUntil] : []),
+    ...active.filter(({source})=> !simulated || source.scope !== 'individual').map(({ source }) => source.validUntil),
   ].filter((value): value is number => value !== null && value > now);
   const boundary = boundaries.length ? Math.min(...boundaries) : null;
   const activeSources: AccessSource[] = active.length
@@ -398,6 +414,7 @@ export function deriveAccessItem(
 
   return {
     ...key,
+    ...(simulated ? {simulationOnly:true as const} : {}),
     ownerSub,
     effectivePlanKey,
     catalogVersion: PREPAYMENT_CATALOG.version,
@@ -408,7 +425,7 @@ export function deriveAccessItem(
     revision: previousRevision + 1,
     nextRecomputeAt: boundary,
     offlineValidUntil: Math.min(
-      now + ACCESS_OFFLINE_LEASE_MS,
+      simulated ? now : now + ACCESS_OFFLINE_LEASE_MS,
       boundary ?? Number.POSITIVE_INFINITY,
     ),
     updatedAt: now,
@@ -439,6 +456,7 @@ function isFresh(
   grants: readonly GrantItem[],
   sources: PaidAccessSources,
 ): access is AccessItem {
+  if (sources.subscription?.testClock !== undefined || sources.testClock || access?.simulationOnly) return false;
   if (!isRecord(access)) return false;
   const key = accessKey(ownerSub);
   if (
@@ -479,6 +497,8 @@ export function createAccessPutProposal(
   const metadata = sources
     ? {
         paidSources: {
+          ...(sources.testClockObserved ? {testClockObserved:true as const} : {}),
+          ...(sources.testClock !== undefined ? {testClock:sources.testClock} : {}),
           ...(sources.subscription ? { subscription: sources.subscription } : {}),
           ...(sources.coverage ? { coverage: sources.coverage } : {}),
         },

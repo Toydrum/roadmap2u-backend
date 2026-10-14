@@ -324,7 +324,7 @@ function assertCurrentAccess(access: AccessItem, ownerSub: string, now: number):
     !nonNegativeInteger(value['updatedAt']) ||
     value['updatedAt'] > now ||
     !nonNegativeInteger(value['offlineValidUntil']) ||
-    value['offlineValidUntil'] <= now ||
+    (value['offlineValidUntil'] <= now && value['simulationOnly'] !== true) ||
     (boundary !== null && value['offlineValidUntil'] > boundary) ||
     !isRecord(limits) ||
     !isLimit(limits['maxActiveTrees']) ||
@@ -587,7 +587,8 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
         closureGuard(this.deps.tableName, request.ownerSub),
         currentMigrationGuard,
         ...(snapshot.access
-          ? [accessGuard(this.deps.tableName, access, accessCheckedAt)]
+          ? [accessGuard(this.deps.tableName, access, accessCheckedAt),
+              ...(access.simulationOnly ? paidSourceGuards(this.deps.tableName,request.ownerSub,snapshot) : [])]
           : [
               createAccessPutProposal(this.deps.tableName, access, undefined),
               ...paidSourceGuards(this.deps.tableName, request.ownerSub, snapshot),

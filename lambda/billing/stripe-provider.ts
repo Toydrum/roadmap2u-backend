@@ -17,7 +17,8 @@ export class StripeBillingProvider implements BillingProvider {
   private own(metadata: Stripe.Metadata | null | undefined): boolean { return metadata?.['integration'] === INTEGRATION && metadata['stage'] === this.config.stage; }
   private customer(c: Stripe.Customer | Stripe.DeletedCustomer): ProviderCustomer {
     if (c.deleted || !this.own(c.metadata) || c.livemode !== this.config.liveMode) reject();
-    return { id: c.id, ownerSub: c.metadata['owner'] ?? '', operationId: c.metadata['operation'] ?? '', liveMode: c.livemode, country: c.address?.country ?? null };
+    return { id: c.id, ownerSub: c.metadata['owner'] ?? '', operationId: c.metadata['operation'] ?? '', liveMode: c.livemode, country: c.address?.country ?? null,
+      ...(c.test_clock ? {testClockId:id(c.test_clock)} : {}) };
   }
   private checkout(c: Stripe.Checkout.Session): ProviderCheckout {
     if (!this.own(c.metadata) || c.livemode !== this.config.liveMode || !['open', 'complete', 'expired'].includes(c.status ?? '')) reject();
@@ -136,13 +137,15 @@ export class StripeBillingProvider implements BillingProvider {
     // collectible invoice, nonterminal subscription and event target is read again.
     const subs = new Map(history.subscriptions.map((s) => [s.id, s])), invoices = new Map(history.invoices.map((i) => [i.id, i]));
     const [newSubs, newInvoices, targets] = await Promise.all([
-      pages((starting_after) => this.stripe.subscriptions.list({ customer: customerId, status: 'all', created: { gte: Math.floor(history.startedAt / 1000) }, limit: 100, ...(starting_after ? { starting_after } : {}) })),
-      pages((starting_after) => this.stripe.invoices.list({ customer: customerId, created: { gte: Math.floor(history.startedAt / 1000) }, limit: 100, ...(starting_after ? { starting_after } : {}) })),
+      pages((starting_after) => {if (customer.testClockId) checkBudget();return this.stripe.subscriptions.list({ customer: customerId, status: 'all', ...(customer.testClockId ? {} : {created: { gte: Math.floor(history.startedAt / 1000) }}), limit: 100, ...(starting_after ? { starting_after } : {}) });}),
+      pages((starting_after) => {if (customer.testClockId) checkBudget();return this.stripe.invoices.list({ customer: customerId, ...(customer.testClockId ? {} : {created: { gte: Math.floor(history.startedAt / 1000) }}), limit: 100, ...(starting_after ? { starting_after } : {}) });}),
       this.eventInvoices(options?.event),
     ]);
     for (const sub of newSubs) subs.set(sub.id, this.subscription(sub));
-    const refreshInvoices = new Set([...targets, ...newInvoices.map((i) => i.id), ...history.invoices.filter((i) => ['open', 'draft'].includes(i.status) || i.lines.some((l) => l.start <= now && l.end > now)).map((i) => i.id)]);
-    const rawInvoices = []; for (const invoiceId of refreshInvoices) { const raw = await this.stripe.invoices.retrieve(invoiceId); if (id(raw.customer) !== customerId) reject(); rawInvoices.push(raw); }
+    // A simulated period may lie on either side of wall time. Re-read its full
+    // small QA history rather than trusting a real-time covering/created filter.
+    const refreshInvoices = new Set([...targets, ...newInvoices.map((i) => i.id), ...history.invoices.filter((i) => customer.testClockId || ['open', 'draft'].includes(i.status) || i.lines.some((l) => l.start <= now && l.end > now)).map((i) => i.id)]);
+    const rawInvoices = []; for (const invoiceId of refreshInvoices) { if (customer.testClockId) checkBudget(); const raw = await this.stripe.invoices.retrieve(invoiceId); if (id(raw.customer) !== customerId) reject(); rawInvoices.push(raw); }
     const refreshSubs = new Set([...subs.values()].filter(nonterminal).map((s) => s.id));
     for (const raw of rawInvoices) { const subId = id(raw.parent?.subscription_details?.subscription); if (subId) refreshSubs.add(subId); }
     if (options?.event?.objectType === 'subscription') refreshSubs.add(options.event.objectId);

@@ -242,6 +242,15 @@ function harness(
 }
 
 describe('CommercialMutationWriter', () => {
+  it('permits verified online simulation writes with no offline lease and fences the mirror',async()=>{
+    const testClock={ownerSub:OWNER,clockRevision:2};
+    const access={...premiumAccess(),offlineValidUntil:NOW,simulationOnly:true as const};
+    const h=harness([snapshot({testClock,testClockObserved:true,access})],{resolvedAccess:[access]});
+    await expect(h.writer.write({ownerSub:OWNER,mutationId:'qa-clock'})).resolves.toMatchObject({outcome:'committed'});
+    expect(h.commits[0].items).toContainEqual({ConditionCheck:expect.objectContaining({
+      Key:{pk:K.user(OWNER),sk:'BILLING#TEST_CLOCK'},ExpressionAttributeValues:expect.objectContaining({':clockRevision':2}),
+    })});
+  });
   it('keeps migrated generation counters exact while quota and capability flags are off', async () => {
     const h = harness([snapshot()]);
     const request = { ownerSub: OWNER, mutationId: 'mutation-1' };

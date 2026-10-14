@@ -27,7 +27,7 @@ export async function createBillingRuntime(authenticatedOwner?: { ownerSub: stri
   const flagAliases = Object.fromEntries(COMMERCIAL_FLAGS_ATTRIBUTES.map((attribute, i) => [`#flag${i}`, attribute]));
   const flags = new CommercialFlagsResolver({ now, readItem: async () => (await ddb.send(new GetCommand({ TableName: table, Key: { pk: 'COMMERCIAL#CONFIG', sk: 'FLAGS' }, ConsistentRead: true, ProjectionExpression: Object.keys(flagAliases).join(', '), ExpressionAttributeNames: flagAliases }))).Item, emitMetric: () => billingMetric('ConfigurationError') });
   const service = new BillingService({ repository, provider, config, now, purchasesEnabled: async () => purchasesConfigReady(config) && individualPurchasesEnabled(await flags.resolve()) });
-  const resolver = createDynamoAccessResolver({ ddb, tableName: table, now });
+  const resolver = createDynamoAccessResolver({ ddb, tableName: table, now, stage:config.stage });
   const projector = new BillingProjector({ repository, provider, config, now, nextWorkerId: randomUUID, refreshAccess: async (id) => { await resolver.resolveFresh(id); } });
   return { repository, provider, config, service, projector, now, metric: billingMetric };
 }

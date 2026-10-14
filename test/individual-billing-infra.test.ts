@@ -36,6 +36,14 @@ function statementsFor(template: any, functionName: string): any[] {
 }
 
 describe.each(STAGES)('individual billing infrastructure %s', (stage) => {
+  it('supplies a trusted access stage and permits only protected clock metadata reads', () => {
+    const template=backend(stage), fn=functionByName(template,`roadmap-access-reader-${stage}`);
+    expect(fn.Environment.Variables.COMMERCIAL_STAGE).toBe(stage);
+    const read=statementsFor(template,`roadmap-access-reader-${stage}`).find(s=>s.Sid === 'ReadCommercialAccessItems');
+    const attributes=read.Condition['ForAllValues:StringEquals']['dynamodb:Attributes'];
+    expect(attributes).toEqual(expect.arrayContaining(['testClock','bindingId','testClockId','customerId','stripeAccountId','clockRevision','frozenTimeSeconds','providerReadyEvidence','syntheticFixture','stage','liveMode']));
+    expect(attributes).not.toEqual(expect.arrayContaining(['apiKey']));
+  },60_000);
   it('publishes exact signed webhook/public catalog and JWT owner routes, preserving legacy paths', () => {
     const template = backend(stage);
     const routes = resources(template, 'AWS::ApiGatewayV2::Route').map((r) => r.Properties);

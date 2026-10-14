@@ -238,6 +238,18 @@ const COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES = [
 ] as const;
 
 const COMMERCIAL_ACCESS_SAFE_ATTRIBUTES = [
+  'simulationOnly',
+  'testClock',
+  'customerId',
+  'testClockId',
+  'bindingId',
+  'stage',
+  'stripeAccountId',
+  'liveMode',
+  'syntheticFixture',
+  'clockRevision',
+  'frozenTimeSeconds',
+  'providerReadyEvidence',
   'entityType',
   'accountId',
   'householdId',
@@ -1357,7 +1369,7 @@ export class RoadmapStack extends Stack {
       timeout: Duration.seconds(10),
       role: accessReaderRole,
       logGroup: createFunctionLogGroup(this, 'AccessReaderLogs', accessReaderName, stage),
-      environment: { TABLE_NAME: table.tableName },
+      environment: { TABLE_NAME: table.tableName, COMMERCIAL_STAGE: stage },
       bundling: {
         format: OutputFormat.ESM,
         tsconfig: join(here, '../tsconfig.json'),

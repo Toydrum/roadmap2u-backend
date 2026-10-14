@@ -1,8 +1,9 @@
 import { subscriptionSourceKey, type SubscriptionSourceItem } from '../commercial/model';
+import { canReadTestClock, resolveFinancialClock } from './clock';
 import { BillingError, billingCatalogPrices, digest, historyPending, individualSourceId, nonterminal, type BillingConfig, type BillingProvider, type BillingRepository, type BillingState, type InvoiceReceipt, type ProviderInvoice, type ProviderSubscription, type ReservedPriceTerms, type StripeEventEnvelope } from './model';
 
 interface Deps { repository: BillingRepository; provider: BillingProvider; config: BillingConfig; now: () => number; nextWorkerId: () => string; refreshAccess?: (ownerSub: string) => Promise<void> }
-function receipt(ownerSub: string, inv: ProviderInvoice, sub: ProviderSubscription | undefined, terms: ReservedPriceTerms | undefined, now: number): InvoiceReceipt | null {
+function receipt(ownerSub: string, inv: ProviderInvoice, sub: ProviderSubscription | undefined, terms: ReservedPriceTerms | undefined, now: number, observedNow: number): InvoiceReceipt | null {
   if (inv.status !== 'paid') return null;
   const reasons: string[] = [];
   const lines = inv.lines.filter((l) => l.recurring);
@@ -39,7 +40,7 @@ function receipt(ownerSub: string, inv: ProviderInvoice, sub: ProviderSubscripti
     if (d.status === 'lost') lost = true;
     else if (d.status !== 'won' && d.status !== 'warning_closed') suspended = true;
   }
-  return { ownerSub, invoiceId: inv.id, subscriptionId: inv.subscriptionId, customerId: inv.customerId, start: line?.start ?? 0, end: line?.end ?? 0, interval: line?.interval ?? 'month', amountPaid: inv.amountPaid, currency: 'mxn', valid: !reasons.length && refunded < inv.amountPaid && !lost && !suspended, suspended, refunded, ...(disputeStatus ? { disputeStatus } : {}), reviewReasons: reasons, verifiedAt: now, paymentIds: [...paymentIds], paidAt: inv.paidAt ?? 0, priceId: line?.priceId ?? '', productId: line?.productId ?? '', taxRateId: terms?.taxRateId ?? '', chargeIds: [...charges].filter((v): v is string => !!v) };
+  return { ownerSub, invoiceId: inv.id, subscriptionId: inv.subscriptionId, customerId: inv.customerId, start: line?.start ?? 0, end: line?.end ?? 0, interval: line?.interval ?? 'month', amountPaid: inv.amountPaid, currency: 'mxn', valid: !reasons.length && refunded < inv.amountPaid && !lost && !suspended, suspended, refunded, ...(disputeStatus ? { disputeStatus } : {}), reviewReasons: reasons, verifiedAt: observedNow, paymentIds: [...paymentIds], paidAt: inv.paidAt ?? 0, priceId: line?.priceId ?? '', productId: line?.productId ?? '', taxRateId: terms?.taxRateId ?? '', chargeIds: [...charges].filter((v): v is string => !!v) };
 }
 function protectionEnd(firstPaidAt: number): number { const d = new Date(firstPaidAt); d.setUTCFullYear(d.getUTCFullYear() + 1); return d.getTime(); }
 export class BillingProjector {
@@ -52,6 +53,10 @@ export class BillingProjector {
       for (let attempt = 0; attempt < 2; attempt++) {
         let s = await r.load(ownerSub);
         if (!s.customerId) return;
+        // Observe before provider facts; commit fences any concurrent publication.
+        const clockObserved = canReadTestClock({ownerSub,customerId:s.customerId,stage:cfg.stage,
+          accountId:cfg.accountId,liveMode:cfg.liveMode,reference:s.testClock});
+        const mirror = clockObserved ? await r.readTestClock(ownerSub) : undefined;
         const [snapshot, actor, previous, projectionRevision] = await Promise.all([p.snapshot(s.customerId, { event, ownerSub, lease }), r.actor(ownerSub), r.receipts(ownerSub), r.projectionRevision(ownerSub)]);
         const reasons = new Set<string>();
         // Checkout collects the first billing address. An unfunded customer can
@@ -82,7 +87,13 @@ export class BillingProjector {
           for (const sub of active) await p.cancelSubscription(sub.id, `closure:${digest([ownerSub, sub.id])}`);
           await p.closeOutstandingInvoices(s.customerId, `closure-invoices:${digest(ownerSub)}`);
         }
-        const fresh = snapshot.invoices.map((i) => receipt(ownerSub, i, snapshot.subscriptions.find((sub) => sub.id === i.subscriptionId), termsBySub.get(i.subscriptionId), now())).filter((i): i is InvoiceReceipt => !!i);
+        const clock = resolveFinancialClock({ownerSub,customerId:s.customerId,stage:cfg.stage,accountId:cfg.accountId,
+          liveMode:cfg.liveMode,now:now(),reference:s.testClock,providerTestClockId:snapshot.customer.testClockId ?? null}, mirror);
+        // No covering period can match NaN; blocked simulation never uses wall time.
+        const financialNow = clock.mode === 'blocked' ? Number.NaN : clock.now;
+        if (clock.mode === 'blocked') reasons.add('test_clock_unavailable');
+        const fresh = snapshot.invoices.map((i) => receipt(ownerSub, i, snapshot.subscriptions.find((sub) => sub.id === i.subscriptionId), termsBySub.get(i.subscriptionId), financialNow, now())).filter((i): i is InvoiceReceipt => !!i);
+        if (clock.mode === 'blocked') for (const i of fresh) {i.valid=false;i.reviewReasons.push('test_clock_unavailable');}
         const paymentOwners = new Map<string, string>();
         for (const i of fresh) for (const payment of [...i.paymentIds.map((v) => `payment:${v}`), ...i.chargeIds.map((v) => `charge:${v}`)]) {
           const other = paymentOwners.get(payment);
@@ -97,9 +108,9 @@ export class BillingProjector {
         const all = [...known.values()];
         // A gap is never filled by adding days to event receipt time.
         const identitySafe = !reasons.has('customer_configuration') && !reasons.has('customer_mapping') && !reasons.has('subscription_mapping');
-        const current = identitySafe ? all.filter((i) => i.valid && i.start <= now() && i.end > now()).sort((a, b) => b.end - a.end)[0] : undefined;
+        const current = identitySafe ? all.filter((i) => i.valid && i.start <= financialNow && i.end > financialNow).sort((a, b) => b.end - a.end)[0] : undefined;
         const last = [...all].filter((i) => i.valid).sort((a, b) => b.end - a.end)[0];
-        const disputed = all.find((i) => i.suspended && i.start <= now() && i.end > now());
+        const disputed = all.find((i) => i.suspended && i.start <= financialNow && i.end > financialNow);
         const selectedSub = active[0] ?? snapshot.subscriptions.find((sub) => sub.id === current?.subscriptionId) ?? snapshot.subscriptions.find((sub) => sub.id === last?.subscriptionId);
         const stops = snapshot.invoices.filter((i) => i.disputes.length > 0).map((i) => ({ subscriptionId: i.subscriptionId, operationId: `dispute:${digest([cfg.stage, cfg.accountId, i.subscriptionId])}`, cancellation: 'immediate' as const, invoiceNow: false as const, prorate: false as const }));
         const renewalStops = [...new Map([...(s.renewalStops ?? []), ...stops].map((v) => [v.subscriptionId, v])).values()];
@@ -117,15 +128,16 @@ export class BillingProjector {
         // final covering receipt, normalized source, state and audit still commit together.
         while (historical.length + mappings.length + covering.length > 75) {
           const invoices = historical.splice(0, 35), pageMappings = mappings.splice(0, 35);
-          const next = { ...s, revision: s.revision + 1, updatedAt: now(), nextReconcileAt: now() };
-          if (!await r.commit({ expectedRevision: s.revision, state: next, guard: 'none', invoices, mappings: pageMappings, lease: { ...lease, now: now() }, auditAction: 'billing.history_checkpoint' })) throw new BillingError('BILLING_REVISION_CONFLICT');
+          const next = { ...s, ...(clock.mode !== 'real' ? {testClock:clock.reference} : {}), revision: s.revision + 1, updatedAt: now(), nextReconcileAt: now() };
+          if (!await r.commit({ expectedRevision: s.revision, state: next, guard: 'none', invoices, mappings: pageMappings, ...(clockObserved ? {clockObservation:{item:mirror}} : {}), lease: { ...lease, now: now() }, auditAction: 'billing.history_checkpoint' })) throw new BillingError('BILLING_REVISION_CONFLICT');
           s = next;
         }
         const activeCommandId = active.length || current ? undefined : s.activeCommandId;
         const state: BillingState = { ...s, historyPending: false, revision: Math.max(s.revision, projectionRevision) + 1, state: closed ? 'closed' : reasons.size ? 'payment_review' : current ? selectedSub?.cancelAtPeriodEnd ? 'cancel_at_period_end' : selectedSub?.status === 'past_due' || selectedSub?.status === 'unpaid' ? 'past_due' : 'active' : selectedSub && ['past_due', 'unpaid'].includes(selectedSub.status) ? 'past_due' : all.length ? 'expired' : s.activeCommandId ? 'checkout_pending' : 'none', paidThrough: current?.end ?? last?.end ?? null, interval: current?.interval ?? last?.interval ?? selectedSub?.interval ?? null, cancelAtPeriodEnd: selectedSub?.cancelAtPeriodEnd ?? false, subscriptionId: active[0]?.id, activeCommandId, reviewReasons: [...reasons], nextReconcileAt: now() + (activeCommandId && !closed ? 60_000 : 900_000), updatedAt: now(), ...(closed ? { closedAt: s.closedAt ?? now() } : {}), ...(original ? { firstPaidAt: original.firstPaidAt, protectedPriceUntil: original.protectedPriceUntil } : {}), priceBindings: [...bindings.values()], renewalStops };
         const coveredSub = snapshot.subscriptions.find((v) => v.id === current?.subscriptionId);
         const source: SubscriptionSourceItem | undefined = closed ? undefined : { ...subscriptionSourceKey(ownerSub), entityType: 'SubscriptionSource', ownerSub, sourceId: individualSourceId(cfg, ownerSub, current?.subscriptionId ?? disputed?.subscriptionId ?? last?.subscriptionId ?? selectedSub?.id ?? 'unfunded'), state: current ? coveredSub?.cancelAtPeriodEnd ? 'scheduled_end' : 'active' : 'ended', paidThrough: current?.end ?? disputed?.end ?? last?.end ?? 0, graceUntil: null, revision: state.revision, updatedAt: now() };
-        const committed = await r.commit({ expectedRevision: s.revision, state, guard: 'none', source, invoices: [...historical, ...covering], mappings, lease: { ...lease, now: now() }, auditAction: closed ? 'billing.closed_event_observed' : reasons.size ? 'billing.payment_review' : 'billing.financial_projected' });
+        if (clock.mode !== 'real') {state.testClock=clock.reference;if (source) Object.assign(source,{testClock:clock.reference});}
+        const committed = await r.commit({ expectedRevision: s.revision, state, guard: 'none', source, ...(clockObserved ? {clockObservation:{item:mirror}} : {}), invoices: [...historical, ...covering], mappings, lease: { ...lease, now: now() }, auditAction: closed ? 'billing.closed_event_observed' : reasons.size ? 'billing.payment_review' : 'billing.financial_projected' });
         if (!committed) { if (attempt === 1) throw new BillingError('BILLING_REVISION_CONFLICT'); continue; }
         // Suspension and its exact pending cancellation command are durable before Stripe mutation.
         for (const stop of renewalStops) {

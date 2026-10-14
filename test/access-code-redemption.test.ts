@@ -135,6 +135,15 @@ function expectApiError(error: unknown, code: string): void {
 
 describe('AccessCodeRedeemer', () => {
   beforeEach(() => vi.restoreAllMocks());
+  it('fences a protected clock observation when issuing a real-time sponsored grant',async()=>{
+    const testClock={ownerSub:OWNER,clockRevision:2};
+    const {redeemer,proposals}=makeDeps({readAccountSnapshot:async()=>account({testClock,testClockObserved:true,billingStage:'dev'})});
+    const access=await redeem(redeemer);
+    expect(access.effectivePlanKey).toBe('premium');
+    expect(access.offlineValidUntil).toBe(NOW);
+    expect(proposals[0].paidSources?.testClock).toEqual(testClock);
+    expect(proposals[0].paidSources?.testClockObserved).toBe(true);
+  });
 
   it('preserves paid family access when adding a sponsored grant', async () => {
     const coverage = createCoverageAssignment({ householdId: 'household-a', accountId: OWNER, seatType: 'primary_responsible', paidThrough: NOW + 60_000, now: NOW - 1_000 });

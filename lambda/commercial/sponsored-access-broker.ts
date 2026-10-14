@@ -558,7 +558,9 @@ export class SponsoredAccessBroker {
       expectedAccessRevision: access.revision,
       grant: next,
       access: nextAccess,
-      paidSources: { ...(snapshot.subscription ? { subscription: snapshot.subscription } : {}),
+      paidSources: { ...(snapshot.testClockObserved ? {testClockObserved:true as const} : {}),
+        ...(snapshot.testClock !== undefined ? {testClock:snapshot.testClock} : {}),
+        ...(snapshot.subscription ? { subscription: snapshot.subscription } : {}),
         ...(snapshot.coverage ? { coverage: snapshot.coverage } : {}) },
       commandItem: item,
       audit: audit(context, {

@@ -8,7 +8,7 @@ import { BillingClosure } from '../lambda/billing/closure';
 import { config, fixture, NOW, request } from './support/billing-fixture';
 import { INTEGRATION, STRIPE_API_VERSION, type StripeEventEnvelope } from '../lambda/billing/model';
 
-function history(subscriptionCount = 65) {
+function history(subscriptionCount = 65, testClock = false) {
   let clock = NOW;
   const metadata = { integration: INTEGRATION, stage: 'dev', owner: 'adult', operation: 'op_1' };
   const subscriptions = Array.from({ length: subscriptionCount }, (_, n) => ({ id: n ? `sub_${n}` : 'sub_current', customer: 'cus_1', livemode: false, metadata, status: n ? 'canceled' : 'active', automatic_tax: { enabled: false }, default_tax_rates: [{ id: config.taxRateId, inclusive: true, country: 'MX' }], pause_collection: null, discounts: [], collection_method: 'charge_automatically', cancel_at_period_end: false, trial_start: null, trial_end: null, items: { data: [{ quantity: 1, price: { id: config.monthlyPriceId, product: config.productId, currency: 'mxn', tax_behavior: 'inclusive', recurring: { interval: 'month', interval_count: 1, usage_type: 'licensed' } } }], has_more: false } }));
@@ -22,7 +22,7 @@ function history(subscriptionCount = 65) {
     const data = all.slice(from, from + (p.limit ?? 100)); return { data, has_more: from + data.length < all.length };
   };
   const sdk = {
-    customers: { retrieve: vi.fn(async () => ({ id: 'cus_1', livemode: false, address: { country: 'MX' }, metadata })) },
+    customers: { retrieve: vi.fn(async () => ({ id: 'cus_1', livemode: false, address: { country: 'MX' }, metadata, ...(testClock ? {test_clock:'clock_simulated'} : {}) })) },
     subscriptions: { list: vi.fn(async (p) => page(subscriptions, p)), retrieve: vi.fn(async (id: string) => subscriptions.find((v) => v.id === id)) },
     invoices: { list: vi.fn(async (p) => page(invoices, p)), retrieve: vi.fn(async (id: string) => invoices.find((v) => v.id === id)) },
     invoicePayments: { list: vi.fn(async (p) => { const invoice = p.invoice ?? p.payment?.payment_intent?.slice(3); return { data: [{ id: `ip_${invoice}`, invoice, livemode: false, status: 'paid', amount_paid: 9900, currency: 'mxn', payment: { type: 'payment_intent', payment_intent: { id: `pi_${invoice}`, status: 'succeeded', livemode: false, currency: 'mxn', amount_received: 9900, customer: 'cus_1', latest_charge: charge(invoice) } } }], has_more: false }; }) },
@@ -34,6 +34,16 @@ function history(subscriptionCount = 65) {
 const envelope = (objectId: string, objectType = 'refund'): StripeEventEnvelope => ({ eventId: 'evt_old', type: 'refund.updated', objectId, objectType, accountId: config.accountId, liveMode: false, apiVersion: STRIPE_API_VERSION, status: 'pending', attempts: 0, receivedAt: NOW, nextAttemptAt: NOW });
 
 describe('durable Stripe customer history pagination', () => {
+  it('refreshes virtual periods and discovers new clock invoices without a wall-time created filter', async () => {
+    const h = history(1, true), repository = new MemoryBillingRepository();
+    const provider = new StripeBillingProvider(config, h.sdk, {repository,now:h.now});
+    expect((await provider.snapshot('cus_1')).customer.testClockId).toBe('clock_simulated');
+    h.refunded.add('in_134');
+    h.invoices.push({...structuredClone(h.invoices[0]),id:'in_simulated_renewal'});
+    const later = await provider.snapshot('cus_1');
+    expect(later.invoices.find(i=>i.id === 'in_134')?.refunds).toHaveLength(1);
+    expect(later.invoices.some(i=>i.id === 'in_simulated_renewal')).toBe(true);
+  });
   it('resumes more than60 objects from persisted pages across new provider instances instead of entering permanent review', async () => {
     const h = history(), repository = new MemoryBillingRepository(); let pending = 0, result;
     for (let n = 0; n < 200; n++) {

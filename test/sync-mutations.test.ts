@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
@@ -29,6 +29,7 @@ import { installFamilyV2Reads } from './support/family-v2-reads';
 const NOW = 1_800_000_000_000;
 const OWNER = 'rocio';
 const ddbMock = mockClient(DynamoDBDocumentClient);
+afterEach(()=>vi.unstubAllEnvs());
 
 function transactionCanceled(codes: readonly string[]): Error {
   return Object.assign(new Error('transaction cancelled'), {
@@ -916,7 +917,10 @@ describe('sync mutation groups v2', () => {
     });
   });
 
-  it('keeps the maximum self group at 48 unique transaction keys including paid sources', async () => {
+  it.each([false,true])('bounds the maximum self group including paid sources with simulation=%s', async (simulation) => {
+    if (simulation) vi.stubEnv('COMMERCIAL_STAGE','dev');
+    const reference={ownerSub:OWNER,customerId:'cus_clock',testClockId:'clock_qa',bindingId:'binding-qa',stage:'dev',
+      stripeAccountId:'acct_qa',syntheticFixture:'stripe_clock_dev_sync',clockRevision:1,frozenTimeSeconds:NOW/1000};
     const stored: RecordItem[] = [];
     const records = Array.from({ length: 20 }, (_, index) => {
       const treeId = `max-tree-${index}`;
@@ -934,6 +938,13 @@ describe('sync mutation groups v2', () => {
       const key = input.Key as { pk: string; sk: string };
       if (key.pk === 'COMMERCIAL#CONFIG' && key.sk === 'FLAGS') return { Item: rawFlags() };
       if (key.pk === K.user(OWNER) && key.sk === 'PROFILE') return { Item: profile() };
+      if (simulation && key.pk === K.user(OWNER) && key.sk === 'BILLING#TEST_CLOCK') return {
+        Item:{...key,ownerSub:OWNER,clockRevision:1},
+      };
+      if (simulation && key.pk === K.user(OWNER) && key.sk === 'SUBSCRIPTION#INDIVIDUAL') return {
+        Item:{...key,ownerSub:OWNER,entityType:'SubscriptionSource',sourceId:'qa-bound',state:'ended',paidThrough:0,graceUntil:null,
+          revision:1,updatedAt:NOW,testClock:reference},
+      };
       if (key.pk === K.user(OWNER) && key.sk === 'USAGE') {
         return {
           Item: {
@@ -959,13 +970,13 @@ describe('sync mutation groups v2', () => {
     });
 
     const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems ?? [];
-    expect(items).toHaveLength(48);
+    expect(items).toHaveLength(simulation ? 49 : 48);
     const keys = items.map((item) => {
       const operation = item.Put ?? item.Update ?? item.ConditionCheck;
       const key = operation && ('Key' in operation ? operation.Key : operation.Item);
       return `${String(key?.['pk'])}\u0000${String(key?.['sk'])}`;
     });
-    expect(new Set(keys).size).toBe(48);
+    expect(new Set(keys).size).toBe(simulation ? 49 : 48);
     expect(
       items.filter((item) =>
         String(item.Update?.Key?.['sk']).startsWith('USAGE#TREE#'),

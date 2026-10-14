@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { individualBillingPrices } from '../../shared/api/contracts';
 import type { SubscriptionSourceItem } from '../commercial/model';
 import type { PurchaseAdmission } from './admission';
+import type { BillingClockReference } from './clock';
 
 export const STRIPE_API_VERSION = '2026-09-30.endive' as const;
 export const INTEGRATION = 'roadmap2u_individual_v1';
@@ -22,6 +23,7 @@ export interface BillingActor {
   declarationHash?: string; email?: string; closing?: boolean;
 }
 export interface BillingState {
+  testClock?: BillingClockReference;
   ownerSub: string; revision: number; state: BillingStateName; interval: Interval | null;
   paidThrough: number | null; cancelAtPeriodEnd: boolean; customerId?: string;
   subscriptionId?: string; activeCommandId?: string; reviewReasons: string[];
@@ -57,7 +59,7 @@ export interface BillingCommand {
   priceTerms?: ReservedPriceTerms;
   recoveryEvidence?: { checkedAt: number; accountId: string; stage: string; reason: string; sessionIds: string[]; subscriptionIds: string[]; invoiceIds: string[] };
 }
-export interface ProviderCustomer { id: string; ownerSub: string; operationId: string; liveMode: boolean; country: string | null }
+export interface ProviderCustomer { id: string; ownerSub: string; operationId: string; liveMode: boolean; country: string | null; testClockId?: string }
 export interface ProviderCheckout {
   id: string; customerId: string; operationId: string; ownerSub: string;
   url: string | null; status: 'open' | 'complete' | 'expired'; expiresAt: number; subscriptionId: string | null;
@@ -98,6 +100,7 @@ export interface StripeEventEnvelope {
   receivedAt: number; nextAttemptAt: number; processedAt?: number;
 }
 export interface BillingCommit {
+  clockObservation?: { item: unknown };
   expectedRevision: number; state: BillingState; guard: 'adult' | 'open' | 'closure' | 'none';
   actor?: BillingActor; command?: BillingCommand; commandAbsent?: boolean;
   invoices?: InvoiceReceipt[]; source?: SubscriptionSourceItem;
@@ -107,6 +110,7 @@ export interface BillingCommit {
 }
 export interface BillingPage<T> { items: T[]; cursor?: Record<string, unknown>; itemCursors?: Record<string, unknown>[] }
 export interface BillingRepository {
+  readTestClock(ownerSub: string): Promise<unknown>;
   actor(ownerSub: string, emailVerified?: boolean): Promise<BillingActor | null>;
   load(ownerSub: string): Promise<BillingState>;
   command(ownerSub: string, commandId: string): Promise<BillingCommand | null>;
