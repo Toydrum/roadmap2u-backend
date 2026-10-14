@@ -7,6 +7,9 @@ import { prepareClockInstallTransaction, type ClockInstallRequest } from './stri
 import { prepareClockTransitionTransaction, type ClockTransitionRequest } from './stripe-test-clock-transition';
 import type { PreparedClockEvidence } from './stripe-test-clock-evidence';
 import { resolveFinancialClock, TEST_CLOCK_EVIDENCE_MAX_AGE_MS } from '../lambda/billing/clock';
+import { STRIPE_API_VERSION } from '../lambda/billing/model';
+
+export const CLOCK_ADVANCE_FENCE_MAX_AGE_MS = 2 * 60_000;
 
 export type ClockJournalRequest = ClockInstallRequest | ClockTransitionRequest;
 interface JournalScope {
@@ -73,7 +76,7 @@ function assertPlan(plan:PreparedClockJournal):void {
     && isDeepStrictEqual(plan.expectedItems,derived.expectedItems) && i.phase===plan.evidence.kind
     && plan.expectedItems.some(item=>isDeepStrictEqual(item,plan.evidence.mirror)),'PLAN_MISMATCH');
 }
-function journalPath(directory:string,intent:ClockJournalIntent,kind:'intent'|'delivery'|'readback'){return join(realpathSync(directory),`${intent.reservationId}.${kind}.json`);}
+function journalPath(directory:string,intent:ClockJournalIntent,kind:'intent'|'delivery'|'readback'|'provider-advance-intent'|'provider-advance-result'){return join(realpathSync(directory),`${intent.reservationId}.${kind}.json`);}
 function exclusive(file:string,value:unknown):string {
   const fd=openSync(file,'wx',0o600);
   try{writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fsyncSync(fd);}finally{closeSync(fd);}
@@ -119,4 +122,40 @@ export function recordClockReadback(directory:string,plan:PreparedClockJournal,o
   requireCondition(record(observation) && timestamp(observation.realNow) && observation.realNow>=plan.intent.reservedAt,'RESULT_TIME_REQUIRED');
   return exclusive(journalPath(directory,plan.intent,'readback'),{schemaVersion:1,reservationId:plan.intent.reservationId,transactionSha256:plan.intent.transactionSha256,
     readbackSha256:plan.intent.readbackSha256,recordedAt:observation.realNow,...inspected});
+}
+/** Exact provider request data derived only from the pending fence; not physical authority. */
+export function prepareClockProviderAdvance(plan:PreparedClockJournal){
+  assertPlan(plan);const pending=plan.evidence.mirror.providerReadyEvidence;
+  requireCondition(plan.intent.phase==='advance_fence'&&pending.status==='advancing'&&pending.operationId===plan.intent.operationId,'ADVANCE_FENCE_REQUIRED');
+  const body=`frozen_time=${pending.targetFrozenTimeSeconds}`;
+  return{schemaVersion:1,reservationId:plan.intent.reservationId,transactionSha256:plan.intent.transactionSha256,readbackSha256:plan.intent.readbackSha256,
+    operationId:plan.intent.operationId,testClockId:plan.intent.scope.testClockId,priorFrozenTimeSeconds:plan.evidence.reference.frozenTimeSeconds,
+    targetFrozenTimeSeconds:pending.targetFrozenTimeSeconds,apiVersion:STRIPE_API_VERSION,bodySha256:createHash('sha256').update(body).digest('hex'),
+    body,idempotencyKey:'r2u-clock-advance-'+digest({reservation:plan.intent.reservationId,target:pending.targetFrozenTimeSeconds}).slice(0,48)};
+}
+/** Requires the real matching journal records, never a caller-supplied verified flag. */
+export function assertVerifiedClockFence(directory:string,plan:PreparedClockJournal,realNow:number):void {
+  prepareClockProviderAdvance(plan);assertSavedIntent(directory,plan);
+  const delivery=readReceipt(journalPath(directory,plan.intent,'delivery'));
+  requireCondition(record(delivery)&&isDeepStrictEqual(delivery,deliveryReceipt(plan,{delivery:delivery.delivery,recordedAt:delivery.recordedAt}))
+    &&['acknowledged','uncertain'].includes(delivery.delivery as string),'VERIFIED_FENCE_REQUIRED');
+  const r=readReceipt(journalPath(directory,plan.intent,'readback'));
+  requireCondition(record(r)&&isDeepStrictEqual(r,{schemaVersion:1,reservationId:plan.intent.reservationId,transactionSha256:plan.intent.transactionSha256,
+    readbackSha256:plan.intent.readbackSha256,recordedAt:r.recordedAt,status:'verified_applied',reason:'EXACT_ATOMIC_READBACK',clockReadable:false,retryAllowed:false,physicalExecutionAllowed:false}),'VERIFIED_FENCE_REQUIRED');
+  requireCondition(timestamp(realNow)&&timestamp(r.recordedAt)&&r.recordedAt>=plan.intent.reservedAt&&realNow>=r.recordedAt
+    &&realNow-r.recordedAt<CLOCK_ADVANCE_FENCE_MAX_AGE_MS&&realNow-plan.intent.reservedAt<TEST_CLOCK_EVIDENCE_MAX_AGE_MS,'FENCE_EXPIRED');
+}
+export function reserveClockProviderAdvance(directory:string,plan:PreparedClockJournal,realNow:number):string {
+  assertVerifiedClockFence(directory,plan,realNow);return exclusive(journalPath(directory,plan.intent,'provider-advance-intent'),{...prepareClockProviderAdvance(plan),reservedAt:realNow});
+}
+export function assertClockProviderAdvanceReservation(directory:string,plan:PreparedClockJournal,realNow:number):void {
+  const descriptor=prepareClockProviderAdvance(plan),saved=readReceipt(journalPath(directory,plan.intent,'provider-advance-intent'));
+  requireCondition(record(saved)&&timestamp(saved.reservedAt)&&saved.reservedAt>=plan.intent.reservedAt&&timestamp(realNow)&&realNow>=saved.reservedAt
+    &&isDeepStrictEqual(saved,{...descriptor,reservedAt:saved.reservedAt}),'PROVIDER_INTENT_MISMATCH');
+}
+export function recordClockProviderAdvanceResult(directory:string,plan:PreparedClockJournal,result:{status:'advance_acknowledged'|'uncertain';recordedAt:number}):string {
+  assertClockProviderAdvanceReservation(directory,plan,result.recordedAt);const descriptor=prepareClockProviderAdvance(plan);
+  requireCondition(Object.keys(result).length===2&&['advance_acknowledged','uncertain'].includes(result.status)&&timestamp(result.recordedAt),'PROVIDER_RESULT_INVALID');
+  return exclusive(journalPath(directory,plan.intent,'provider-advance-result'),{schemaVersion:1,reservationId:plan.intent.reservationId,transactionSha256:plan.intent.transactionSha256,
+    targetFrozenTimeSeconds:descriptor.targetFrozenTimeSeconds,status:result.status,recordedAt:result.recordedAt,retryAllowed:false,readyEvidencePublished:false,physicalAuthorizationChecked:false});
 }
