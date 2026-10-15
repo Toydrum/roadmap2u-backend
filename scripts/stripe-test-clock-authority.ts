@@ -19,6 +19,7 @@ export interface ClockCallerManifest {
   clock: Pick<ClockPublisherContext, 'ownerSub' | 'scope'>; storage: ClockStorageScope; expectedCallerArn: string;
   cloudformation: { stackName: string; stackId: string; resources: ClockOwnershipResource[] };
   journal?: { directory: string; directoryId: string; aclSha256: string };
+  runtime?: { powershellExecutable: string; powershellSha256: string; caBundleSha256: string };
 }
 export interface ClockCallerAuthority {
   readonly stage: string; readonly sourceSha: string; readonly manifestSha256: string; readonly operationId: string;
@@ -28,7 +29,8 @@ export interface ClockCallerAuthority {
   readonly physicalExecutionAllowed: false; readonly verifiedAt: number; readonly expiresAt: number;
 }
 interface BoundAuthority { manifest: ClockCallerManifest; plan: PreparedClockJournal; verifiedAt: number; expiresAt: number; consumptionKey: string;
-  attemptReservationId: string; callIdSha256: string; issuedAt: number; approvedRootCommit: string }
+  attemptReservationId: string; callIdSha256: string; issuedAt: number; approvedRootCommit: string; request: ClockJournalRequest;
+  source: { sourceRoot: string; selfFile: string; selfPath: string; reviewRoot: string; manifestPath: string } }
 export interface DurableClockCallerAttempt {
   readonly sourceSha: string; readonly manifestSha256: string; readonly operationId: string;
   readonly reservedAt: number; readonly physicalExecutionAllowed: false;
@@ -74,7 +76,15 @@ function git(root: string, args: string[], bytes = false): string | Buffer {
 function validateManifest(raw: unknown, now: number): ClockCallerManifest {
   const m = parse(raw);
   const nativeJournal = record(m) && Object.hasOwn(m, 'journal');
-  keys(m, ['schemaVersion', 'sourceSha', 'operationId', 'phase', 'clock', 'storage', 'expectedCallerArn', 'cloudformation', 'requestSha256', 'targetFrozenTimeSeconds', ...(nativeJournal ? ['journal'] : [])]);
+  const runtime = record(m) && Object.hasOwn(m, 'runtime');
+  keys(m, ['schemaVersion', 'sourceSha', 'operationId', 'phase', 'clock', 'storage', 'expectedCallerArn', 'cloudformation', 'requestSha256', 'targetFrozenTimeSeconds', ...(nativeJournal ? ['journal'] : []), ...(runtime ? ['runtime'] : [])]);
+  if (runtime) {
+    keys(m.runtime, ['powershellExecutable', 'powershellSha256', 'caBundleSha256']);
+    requireCondition(typeof m.runtime.powershellExecutable === 'string' && /^[A-Za-z]:[\\/]/.test(m.runtime.powershellExecutable) &&
+      m.runtime.powershellExecutable.length <= 240 && !/[<>:"|?*\x00-\x1f]/.test(m.runtime.powershellExecutable.slice(2)) &&
+      typeof m.runtime.powershellSha256 === 'string' && /^[a-f0-9]{64}$/.test(m.runtime.powershellSha256) &&
+      typeof m.runtime.caBundleSha256 === 'string' && /^[a-f0-9]{64}$/.test(m.runtime.caBundleSha256), 'RUNTIME_BINDING_REJECTED');
+  }
   if (nativeJournal) {
     keys(m.journal, ['directory', 'directoryId', 'aclSha256']);
     requireCondition(typeof m.journal.directory === 'string' && /^[A-Za-z]:[\\/]/.test(m.journal.directory) &&
@@ -165,7 +175,8 @@ export async function verifyClockCallerAuthority(options: {
     authorities.set(authority, { manifest: m, plan: structuredClone(plan), verifiedAt: finished, expiresAt: receipt.expiresAt,
       consumptionKey: digest(JSON.stringify([receipt.callId, receipt.approvedRootCommit, hash])),
       attemptReservationId: digest(JSON.stringify(['clock-caller-attempt-v1', receipt.callId])), callIdSha256: digest(receipt.callId),
-      issuedAt: receipt.issuedAt, approvedRootCommit: receipt.approvedRootCommit });
+      issuedAt: receipt.issuedAt, approvedRootCommit: receipt.approvedRootCommit, request: structuredClone(request) as unknown as ClockJournalRequest,
+      source: { sourceRoot, selfFile, selfPath, reviewRoot, manifestPath } });
     return authority;
   } catch (error) {
     const code = error instanceof Error && /^CLOCK_AUTHORITY_[A-Z_]+$/.test(error.message) ? error.message : 'CLOCK_AUTHORITY_VERIFICATION_FAILED';
@@ -182,6 +193,36 @@ export function readClockCallerAuthority(value: ClockCallerAuthority, now: numbe
 export function readClockCallerPlan(value: ClockCallerAuthority, now: number): PreparedClockJournal {
   readClockCallerAuthority(value, now);
   return structuredClone(authorities.get(value)!.plan);
+}
+/** The private request already verified from exact approved bytes; no replacement input. */
+export function readClockCallerRequest(value: ClockCallerAuthority, now: number): ClockJournalRequest {
+  readClockCallerAuthority(value, now); return structuredClone(authorities.get(value)!.request);
+}
+/** Revalidate actual source/review state immediately before external delegation.
+ * A native sidecar must also be a regular tracked file with the committed bytes. */
+export function assertClockCallerSource(value: ClockCallerAuthority, now: number, sidecar?: { file: string; sha256: string }): void {
+  try {
+    readClockCallerAuthority(value, now);
+    const bound = authorities.get(value)!, s = bound.source;
+    requireCondition(git(s.sourceRoot, ['rev-parse','HEAD']) === value.sourceSha &&
+      git(s.sourceRoot, ['remote','get-url','origin']) === 'https://github.com/Toydrum/roadmap2u-backend.git' &&
+      git(s.sourceRoot, ['status','--porcelain','--untracked-files=normal']) === '', 'SOURCE_CHANGED');
+    const committed = (file: string, path: string) => {
+      git(s.sourceRoot, ['ls-files','--error-unmatch','--',path]);
+      const raw = regularBytes(file, 2 * 1024 * 1024), actual = new TextDecoder('utf-8',{fatal:true}).decode(raw).replaceAll('\r\n','\n');
+      const blob = git(s.sourceRoot,['show','HEAD:'+path],true) as Buffer;
+      requireCondition(blob.equals(raw) || blob.equals(Buffer.from(actual)), 'SOURCE_CHANGED');
+    };
+    committed(s.selfFile, s.selfPath);
+    if (sidecar) {
+      requireCondition(/^[a-f0-9]{64}$/.test(sidecar.sha256), 'SOURCE_CHANGED');
+      const file = realpathSync(sidecar.file), path = inside(s.sourceRoot,file);
+      requireCondition(digest(regularBytes(file)) === sidecar.sha256, 'SOURCE_CHANGED'); committed(file,path);
+    }
+    requireCondition(digest(regularBytes(resolve(s.reviewRoot,s.manifestPath))) === value.manifestSha256, 'SOURCE_CHANGED');
+    git(s.reviewRoot,['merge-base','--is-ancestor',bound.approvedRootCommit,'HEAD']);
+    requireCondition(digest(git(s.reviewRoot,['show',bound.approvedRootCommit+':'+s.manifestPath],true) as Buffer) === value.manifestSha256, 'SOURCE_CHANGED');
+  } catch { throw Error('CLOCK_AUTHORITY_SOURCE_CHANGED'); }
 }
 /** The same receipt cannot start a second ownership read in this process, even
  * when another authority object was verified from its original bytes. */

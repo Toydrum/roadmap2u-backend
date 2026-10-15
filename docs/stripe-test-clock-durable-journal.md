@@ -67,7 +67,8 @@ atomic readbacks for all five kinds, without sending AWS or Stripe requests.
 Non-Windows runners skip native cases and test the explicit rejection instead;
 their results cannot certify Windows storage.
 
-The full caller/CLI, permissions checks, bounded recovery and temporal PWA
-acceptance remain pending. The separate approval-attempt component requires an
+The [caller engine](stripe-test-clock-caller.md) requires this native capability;
+physical adapters/CLI, permissions, bounded recovery and temporal PWA acceptance
+remain pending. The separate approval-attempt component requires an
 actual bound human response; storage and a persisted fence alone never grant
 financial execution authority.

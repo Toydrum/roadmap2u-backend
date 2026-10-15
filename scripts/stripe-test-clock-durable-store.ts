@@ -65,6 +65,13 @@ export function openDurableClockJournal(input:DurableClockJournalConfig):Durable
 export function assertDurableClockJournal(value:unknown):asserts value is DurableClockJournal{
  if(!value||typeof value!=='object'||!bindings.has(value))fail('CAPABILITY_REQUIRED');
 }
+/** Public program metadata from the opaque binding, never a caller-provided copy. */
+export function readDurableClockJournalProgram(store:DurableClockJournal){
+ assertDurableClockJournal(store);const binding=bindings.get(store)!;
+ if(regularHash(binding.helper)!==binding.helperSha256||regularHash(binding.powershellExecutable)!==binding.powershellSha256)fail('PROGRAM_CHANGED');
+ return Object.freeze({powershellExecutable:binding.powershellExecutable,powershellSha256:binding.powershellSha256,
+  helperPath:binding.helper,helperSha256:binding.helperSha256});
+}
 export function durableClockJournalPath(store:DurableClockJournal,filename:string):string{
  assertDurableClockJournal(store);if(!FILE.test(filename))fail('FILENAME_REJECTED');return join(store.directory,filename);
 }

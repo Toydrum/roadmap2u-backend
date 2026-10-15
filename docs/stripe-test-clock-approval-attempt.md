@@ -35,7 +35,8 @@ responses, native NTFS directories and simulated ownership responses. Separate
 Node processes verify the same source/receipt and compete through the actual
 native journal. They never resolve real credentials or call AWS/Stripe.
 
-Full caller/CLI composition, permissions, recovery, the operation fence and all
-fresh remote business/provider checks remain mandatory before any physical
-write. This component alone does not close temporal PWA, DEV/TEST or production
-acceptance.
+The [complete caller engine](stripe-test-clock-caller.md) carries this same
+attempt into ownership, fresh AWS/Stripe observations and the existing fenced
+writers. Physical CLI/TLS adapters, permissions and bounded recovery remain
+pending. This component alone does not close temporal PWA, DEV/TEST or
+production acceptance.

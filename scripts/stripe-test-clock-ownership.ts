@@ -15,7 +15,7 @@ export interface ClockOwnershipOptions {
   runCli?: ClockOwnershipCli; requestTimeoutMs?: number;
 }
 const nativeExec = promisify(execFile);
-const nativeCli: ClockOwnershipCli = async (args, options) => {
+export const nativeClockOwnershipCli: ClockOwnershipCli = async (args, options) => {
   const result = await nativeExec('aws', [...args], { ...options, encoding: 'buffer', maxBuffer: 2 * 1024 * 1024, windowsHide: true });
   return result.stdout;
 };
@@ -31,7 +31,7 @@ function regular(file: string) {
  * there is no profile discovery, secret lookup, role assumption or write command. */
 export function prepareClockOwnershipObserver(options: ClockOwnershipOptions) {
   try {
-    const authority = options.authority, now = options.now, reserve = options.reserveWire, run = options.runCli ?? nativeCli;
+    const authority = options.authority, now = options.now, reserve = options.reserveWire, run = options.runCli ?? nativeClockOwnershipCli;
     requireCondition(typeof now === 'function' && typeof reserve === 'function' && typeof run === 'function', 'DEPENDENCIES_REQUIRED');
     const preparedAt = now(), manifest = readClockCallerAuthority(authority, preparedAt), supplied = options.credentials;
     requireCondition(supplied && typeof supplied.accessKeyId === 'string' && /^ASIA[A-Z0-9]{16}$/.test(supplied.accessKeyId) &&
@@ -125,10 +125,10 @@ export function prepareClockOwnershipObserver(options: ClockOwnershipOptions) {
 }
 /** Composition boundary for a future physical caller. No credential discovery,
  * automatic continuation or writes are introduced by this wrapper. */
-export function prepareDurableClockOwnershipObserver(options: ClockOwnershipOptions & { journalDirectory: DurableClockJournal }) {
+export function prepareDurableClockOwnershipObserver(options: ClockOwnershipOptions & { journalDirectory: DurableClockJournal; attempt?: DurableClockCallerAttempt }) {
   const journal = options.journalDirectory, authority = options.authority, now = options.now, reserve = options.reserveWire;
   assertDurableClockJournal(journal);
-  let attempt: DurableClockCallerAttempt | undefined;
+  let attempt: DurableClockCallerAttempt | undefined = options.attempt;
   const reader = prepareClockOwnershipObserver({ ...options, reserveWire: kind => {
     requireCondition(attempt, 'DURABLE_ATTEMPT_REQUIRED');
     assertDurableClockCallerAttempt(attempt, authority, journal, now());
@@ -137,7 +137,7 @@ export function prepareDurableClockOwnershipObserver(options: ClockOwnershipOpti
   let consumed = false;
   return { preview: reader.preview, counts: reader.counts, async observe() {
     requireCondition(!consumed, 'ALREADY_CONSUMED'); consumed = true;
-    attempt = reserveDurableClockCallerAttempt(authority, journal, now());
+    if (!attempt) attempt = reserveDurableClockCallerAttempt(authority, journal, now());
     assertDurableClockCallerAttempt(attempt, authority, journal, now());
     const result = await reader.observe();
     assertDurableClockCallerAttempt(attempt, authority, journal, now());
