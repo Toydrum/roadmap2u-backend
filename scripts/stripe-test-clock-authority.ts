@@ -8,6 +8,7 @@ import { selectClockPublisherFixture, type ClockPublisherContext } from './strip
 import type { ClockStorageScope } from './stripe-test-clock-install';
 import { prepareClockJournal, type ClockJournalRequest, type PreparedClockJournal } from './stripe-test-clock-journal';
 import { TEST_CLOCK_EVIDENCE_MAX_AGE_MS } from '../lambda/billing/clock';
+import { assertDurableClockJournal, writeDurableClockJournalFile, readDurableClockJournalFile, type DurableClockJournal } from './stripe-test-clock-durable-store';
 
 export interface ClockOwnershipResource {
   kind: 'app' | 'privacy' | 'pool'; logicalId: string; physicalId: string; resourceType: string;
@@ -17,6 +18,7 @@ export interface ClockCallerManifest {
   requestSha256: string; targetFrozenTimeSeconds: number | null;
   clock: Pick<ClockPublisherContext, 'ownerSub' | 'scope'>; storage: ClockStorageScope; expectedCallerArn: string;
   cloudformation: { stackName: string; stackId: string; resources: ClockOwnershipResource[] };
+  journal?: { directory: string; directoryId: string; aclSha256: string };
 }
 export interface ClockCallerAuthority {
   readonly stage: string; readonly sourceSha: string; readonly manifestSha256: string; readonly operationId: string;
@@ -25,8 +27,14 @@ export interface ClockCallerAuthority {
   readonly sourceShaVerified: true; readonly authorizationReceiptBound: true; readonly stackOwnershipVerified: false;
   readonly physicalExecutionAllowed: false; readonly verifiedAt: number; readonly expiresAt: number;
 }
-interface BoundAuthority { manifest: ClockCallerManifest; plan: PreparedClockJournal; verifiedAt: number; expiresAt: number; consumptionKey: string }
+interface BoundAuthority { manifest: ClockCallerManifest; plan: PreparedClockJournal; verifiedAt: number; expiresAt: number; consumptionKey: string;
+  attemptReservationId: string; callIdSha256: string; issuedAt: number; approvedRootCommit: string }
+export interface DurableClockCallerAttempt {
+  readonly sourceSha: string; readonly manifestSha256: string; readonly operationId: string;
+  readonly reservedAt: number; readonly physicalExecutionAllowed: false;
+}
 const authorities = new WeakMap<object, BoundAuthority>();
+const attempts = new WeakMap<object, { authority: ClockCallerAuthority; journal: DurableClockJournal; receipt: Record<string, unknown> }>();
 const ownershipUses = new Set<string>();
 const MAX_BYTES = 256 * 1024;
 function requireCondition(ok: unknown, reason: string): asserts ok { if (!ok) throw Error('CLOCK_AUTHORITY_' + reason); }
@@ -65,7 +73,15 @@ function git(root: string, args: string[], bytes = false): string | Buffer {
 }
 function validateManifest(raw: unknown, now: number): ClockCallerManifest {
   const m = parse(raw);
-  keys(m, ['schemaVersion', 'sourceSha', 'operationId', 'phase', 'clock', 'storage', 'expectedCallerArn', 'cloudformation', 'requestSha256', 'targetFrozenTimeSeconds']);
+  const nativeJournal = record(m) && Object.hasOwn(m, 'journal');
+  keys(m, ['schemaVersion', 'sourceSha', 'operationId', 'phase', 'clock', 'storage', 'expectedCallerArn', 'cloudformation', 'requestSha256', 'targetFrozenTimeSeconds', ...(nativeJournal ? ['journal'] : [])]);
+  if (nativeJournal) {
+    keys(m.journal, ['directory', 'directoryId', 'aclSha256']);
+    requireCondition(typeof m.journal.directory === 'string' && /^[A-Za-z]:[\\/]/.test(m.journal.directory) &&
+      m.journal.directory.length <= 240 && !/[<>:"|?*\x00-\x1f]/.test(m.journal.directory.slice(2)) &&
+      typeof m.journal.directoryId === 'string' && /^[a-f0-9]{64}$/.test(m.journal.directoryId) &&
+      typeof m.journal.aclSha256 === 'string' && /^[a-f0-9]{64}$/.test(m.journal.aclSha256), 'JOURNAL_BINDING_REJECTED');
+  }
   requireCondition(m.schemaVersion === 1 && typeof m.sourceSha === 'string' && /^[a-f0-9]{40}$/.test(m.sourceSha), 'SOURCE_REQUIRED');
   requireCondition(typeof m.operationId === 'string' && /^[A-Za-z0-9:_-]{8,128}$/.test(m.operationId) &&
     ['install', 'advance_fence', 'ready', 'refresh'].includes(m.phase as string), 'OPERATION_REJECTED');
@@ -100,7 +116,7 @@ function validateManifest(raw: unknown, now: number): ClockCallerManifest {
   return structuredClone(m) as unknown as ClockCallerManifest;
 }
 /** Checks a local direct-human receipt, not the identity of the person who produced it.
- * A future caller still needs a durable one-use reservation before writes. */
+ * Durable ownership use also requires reserveDurableClockCallerAttempt. */
 export async function verifyClockCallerAuthority(options: {
   manifestRaw: string; requestRaw: string; authorizationRaw: string; sourceRoot: string; reviewRoot: string; manifestPath: string; now: () => number;
 }): Promise<ClockCallerAuthority> {
@@ -147,7 +163,9 @@ export async function verifyClockCallerAuthority(options: {
       sourceShaVerified: true, authorizationReceiptBound: true, stackOwnershipVerified: false, physicalExecutionAllowed: false,
       verifiedAt: finished, expiresAt: receipt.expiresAt });
     authorities.set(authority, { manifest: m, plan: structuredClone(plan), verifiedAt: finished, expiresAt: receipt.expiresAt,
-      consumptionKey: digest(JSON.stringify([receipt.callId, receipt.approvedRootCommit, hash])) });
+      consumptionKey: digest(JSON.stringify([receipt.callId, receipt.approvedRootCommit, hash])),
+      attemptReservationId: digest(JSON.stringify(['clock-caller-attempt-v1', receipt.callId])), callIdSha256: digest(receipt.callId),
+      issuedAt: receipt.issuedAt, approvedRootCommit: receipt.approvedRootCommit });
     return authority;
   } catch (error) {
     const code = error instanceof Error && /^CLOCK_AUTHORITY_[A-Z_]+$/.test(error.message) ? error.message : 'CLOCK_AUTHORITY_VERIFICATION_FAILED';
@@ -172,4 +190,32 @@ export function claimClockOwnershipAuthority(value: ClockCallerAuthority, now: n
   const bound = authorities.get(value)!;
   requireCondition(!ownershipUses.has(bound.consumptionKey), 'OWNERSHIP_ALREADY_CONSUMED');
   ownershipUses.add(bound.consumptionKey);
+}
+/** Consumes the actual bound response in the reviewed native journal before any
+ * external delegation. Incomplete or uncertain reservations are never retried. */
+export function reserveDurableClockCallerAttempt(authority: ClockCallerAuthority, journal: DurableClockJournal, now: number): DurableClockCallerAttempt {
+  const manifest = readClockCallerAuthority(authority, now);
+  assertDurableClockJournal(journal);
+  requireCondition(manifest.journal && isDeepStrictEqual(manifest.journal,
+    { directory: journal.directory, directoryId: journal.directoryId, aclSha256: journal.aclSha256 }), 'JOURNAL_BINDING_REJECTED');
+  const bound = authorities.get(authority)!;
+  const receipt = { schemaVersion: 1, reservationId: bound.attemptReservationId, sourceSha: authority.sourceSha,
+    manifestSha256: authority.manifestSha256, requestSha256: authority.requestSha256, transactionSha256: authority.transactionSha256,
+    readbackSha256: authority.readbackSha256, operationId: authority.operationId, phase: authority.phase, stage: authority.stage,
+    approvedRootCommit: bound.approvedRootCommit, callIdSha256: bound.callIdSha256, issuedAt: bound.issuedAt,
+    expiresAt: bound.expiresAt, reservedAt: now, directoryId: journal.directoryId, aclSha256: journal.aclSha256,
+    status: 'reserved', retryAllowed: false, physicalExecutionAllowed: false };
+  writeDurableClockJournalFile(journal, bound.attemptReservationId + '.caller-attempt.json', receipt);
+  const attempt: DurableClockCallerAttempt = Object.freeze({ sourceSha: authority.sourceSha, manifestSha256: authority.manifestSha256,
+    operationId: authority.operationId, reservedAt: now, physicalExecutionAllowed: false });
+  attempts.set(attempt, { authority, journal, receipt });
+  return attempt;
+}
+/** Rechecks the real native receipt. The returned/copyable fields alone are not authority. */
+export function assertDurableClockCallerAttempt(value: DurableClockCallerAttempt, authority: ClockCallerAuthority, journal: DurableClockJournal, now: number): void {
+  const bound = value && attempts.get(value);
+  requireCondition(bound && bound.authority === authority && bound.journal === journal && stamp(now) && now >= value.reservedAt, 'ATTEMPT_REQUIRED');
+  readClockCallerAuthority(authority, now);
+  const saved = readDurableClockJournalFile(journal, bound.receipt.reservationId + '.caller-attempt.json');
+  requireCondition(isDeepStrictEqual(saved, bound.receipt), 'ATTEMPT_RECEIPT_CHANGED');
 }

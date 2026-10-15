@@ -3,7 +3,8 @@ import { promisify } from 'node:util';
 import { readFileSync, lstatSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import type { AwsCredentialIdentity } from '@smithy/types';
-import { readClockCallerAuthority, claimClockOwnershipAuthority, type ClockCallerAuthority } from './stripe-test-clock-authority';
+import { readClockCallerAuthority, claimClockOwnershipAuthority, reserveDurableClockCallerAttempt, assertDurableClockCallerAttempt, type ClockCallerAuthority, type DurableClockCallerAttempt } from './stripe-test-clock-authority';
+import { assertDurableClockJournal, type DurableClockJournal } from './stripe-test-clock-durable-store';
 
 export type ClockOwnershipReadKind = 'identity' | 'stack' | 'app' | 'privacy' | 'pool' | 'stack_after';
 interface CliOptions { env: NodeJS.ProcessEnv; timeout: number; signal: AbortSignal }
@@ -121,4 +122,25 @@ export function prepareClockOwnershipObserver(options: ClockOwnershipOptions) {
     const code = error instanceof Error && /^CLOCK_(?:OWNERSHIP|AUTHORITY)_[A-Z_]+$/.test(error.message) ? error.message : 'CLOCK_OWNERSHIP_PREPARATION_FAILED';
     throw Error(code);
   }
+}
+/** Composition boundary for a future physical caller. No credential discovery,
+ * automatic continuation or writes are introduced by this wrapper. */
+export function prepareDurableClockOwnershipObserver(options: ClockOwnershipOptions & { journalDirectory: DurableClockJournal }) {
+  const journal = options.journalDirectory, authority = options.authority, now = options.now, reserve = options.reserveWire;
+  assertDurableClockJournal(journal);
+  let attempt: DurableClockCallerAttempt | undefined;
+  const reader = prepareClockOwnershipObserver({ ...options, reserveWire: kind => {
+    requireCondition(attempt, 'DURABLE_ATTEMPT_REQUIRED');
+    assertDurableClockCallerAttempt(attempt, authority, journal, now());
+    return reserve(kind);
+  } });
+  let consumed = false;
+  return { preview: reader.preview, counts: reader.counts, async observe() {
+    requireCondition(!consumed, 'ALREADY_CONSUMED'); consumed = true;
+    attempt = reserveDurableClockCallerAttempt(authority, journal, now());
+    assertDurableClockCallerAttempt(attempt, authority, journal, now());
+    const result = await reader.observe();
+    assertDurableClockCallerAttempt(attempt, authority, journal, now());
+    return result;
+  } };
 }

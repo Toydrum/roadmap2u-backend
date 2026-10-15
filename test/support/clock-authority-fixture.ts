@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join, sep, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -24,7 +24,7 @@ function init(root: string) {
   git(root, ['config', 'user.email', 'clock-qa@example.invalid']);
   git(root, ['config', 'core.autocrlf', 'false']);
 }
-export async function authorityFixture(stage = 'dev', phase: 'install' | 'advance_fence' | 'ready' | 'refresh' = 'install') {
+export async function authorityFixture(stage = 'dev', phase: 'install' | 'advance_fence' | 'ready' | 'refresh' = 'install', nativeJournal = false) {
   const sourceFile = join(backendRoot, 'scripts/stripe-test-clock-authority.ts');
   const ownershipFile = join(backendRoot, 'scripts/stripe-test-clock-ownership.ts');
   // Missing implementation yields assertion failures, not an import/bundler error.
@@ -33,8 +33,15 @@ export async function authorityFixture(stage = 'dev', phase: 'install' | 'advanc
   const sourceRoot = join(root, 'source'), reviewRoot = join(root, 'review');
   init(sourceRoot); init(reviewRoot); mkdirSync(join(sourceRoot, 'scripts'));
   const bundle = join(sourceRoot, 'scripts/clock-caller.mjs');
-  buildSync({ stdin: { contents: "export * from './scripts/stripe-test-clock-authority'; export * from './scripts/stripe-test-clock-ownership';", resolveDir: backendRoot },
+  buildSync({ stdin: { contents: "export * from './scripts/stripe-test-clock-authority'; export * from './scripts/stripe-test-clock-ownership'; export * from './scripts/stripe-test-clock-durable-store';", resolveDir: backendRoot },
     outfile: bundle, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent' });
+  if (nativeJournal) {
+    writeFileSync(join(sourceRoot, 'scripts/stripe-test-clock-journal-windows.ps1'), readFileSync(join(backendRoot, 'scripts/stripe-test-clock-journal-windows.ps1')));
+    // Standalone Node children need the same existing dependencies as Vitest.
+    // Ignore only this owned junction; no install, download or dependency change.
+    writeFileSync(join(sourceRoot, '.gitignore'), 'node_modules/\n');
+    symlinkSync(realpathSync(join(backendRoot, 'node_modules')), join(sourceRoot, 'node_modules'), 'junction');
+  }
   git(sourceRoot, ['remote', 'add', 'origin', 'https://github.com/Toydrum/roadmap2u-backend.git']);
   git(sourceRoot, ['add', '.']); git(sourceRoot, ['commit', '-qm', 'Synthetic source binding']);
   const sourceSha = git(sourceRoot, ['rev-parse', 'HEAD']);

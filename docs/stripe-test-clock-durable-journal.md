@@ -30,8 +30,10 @@ the caller must not bypass that failure.
 ## Exclusive records and readback
 
 The original five record kinds are supported: intent, delivery, readback,
-provider-advance-intent and provider-advance-result. Their filenames bind the
-reservation digest. The helper accepts only the named fields, bounded JSON and
+provider-advance-intent and provider-advance-result. A separate
+[`caller-attempt`](stripe-test-clock-approval-attempt.md) consumes the actual
+approval for the ownership wrapper. Their filenames bind the reservation
+digest. The helper accepts only the named fields, bounded JSON and
 UTF-8 bytes; it rejects duplicate JSON keys and known secret-token patterns.
 The journal continues to derive and compare the business values itself.
 
@@ -65,7 +67,7 @@ atomic readbacks for all five kinds, without sending AWS or Stripe requests.
 Non-Windows runners skip native cases and test the explicit rejection instead;
 their results cannot certify Windows storage.
 
-The full caller/CLI, durable cross-process consumption of an actual human
-approval, permissions checks, bounded recovery and temporal PWA acceptance
-remain pending. A storage capability and a persisted fence alone never grant
+The full caller/CLI, permissions checks, bounded recovery and temporal PWA
+acceptance remain pending. The separate approval-attempt component requires an
+actual bound human response; storage and a persisted fence alone never grant
 financial execution authority.
