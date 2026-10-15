@@ -121,9 +121,10 @@ The tests cover every phase and exact request binding, review ancestry/source
 drift, automatic/consumed/stale receipts, historical ownership, resource and stack
 crossing, rejected/async reservations, one-use replay, timeouts, configuration/CA
 changes, caller mutation, response bounds, private-error handling and environment
-isolation. The full caller still must require the native journal capability and
-attempt, verify permissions, fresh remote AWS/Stripe facts and approved scope,
-and compose the existing bounded writers with recovery.
+isolation. The [complete caller engine](stripe-test-clock-caller.md) now requires
+the native journal and the same attempt while composing fresh AWS/Stripe
+observations with the existing bounded writers. Actual permissions, physical
+adapters/CLI and reviewed recovery remain pending.
 The normal and temporal PWA journeys and
 independent DEV/TEST/live acceptance are still required.
 

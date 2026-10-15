@@ -24,7 +24,7 @@ function init(root: string) {
   git(root, ['config', 'user.email', 'clock-qa@example.invalid']);
   git(root, ['config', 'core.autocrlf', 'false']);
 }
-export async function authorityFixture(stage = 'dev', phase: 'install' | 'advance_fence' | 'ready' | 'refresh' = 'install', nativeJournal = false) {
+export async function authorityFixture(stage = 'dev', phase: 'install' | 'advance_fence' | 'ready' | 'refresh' = 'install', nativeJournal = false, fullCaller = false) {
   const sourceFile = join(backendRoot, 'scripts/stripe-test-clock-authority.ts');
   const ownershipFile = join(backendRoot, 'scripts/stripe-test-clock-ownership.ts');
   // Missing implementation yields assertion failures, not an import/bundler error.
@@ -33,7 +33,8 @@ export async function authorityFixture(stage = 'dev', phase: 'install' | 'advanc
   const sourceRoot = join(root, 'source'), reviewRoot = join(root, 'review');
   init(sourceRoot); init(reviewRoot); mkdirSync(join(sourceRoot, 'scripts'));
   const bundle = join(sourceRoot, 'scripts/clock-caller.mjs');
-  buildSync({ stdin: { contents: "export * from './scripts/stripe-test-clock-authority'; export * from './scripts/stripe-test-clock-ownership'; export * from './scripts/stripe-test-clock-durable-store';", resolveDir: backendRoot },
+  const callerExport = fullCaller && existsSync(join(backendRoot, 'scripts/stripe-test-clock-caller.ts')) ? "export * from './scripts/stripe-test-clock-caller';" : '';
+  buildSync({ stdin: { contents: "export * from './scripts/stripe-test-clock-authority'; export * from './scripts/stripe-test-clock-ownership'; export * from './scripts/stripe-test-clock-durable-store';" + callerExport, resolveDir: backendRoot },
     outfile: bundle, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent' });
   if (nativeJournal) {
     writeFileSync(join(sourceRoot, 'scripts/stripe-test-clock-journal-windows.ps1'), readFileSync(join(backendRoot, 'scripts/stripe-test-clock-journal-windows.ps1')));
