@@ -1133,6 +1133,8 @@ export const EN: Dict = {
     },
   },
   billing: {
+    simulationReady: 'Simulation {stage}: the financial date is {date}. This test access requires a connection.',
+    simulationUnavailable: 'Simulation {stage}: waiting for a valid clock reading. The local forest remains available.',
     termsVersion: "individual-subscription-2026-10-12-draft-v2",
     title: "My subscription",
     intro: "I can review my subscription and manage its payments at my own pace. My forest stays here.",

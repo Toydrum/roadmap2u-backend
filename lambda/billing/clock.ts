@@ -1,4 +1,5 @@
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
+import type { BillingSimulation } from '@app/api/contracts';
 
 export const TEST_CLOCK_SK = 'BILLING#TEST_CLOCK' as const;
 /** A physical publisher must refresh ready evidence within its bounded QA window. */
@@ -33,6 +34,13 @@ export type FinancialClock =
   | { readonly mode: 'real'; readonly now: number }
   | { readonly mode: 'simulation'; readonly now: number; readonly evidenceValidUntil: number; readonly reference: BillingClockReference }
   | { readonly mode: 'blocked'; readonly reference: BillingClockReference };
+/** Public presentation only; the protected resolver remains the authority. */
+export function financialClockPresentation(clock: FinancialClock, stage: string, observedAt: number): BillingSimulation | undefined {
+  if (!['dev','test'].includes(stage) || clock.mode==='real') return undefined;
+  return {stage:stage as 'dev'|'test',mode:clock.mode==='simulation'?'ready':'unavailable',
+    frozenAt:clock.mode==='simulation'?clock.now:null,clockRevision:clock.reference.clockRevision,
+    observedAt,evidenceValidUntil:clock.mode==='simulation'?clock.evidenceValidUntil:null};
+}
 interface ClockContext {
   readonly ownerSub: string;
   readonly customerId: string;

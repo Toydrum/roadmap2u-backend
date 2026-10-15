@@ -238,6 +238,7 @@ const COMMERCIAL_INVENTORY_TOP_LEVEL_ATTRIBUTES = [
 ] as const;
 
 const COMMERCIAL_ACCESS_SAFE_ATTRIBUTES = [
+  'simulation',
   'simulationOnly',
   'testClock',
   'customerId',

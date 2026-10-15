@@ -2,7 +2,7 @@ import { ApiError, type AccessSource } from '@app/api/contracts';
 import { LEGACY_PREPAYMENT_CATALOG, PREPAYMENT_CATALOG } from './catalog';
 import type { CoverageAssignmentItem } from '../family/model';
 import { assertFamilyIdentifier } from '../family/keys';
-import { resolveFinancialClock } from '../billing/clock';
+import { resolveFinancialClock, financialClockPresentation } from '../billing/clock';
 import {
   ACCESS_OFFLINE_LEASE_MS,
   accessKey,
@@ -391,6 +391,7 @@ export function deriveAccessItem(
   );
   const simulated = sources.subscription?.testClock !== undefined || !!sources.testClock;
   const clock = individualClock(ownerSub, now, sources);
+  const simulation=simulated?financialClockPresentation(clock,sources.billingStage??'',now):undefined;
   const boundaries = [
     nextBoundary(eligibleGrants, ownerSub, now),
     ...(clock.mode === 'simulation' ? [clock.evidenceValidUntil] : []),
@@ -415,6 +416,7 @@ export function deriveAccessItem(
   return {
     ...key,
     ...(simulated ? {simulationOnly:true as const} : {}),
+    ...(simulation ? {simulation} : {}),
     ownerSub,
     effectivePlanKey,
     catalogVersion: PREPAYMENT_CATALOG.version,
@@ -456,7 +458,7 @@ function isFresh(
   grants: readonly GrantItem[],
   sources: PaidAccessSources,
 ): access is AccessItem {
-  if (sources.subscription?.testClock !== undefined || sources.testClock || access?.simulationOnly) return false;
+  if (sources.subscription?.testClock !== undefined || sources.testClock || access?.simulationOnly || access?.simulation) return false;
   if (!isRecord(access)) return false;
   const key = accessKey(ownerSub);
   if (
