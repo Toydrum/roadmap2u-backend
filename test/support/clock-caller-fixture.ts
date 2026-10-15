@@ -6,6 +6,9 @@ import { spawnSync } from 'node:child_process';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { AUTH_NOW, authorityFixture, cleanupAuthorityFixtures, ownershipFixture } from './clock-authority-fixture';
 import { STRIPE_API_VERSION } from '../../lambda/billing/model';
+// Include the composed script in the repository's real tsc graph; the runtime
+// fixture deliberately loads its isolated, committed bundle instead.
+export type ComposedClockCaller=Awaited<ReturnType<typeof import('../../scripts/stripe-test-clock-caller').prepareClockCaller>>;
 
 const parents: string[] = [];
 export async function callerFixture(phase: 'install' | 'advance_fence' | 'ready' | 'refresh' = 'install', stage = 'dev') {
