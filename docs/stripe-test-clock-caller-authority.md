@@ -3,8 +3,10 @@
 These components implement the local approval and ownership preflight needed by
 the future physical clock caller. They discover no credentials, read no SSM
 secret, assume no role and expose no financial write or execution CLI.
-`physicalExecutionAllowed` remains false. Full execution, journal durability and
-ACL checks, recovery and temporal PWA acceptance remain separate requirements.
+`physicalExecutionAllowed` remains false. Native Windows storage and ACL checks
+are implemented in the [durable journal](stripe-test-clock-durable-journal.md).
+Full caller composition, approval consumption across processes, recovery and
+temporal PWA acceptance remain separate requirements.
 
 ## Exact reviewed operation
 
@@ -111,9 +113,10 @@ The tests cover every phase and exact request binding, review ancestry/source
 drift, automatic/consumed/stale receipts, historical ownership, resource and stack
 crossing, rejected/async reservations, one-use replay, timeouts, configuration/CA
 changes, caller mutation, response bounds, private-error handling and environment
-isolation. The caller still must verify durable journal ACL/directory guarantees,
-permissions, fresh remote AWS/Stripe facts and approved scope, and compose the
-existing bounded writers with recovery. The normal and temporal PWA journeys and
+isolation. The caller still must require the native journal capability, consume
+the actual approval durably, verify permissions, fresh remote AWS/Stripe facts
+and approved scope, and compose the existing bounded writers with recovery.
+The normal and temporal PWA journeys and
 independent DEV/TEST/live acceptance are still required.
 
 CloudFormation response semantics were checked against the official

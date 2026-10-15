@@ -1,12 +1,12 @@
 import Stripe from 'stripe';
 import type { ClockTransitionRequest } from './stripe-test-clock-transition';
-import { prepareClockJournal, prepareClockProviderAdvance, assertVerifiedClockFence, assertClockProviderAdvanceReservation, reserveClockProviderAdvance, recordClockProviderAdvanceResult } from './stripe-test-clock-journal';
+import { type ClockJournalDirectory, prepareClockJournal, prepareClockProviderAdvance, assertVerifiedClockFence, assertClockProviderAdvanceReservation, reserveClockProviderAdvance, recordClockProviderAdvanceResult } from './stripe-test-clock-journal';
 import { prepareClockStripeObserver } from './stripe-test-clock-stripe-observation';
 import { STRIPE_API_VERSION } from '../lambda/billing/model';
 
 type WireKind='account'|'customer'|'clock'|'advance';
 export interface ClockStripeAdvanceOptions {
-  fence:ClockTransitionRequest; sourceSha:string; journalDirectory:string; apiKey:string; httpClient:Stripe.HttpClient;
+  fence:ClockTransitionRequest; sourceSha:string; journalDirectory:ClockJournalDirectory; apiKey:string; httpClient:Stripe.HttpClient;
   now:()=>number; reserveWire:(kind:WireKind)=>void; requestTimeoutMs?:number;
 }
 function requireCondition(ok:unknown,reason:string):asserts ok {if(!ok)throw new Error(`CLOCK_ADVANCE_${reason}`);}

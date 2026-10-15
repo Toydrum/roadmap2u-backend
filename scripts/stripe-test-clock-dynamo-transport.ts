@@ -2,7 +2,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, TransactGetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { AwsCredentialIdentity, HttpHandlerOptions, HttpRequest, HttpResponse } from '@smithy/types';
 import { isDeepStrictEqual } from 'node:util';
-import { prepareClockJournal, reserveClockWrite, recordClockWriteDelivery, inspectClockWriteReadback, recordClockReadback, type ClockJournalRequest, type ClockWriteReadback, type PreparedClockJournal } from './stripe-test-clock-journal';
+import { prepareClockJournal, reserveClockWrite, recordClockWriteDelivery, inspectClockWriteReadback, recordClockReadback, type ClockJournalDirectory, type ClockJournalRequest, type ClockWriteReadback, type PreparedClockJournal } from './stripe-test-clock-journal';
 import { TEST_CLOCK_EVIDENCE_MAX_AGE_MS } from '../lambda/billing/clock';
 
 type WireKind='write'|'readback';
@@ -11,7 +11,7 @@ export interface ClockDynamoHandler {
   destroy?():void;
 }
 export interface ClockDynamoOptions {
-  request:ClockJournalRequest; sourceSha:string; journalDirectory:string;
+  request:ClockJournalRequest; sourceSha:string; journalDirectory:ClockJournalDirectory;
   credentials:AwsCredentialIdentity; requestHandler:ClockDynamoHandler;
   now:()=>number; reserveWire:(kind:WireKind)=>void; requestTimeoutMs?:number;
 }
