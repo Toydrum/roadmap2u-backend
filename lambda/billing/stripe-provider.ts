@@ -67,8 +67,13 @@ export class StripeBillingProvider implements BillingProvider {
     const item = s.items.data[0], price = item?.price;
     if (!this.own(s.metadata) || s.livemode !== this.config.liveMode || s.items.has_more || s.items.data.length !== 1 || !price || (price.recurring?.interval !== 'month' && price.recurring?.interval !== 'year')) reject();
     const rates = item.tax_rates?.length ? item.tax_rates : s.default_tax_rates;
-    const configurationValid = price.tax_behavior === 'inclusive' && price.recurring.interval_count === 1 && price.recurring.usage_type === 'licensed' && s.automatic_tax?.enabled === false && !s.pause_collection && !(s.discounts?.length) && !(item.discounts?.length) && rates?.length === 1 && rates[0]?.inclusive === true && rates[0]?.country === 'MX';
-    return { id: s.id, customerId: id(s.customer), ownerSub: s.metadata['owner'] ?? '', operationId: s.metadata['operation'] ?? '', status: s.status, interval: price.recurring.interval as 'month' | 'year', priceId: price.id, productId: id(price.product), currency: price.currency, quantity: item.quantity ?? 0, cancelAtPeriodEnd: s.cancel_at_period_end, trial: !!s.trial_start || !!s.trial_end || s.status === 'trialing', automaticCollection: s.collection_method === 'charge_automatically', configurationValid };
+    // Flexible Portal cancellation sets cancel_at and leaves the legacy flag false.
+    // Only the supported end of this single item's period represents our contract.
+    const scheduledCancellation = s.billing_mode?.type === 'flexible' && s.cancel_at != null;
+    const cancellationAtPeriodEnd = Number.isSafeInteger(s.cancel_at) && (s.cancel_at ?? 0) > 0 && s.cancel_at === item.current_period_end;
+    const cancelAtPeriodEnd = s.cancel_at_period_end || (scheduledCancellation && cancellationAtPeriodEnd);
+    const configurationValid = price.tax_behavior === 'inclusive' && price.recurring.interval_count === 1 && price.recurring.usage_type === 'licensed' && s.automatic_tax?.enabled === false && !s.pause_collection && !(s.discounts?.length) && !(item.discounts?.length) && rates?.length === 1 && rates[0]?.inclusive === true && rates[0]?.country === 'MX' && (!scheduledCancellation || cancellationAtPeriodEnd);
+    return { id: s.id, customerId: id(s.customer), ownerSub: s.metadata['owner'] ?? '', operationId: s.metadata['operation'] ?? '', status: s.status, interval: price.recurring.interval as 'month' | 'year', priceId: price.id, productId: id(price.product), currency: price.currency, quantity: item.quantity ?? 0, cancelAtPeriodEnd, trial: !!s.trial_start || !!s.trial_end || s.status === 'trialing', automaticCollection: s.collection_method === 'charge_automatically', configurationValid };
   }
   private async invoice(i: Stripe.Invoice, subs: ProviderSubscription[], checkBudget: () => void = () => {}): Promise<ProviderInvoice> {
     checkBudget();
