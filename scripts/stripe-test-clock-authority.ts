@@ -125,6 +125,32 @@ function validateManifest(raw: unknown, now: number): ClockCallerManifest {
   requireCondition(new Set(c.resources.map(r => r.kind)).size === 3 && new Set(c.resources.map(r => r.logicalId)).size === 3, 'DUPLICATE_RESOURCE');
   return structuredClone(m) as unknown as ClockCallerManifest;
 }
+async function boundRequest(m:ClockCallerManifest,requestRaw:string,now:number) {
+  const request=parse(requestRaw);
+  requireCondition(digest(requestRaw)===m.requestSha256&&record(request)&&record(request.clock)&&
+    request.operationId===m.operationId&&request.clock.ownerSub===m.clock.ownerSub&&isDeepStrictEqual(request.clock.scope,m.clock.scope)&&
+    isDeepStrictEqual(request.storage,m.storage)&&stamp(request.clock.realNow)&&request.clock.realNow<=now&&now-request.clock.realNow<TEST_CLOCK_EVIDENCE_MAX_AGE_MS&&
+    (m.phase==='install'?!Object.hasOwn(request,'kind'):request.kind===m.phase)&&
+    (m.phase==='advance_fence'?request.targetFrozenTimeSeconds===m.targetFrozenTimeSeconds:!Object.hasOwn(request,'targetFrozenTimeSeconds')),'REQUEST_BINDING_REJECTED');
+  let plan:PreparedClockJournal;
+  try{plan=await prepareClockJournal(request as unknown as ClockJournalRequest,m.sourceSha);}
+  catch{throw Error('CLOCK_AUTHORITY_REQUEST_PLAN_REJECTED');}
+  requireCondition(plan.intent.operationId===m.operationId&&plan.intent.phase===m.phase&&plan.intent.sourceSha===m.sourceSha,'REQUEST_PLAN_REJECTED');
+  return {request:request as unknown as ClockJournalRequest,plan};
+}
+/** Pure review data. It neither reads credentials/files nor mints authority;
+ * execute still requires a fresh direct-human receipt and actual source binding. */
+export async function previewClockCallerPlan(options:{manifestRaw:string;requestRaw:string;now:()=>number}) {
+  try{
+    const now=options.now();requireCondition(stamp(now),'TIME_REJECTED');
+    const m=validateManifest(options.manifestRaw,now),{plan}=await boundRequest(m,options.requestRaw,now);
+    return Object.freeze({status:'preview' as const,stage:m.clock.scope.stage,sourceSha:m.sourceSha,operationId:m.operationId,phase:m.phase,
+      manifestSha256:digest(options.manifestRaw),requestSha256:m.requestSha256,
+      transactionSha256:plan.intent.transactionSha256,readbackSha256:plan.intent.readbackSha256,
+      maximumRequests:m.phase==='install'?17:m.phase==='advance_fence'?20:16,maximumWrites:1,maximumProviderAdvances:m.phase==='advance_fence'?1:0,
+      sourceShaVerified:false,authorizationReceiptBound:false,physicalExecutionAllowed:false});
+  }catch(error){throw Error(error instanceof Error&&/^CLOCK_AUTHORITY_[A-Z_]+$/.test(error.message)?error.message:'CLOCK_AUTHORITY_PREVIEW_FAILED');}
+}
 /** Checks a local direct-human receipt, not the identity of the person who produced it.
  * Durable ownership use also requires reserveDurableClockCallerAttempt. */
 export async function verifyClockCallerAuthority(options: {
@@ -142,16 +168,7 @@ export async function verifyClockCallerAuthority(options: {
       typeof receipt.approvedRootCommit === 'string' && /^[a-f0-9]{40}$/.test(receipt.approvedRootCommit), 'RECEIPT_REJECTED');
     requireCondition(stamp(receipt.issuedAt) && stamp(receipt.expiresAt) && receipt.issuedAt <= now && receipt.expiresAt > now &&
       receipt.expiresAt - receipt.issuedAt <= TEST_CLOCK_EVIDENCE_MAX_AGE_MS, 'WINDOW_REJECTED');
-    const request = parse(requestRaw);
-    requireCondition(digest(requestRaw) === m.requestSha256 && record(request) && record(request.clock) &&
-      request.operationId === m.operationId && request.clock.ownerSub === m.clock.ownerSub && isDeepStrictEqual(request.clock.scope, m.clock.scope) &&
-      isDeepStrictEqual(request.storage, m.storage) && stamp(request.clock.realNow) && request.clock.realNow <= now && now - request.clock.realNow < TEST_CLOCK_EVIDENCE_MAX_AGE_MS &&
-      (m.phase === 'install' ? !Object.hasOwn(request, 'kind') : request.kind === m.phase) &&
-      (m.phase === 'advance_fence' ? request.targetFrozenTimeSeconds === m.targetFrozenTimeSeconds : !Object.hasOwn(request, 'targetFrozenTimeSeconds')), 'REQUEST_BINDING_REJECTED');
-    let plan: PreparedClockJournal;
-    try { plan = await prepareClockJournal(request as unknown as ClockJournalRequest, m.sourceSha); }
-    catch { throw Error('CLOCK_AUTHORITY_REQUEST_PLAN_REJECTED'); }
-    requireCondition(plan.intent.operationId === m.operationId && plan.intent.phase === m.phase && plan.intent.sourceSha === m.sourceSha, 'REQUEST_PLAN_REJECTED');
+    const {request,plan}=await boundRequest(m,requestRaw,now);
     const sourceRoot = realpathSync(resolve(sourceArgument)), reviewRoot = realpathSync(resolve(reviewArgument));
     const selfFile = fileURLToPath(import.meta.url), selfPath = inside(sourceRoot, realpathSync(selfFile));
     const self = regularBytes(selfFile, 2 * 1024 * 1024);

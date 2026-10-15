@@ -34,10 +34,13 @@ export async function authorityFixture(stage = 'dev', phase: 'install' | 'advanc
   init(sourceRoot); init(reviewRoot); mkdirSync(join(sourceRoot, 'scripts'));
   const bundle = join(sourceRoot, 'scripts/clock-caller.mjs');
   const callerExport = fullCaller && existsSync(join(backendRoot, 'scripts/stripe-test-clock-caller.ts')) ? "export * from './scripts/stripe-test-clock-caller';" : '';
-  buildSync({ stdin: { contents: "export * from './scripts/stripe-test-clock-authority'; export * from './scripts/stripe-test-clock-ownership'; export * from './scripts/stripe-test-clock-durable-store';" + callerExport, resolveDir: backendRoot },
+  const cliExport=fullCaller&&existsSync(join(backendRoot,'scripts/stripe-test-clock-cli.ts'))?"export * from './scripts/stripe-test-clock-cli';":'';
+  buildSync({ stdin: { contents: "export * from './scripts/stripe-test-clock-authority'; export * from './scripts/stripe-test-clock-ownership'; export * from './scripts/stripe-test-clock-durable-store';" + callerExport+cliExport, resolveDir: backendRoot },
     outfile: bundle, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent' });
   if (nativeJournal) {
     writeFileSync(join(sourceRoot, 'scripts/stripe-test-clock-journal-windows.ps1'), readFileSync(join(backendRoot, 'scripts/stripe-test-clock-journal-windows.ps1')));
+  }
+  if(nativeJournal||fullCaller){
     // Standalone Node children need the same existing dependencies as Vitest.
     // Ignore only this owned junction; no install, download or dependency change.
     writeFileSync(join(sourceRoot, '.gitignore'), 'node_modules/\n');
