@@ -46,6 +46,9 @@ Exit codes: `0` preview or verified completion, `1` stopped before verified
 completion, `2` rejected input/preparation, `3` uncertain outcome/cleanup. An
 uncertain result is not permission to repeat the command. Preserve its journal
 and prepare a separate read-only recovery inventory.
+A lost write acknowledgement can return verified completion only when the exact
+atomic readback proves application. Missing or failed readback stays uncertain;
+neither case resends the write. Preview also rejects expired provider clocks.
 
 Local Git/NTFS/SDK/loopback tests do not authorize physical execution. Runtime and
 permission inventory, fresh physical manifests/approvals, fixture isolation,

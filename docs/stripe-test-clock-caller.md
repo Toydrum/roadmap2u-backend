@@ -59,9 +59,10 @@ all four phases, DEV/TEST isolation, live-data drift, lost writes, uncertain
 fences, source/certificate changes, replay and secret handling. They provide no
 physical AWS/Stripe or production acceptance.
 
-The physical CLI, its pinned TLS/runtime adapters, actual permissions, bounded
-recovery, fixtures/allowlists, publication/deployment and financial matrices
-remain pending. The user chose adapting the real PWA in DEV/TEST for synthetic
+The [native process boundary](../scripts/stripe-test-clock-cli.md) composes this
+engine with pinned-CA HTTPS adapters and has separate local SDK/loopback tests.
+Actual runtime/permission inventory, bounded physical recovery, fixtures/allowlists,
+publication/deployment and financial matrices remain pending. The user chose adapting the real PWA in DEV/TEST for synthetic
 temporal journeys; a separate test client must not silently replace that scope.
 Normal/temporal PWA, independent TEST and fiscal/live/production gates still
 need their own evidence and authorization windows.

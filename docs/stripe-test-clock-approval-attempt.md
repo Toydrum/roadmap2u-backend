@@ -37,6 +37,7 @@ native journal. They never resolve real credentials or call AWS/Stripe.
 
 The [complete caller engine](stripe-test-clock-caller.md) carries this same
 attempt into ownership, fresh AWS/Stripe observations and the existing fenced
-writers. Physical CLI/TLS adapters, permissions and bounded recovery remain
-pending. This component alone does not close temporal PWA, DEV/TEST or
+writers. The [native CLI/TLS adapters](../scripts/stripe-test-clock-cli.md) use that
+same engine; actual runtime/permission inventory and bounded physical recovery
+remain pending. This component alone does not close temporal PWA, DEV/TEST or
 production acceptance.

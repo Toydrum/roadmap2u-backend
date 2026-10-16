@@ -6,8 +6,9 @@ secret, assume no role and expose no financial write or execution CLI.
 `physicalExecutionAllowed` remains false. Native Windows storage and ACL checks
 are implemented in the [durable journal](stripe-test-clock-durable-journal.md).
 The [approval attempt](stripe-test-clock-approval-attempt.md) adds consumption
-across processes for ownership reads. Full caller composition, recovery and
-temporal PWA acceptance remain separate requirements.
+across processes for ownership reads. The complete caller and native process
+boundary compose these components; physical recovery and temporal PWA acceptance
+remain separate requirements.
 
 ## Exact reviewed operation
 
@@ -123,8 +124,9 @@ crossing, rejected/async reservations, one-use replay, timeouts, configuration/C
 changes, caller mutation, response bounds, private-error handling and environment
 isolation. The [complete caller engine](stripe-test-clock-caller.md) now requires
 the native journal and the same attempt while composing fresh AWS/Stripe
-observations with the existing bounded writers. Actual permissions, physical
-adapters/CLI and reviewed recovery remain pending.
+observations with the existing bounded writers. Its [native CLI and pinned-CA
+adapters](../scripts/stripe-test-clock-cli.md) have local coverage. Actual runtime
+and permission inventory, physical acceptance and reviewed recovery remain pending.
 The normal and temporal PWA journeys and
 independent DEV/TEST/live acceptance are still required.
 
