@@ -281,6 +281,8 @@ export interface AccessSource {
 }
 
 export interface AccessSummary {
+  /** Online-only synthetic financial time. Never a device/offline entitlement. */
+  simulation?: BillingSimulation;
   effectivePlanKey: PlanKey;
   catalogVersion: string;
   status: 'active' | 'expired';
@@ -563,7 +565,16 @@ export const CLOSED_INDIVIDUAL_BILLING_CATALOG: IndividualBillingCatalog = Objec
     urls: { es: '/subscription-terms?lang=es', en: '/subscription-terms?lang=en' },
   },
 } satisfies IndividualBillingCatalog);
+export interface BillingSimulation {
+  stage: 'dev' | 'test';
+  mode: 'ready' | 'unavailable';
+  frozenAt: number | null;
+  clockRevision: number;
+  observedAt: number;
+  evidenceValidUntil: number | null;
+}
 export interface IndividualBillingSummary {
+  simulation?: BillingSimulation;
   contractVersion: typeof INDIVIDUAL_BILLING_CONTRACT_VERSION;
   state: IndividualBillingState;
   interval: BillingInterval | null;
@@ -631,13 +642,23 @@ export function isIndividualBillingCatalog(value: unknown): value is IndividualB
     terms['urls']['es'] === '/subscription-terms?lang=es' && terms['urls']['en'] === '/subscription-terms?lang=en';
 }
 export function isIndividualBillingSummary(value: unknown): value is IndividualBillingSummary {
-  if (!individualKeys(value, ['contractVersion', 'state', 'interval', 'paidThrough', 'nextRenewalAt', 'cancelAtPeriodEnd', 'processing', 'canCheckout', 'canOpenPortal', 'revision'])) return false;
+  const temporal=individualRecord(value) && Object.hasOwn(value,'simulation');
+  if (!individualKeys(value, ['contractVersion', 'state', 'interval', 'paidThrough', 'nextRenewalAt', 'cancelAtPeriodEnd', 'processing', 'canCheckout', 'canOpenPortal', 'revision',...(temporal?['simulation']:[])])) return false;
+  if (temporal && !isBillingSimulation(value['simulation'])) return false;
   return value['contractVersion'] === 1 && (INDIVIDUAL_BILLING_STATES as readonly unknown[]).includes(value['state']) &&
     (value['interval'] === null || value['interval'] === 'month' || value['interval'] === 'year') &&
     (value['paidThrough'] === null || individualInteger(value['paidThrough'])) &&
     (value['nextRenewalAt'] === null || individualInteger(value['nextRenewalAt'])) &&
     typeof value['cancelAtPeriodEnd'] === 'boolean' && ['idle', 'pending', 'review'].includes(String(value['processing'])) &&
     typeof value['canCheckout'] === 'boolean' && typeof value['canOpenPortal'] === 'boolean' && individualInteger(value['revision']);
+}
+export function isBillingSimulation(value: unknown): value is BillingSimulation {
+  if (!individualKeys(value,['stage','mode','frozenAt','clockRevision','observedAt','evidenceValidUntil']) ||
+      !['dev','test'].includes(String(value['stage'])) || !individualInteger(value['clockRevision']) || !individualInteger(value['observedAt'])) return false;
+  if (value['mode']==='unavailable') return value['frozenAt']===null && value['evidenceValidUntil']===null;
+  return value['mode']==='ready' && (value['clockRevision'] as number)>0 && individualInteger(value['frozenAt']) && (value['frozenAt'] as number)>0 &&
+    Number.isFinite(new Date(value['frozenAt'] as number).getTime()) && individualInteger(value['evidenceValidUntil']) &&
+    (value['evidenceValidUntil'] as number)>(value['observedAt'] as number) && (value['evidenceValidUntil'] as number)-(value['observedAt'] as number)<=15*60_000;
 }
 export function isIndividualBillingCommandResult(value: unknown): value is IndividualBillingCommandResult {
   if (!individualRecord(value) || !individualText(value['commandId']) || !individualInteger(value['billingRevision'])) return false;

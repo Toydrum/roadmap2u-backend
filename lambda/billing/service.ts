@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { individualPurchaseAdmitted } from './admission';
 import { purchasesConfigReady } from './config';
-import { canReadTestClock, resolveFinancialClock } from './clock';
+import { canReadTestClock, resolveFinancialClock, financialClockPresentation } from './clock';
 import { BillingError, billingCatalogPrices, digest, eligible, historyPending, nonterminal, operationId, rejectedCheckoutExpiry, type BillingActor, type BillingCommand, type BillingConfig, type BillingProvider, type BillingRepository, type BillingState, type Interval, type ProviderCheckout, type ProviderSnapshot } from './model';
 
 type CheckoutRequest = { commandId: string; expectedBillingRevision: number; interval: Interval; catalogVersion: string; country: 'MX'; termsAcceptance: { version: string; hash: string; language: 'es' | 'en'; accepted: true } };
@@ -40,11 +40,13 @@ export class BillingService {
     const cfg = this.deps.config;
     const context = {ownerSub,customerId:s.customerId ?? '',stage:cfg.stage,accountId:cfg.accountId,
       liveMode:cfg.liveMode,now:this.deps.now(),reference:s.testClock};
-    const clock = resolveFinancialClock(context, canReadTestClock(context) ? await this.deps.repository.readTestClock(ownerSub) : undefined);
+    const mirror = canReadTestClock(context) ? await this.deps.repository.readTestClock(ownerSub) : undefined;
+    const observedAt=this.deps.now(),clock = resolveFinancialClock({...context,now:observedAt},mirror);
     const state = clock.mode === 'blocked' && s.state !== 'closed' ? 'payment_review'
       : clock.mode !== 'blocked' && s.paidThrough !== null && s.paidThrough <= clock.now && ['active', 'cancel_at_period_end'].includes(s.state) ? 'expired' : s.state;
     const review = state === 'payment_review';
-    return { contractVersion: 1 as const, state, interval: s.interval, paidThrough: s.paidThrough, nextRenewalAt: !s.cancelAtPeriodEnd && ['active', 'past_due'].includes(state) ? s.paidThrough : null, cancelAtPeriodEnd: s.cancelAtPeriodEnd, processing: review ? 'review' as const : (s.activeCommandId || s.historyPending) ? 'pending' as const : 'idle' as const, canCheckout: enabled && purchasesConfigReady(this.deps.config) && individualPurchaseAdmitted(this.deps.config.purchaseAdmission, ownerSub) && !s.historyPending && eligible(actor) && !s.closingId && !s.closedAt && !review && !s.activeCommandId && !s.subscriptionId, canOpenPortal: !!s.customerId && !s.closedAt && actor.accountType === 'adult', revision: s.revision };
+    const simulation=financialClockPresentation(clock,cfg.stage,observedAt);
+    return { ...(simulation?{simulation}:{}),contractVersion: 1 as const, state, interval: s.interval, paidThrough: s.paidThrough, nextRenewalAt: !s.cancelAtPeriodEnd && ['active', 'past_due'].includes(state) ? s.paidThrough : null, cancelAtPeriodEnd: s.cancelAtPeriodEnd, processing: review ? 'review' as const : (s.activeCommandId || s.historyPending) ? 'pending' as const : 'idle' as const, canCheckout: enabled && purchasesConfigReady(this.deps.config) && individualPurchaseAdmitted(this.deps.config.purchaseAdmission, ownerSub) && !s.historyPending && eligible(actor) && !s.closingId && !s.closedAt && !review && !s.activeCommandId && !s.subscriptionId, canOpenPortal: !!s.customerId && !s.closedAt && actor.accountType === 'adult', revision: s.revision };
   }
   async checkout(ownerSub: string, value: unknown): Promise<BillingResult> {
     const req = parseCheckout(value), { repository: r, provider: p, config: cfg } = this.deps;

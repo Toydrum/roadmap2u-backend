@@ -83,6 +83,7 @@ const CLOSURE_PROJECTION = projection(['pk', 'sk']);
 const USAGE_PROJECTION = projection(['pk', 'sk', 'state', 'activeTrees']);
 const ACCESS_PROJECTION = projection([
   'simulationOnly',
+  'simulation',
   'pk',
   'sk',
   'ownerSub',
@@ -152,6 +153,7 @@ function assertReadableOwner(
 
 export function accessSummary(access: AccessItem, usage: AccessSummary['usage']): AccessSummary {
   return {
+    ...(access.simulation ? {simulation:{...access.simulation}} : {}),
     effectivePlanKey: access.effectivePlanKey,
     catalogVersion: access.catalogVersion,
     status: access.status,

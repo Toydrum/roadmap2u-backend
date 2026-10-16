@@ -1136,6 +1136,8 @@ export const ES = {
     },
   },
   billing: {
+    simulationReady: 'Ensayo {stage}: la fecha financiera es {date}. Este acceso de prueba requiere conexión.',
+    simulationUnavailable: 'Ensayo {stage}: esperamos una lectura válida del reloj. El bosque local sigue disponible.',
     termsVersion: "individual-subscription-2026-10-12-draft-v2",
     title: "Mi suscripción",
     intro: "Aquí puedo conocer mi suscripción y gestionar sus pagos con calma. Mi bosque se conserva.",
