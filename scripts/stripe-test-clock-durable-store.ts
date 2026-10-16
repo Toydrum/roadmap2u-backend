@@ -10,7 +10,7 @@ interface Binding extends DurableClockJournalConfig { helper:string; helperSha25
 const bindings=new WeakMap<object,Binding>();
 const MAX_PAYLOAD=16_384;
 const HEX=/^[a-f0-9]{64}$/;
-const FILE=/^[a-f0-9]{64}\.(intent|delivery|readback|provider-advance-intent|provider-advance-result|caller-attempt)\.json$/;
+const FILE=/^[a-f0-9]{64}\.(intent|delivery|readback|provider-advance-intent|provider-advance-result|caller-attempt|recovery-attempt)\.json$/;
 const CODES=new Set(['DIRECTORY_REQUIRED','DIRECTORY_EXISTS','PATH_REJECTED','NTFS_REQUIRED','ACL_REJECTED','PARENT_ACL_REJECTED',
  'DIRECTORY_CHANGED','ALREADY_RESERVED','RECORD_REJECTED','FILE_REQUIRED','FILE_REJECTED','FLUSH_FAILED','NATIVE_FAILED']);
 function fail(code:string):never{throw new Error('CLOCK_JOURNAL_STORE_'+code);}

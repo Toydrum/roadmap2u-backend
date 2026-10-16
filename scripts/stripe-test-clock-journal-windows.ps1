@@ -30,12 +30,47 @@ function ParseObject([string]$Text) {
     } catch { Fail 'RECORD_REJECTED' }
     finally { if ($document) { $document.Dispose() } }
 }
+function ValidateRecoveryAttempt($Value, [string]$Reservation) {
+    ExactKeys $Value @('schemaVersion','reservationId','kind','status','sourceSha','manifestSha256','operationId','stage',
+        'callIdSha256','approvedRootCommit','issuedAt','expiresAt','reservedAt','directoryId','aclSha256',
+        'priorJournalDirectoryId','originalRequestSha256','maximumReadRequests','remoteWritesAllowed','providerAdvancesAllowed',
+        'retryAllowed','physicalExecutionAllowed')
+    foreach ($field in @('schemaVersion','issuedAt','expiresAt','reservedAt','maximumReadRequests','remoteWritesAllowed','providerAdvancesAllowed')) {
+        if (($Value[$field] -isnot [long] -and $Value[$field] -isnot [int]) -or
+            $Value[$field] -lt 0 -or $Value[$field] -gt 9007199254740991) { Fail 'RECORD_REJECTED' }
+    }
+    if ($Value.schemaVersion -ne 1 -or $Value.reservationId -cne $Reservation -or $Value.kind -cne 'clock_recovery_read_only' -or
+        $Value.status -cne 'reserved' -or $Value.stage -notin @('dev','test') -or
+        $Value.operationId -isnot [string] -or $Value.operationId -cnotmatch '^[A-Za-z0-9:_-]{8,128}$') { Fail 'RECORD_REJECTED' }
+    foreach ($field in @('sourceSha','approvedRootCommit')) {
+        if ($Value[$field] -isnot [string] -or $Value[$field] -cnotmatch '^[a-f0-9]{40}$') { Fail 'RECORD_REJECTED' }
+    }
+    foreach ($field in @('manifestSha256','callIdSha256','directoryId','aclSha256')) {
+        if ($Value[$field] -isnot [string] -or $Value[$field] -cnotmatch '^[a-f0-9]{64}$') { Fail 'RECORD_REJECTED' }
+    }
+    foreach ($field in @('priorJournalDirectoryId','originalRequestSha256')) {
+        if ($null -ne $Value[$field] -and ($Value[$field] -isnot [string] -or $Value[$field] -cnotmatch '^[a-f0-9]{64}$')) { Fail 'RECORD_REJECTED' }
+    }
+    if ($Value.remoteWritesAllowed -ne 0 -or $Value.providerAdvancesAllowed -ne 0 -or
+        $Value.retryAllowed -isnot [bool] -or $Value.retryAllowed -cne $false -or
+        $Value.physicalExecutionAllowed -isnot [bool] -or $Value.physicalExecutionAllowed -cne $false -or
+        $Value.issuedAt -gt $Value.reservedAt -or $Value.reservedAt -ge $Value.expiresAt -or
+        $Value.expiresAt - $Value.issuedAt -gt 900000) { Fail 'RECORD_REJECTED' }
+    $maximum = 15
+    if ($null -ne $Value.originalRequestSha256) {
+        $maximum = 16
+        if ($null -eq $Value.priorJournalDirectoryId) { Fail 'RECORD_REJECTED' }
+    }
+    if ($Value.maximumReadRequests -ne $maximum -or
+        ($null -ne $Value.priorJournalDirectoryId -and $Value.priorJournalDirectoryId -ceq $Value.directoryId)) { Fail 'RECORD_REJECTED' }
+}
 function ValidateRecord([string]$Filename, [string]$Text) {
     if ($Text -match '(?:[rs]k_(?:test|live)_[A-Za-z0-9_]{12,}|whsec_[A-Za-z0-9_]{12,}|eyJ[A-Za-z0-9_-]{20,}\.)') { Fail 'RECORD_REJECTED' }
     $value = ParseObject $Text
-    if ($Filename -cnotmatch '^([a-f0-9]{64})\.(intent|delivery|readback|provider-advance-intent|provider-advance-result|caller-attempt)\.json$') { Fail 'FILE_REJECTED' }
+    if ($Filename -cnotmatch '^([a-f0-9]{64})\.(intent|delivery|readback|provider-advance-intent|provider-advance-result|caller-attempt|recovery-attempt)\.json$') { Fail 'FILE_REJECTED' }
     $reservation = $Matches[1]
     $kind = $Matches[2]
+    if ($kind -eq 'recovery-attempt') { ValidateRecoveryAttempt $value $reservation; return }
     $keys = switch ($kind) {
         'intent' { @('schemaVersion','reservationId','sourceSha','operationId','phase','scope','reservedAt','clientRequestToken','transactionSha256','readbackSha256') }
         'delivery' { @('schemaVersion','reservationId','transactionSha256','delivery','recordedAt','retryAllowed','physicalExecutionAllowed') }
@@ -191,7 +226,7 @@ public static class ClockJournalNative {
     if ($request.action -in @('write','read') -and ($directoryId -cne $request.expectedDirectoryId -or $aclHash -cne $request.expectedAclSha256)) { Fail 'DIRECTORY_CHANGED' }
     $result = [ordered]@{schemaVersion=1;status='ok';fileSystem='NTFS';ownerVerified=$true;allowedPrincipalCount=3;directoryId=$directoryId;aclSha256=$aclHash}
     if ($request.action -in @('write','read')) {
-        if ($request.filename -isnot [string] -or $request.filename -cnotmatch '^[a-f0-9]{64}\.(intent|delivery|readback|provider-advance-intent|provider-advance-result|caller-attempt)\.json$') { Fail 'FILE_REJECTED' }
+        if ($request.filename -isnot [string] -or $request.filename -cnotmatch '^[a-f0-9]{64}\.(intent|delivery|readback|provider-advance-intent|provider-advance-result|caller-attempt|recovery-attempt)\.json$') { Fail 'FILE_REJECTED' }
         $file = [IO.Path]::Combine($directory, $request.filename)
         if ($request.action -eq 'write') {
             if ($request.payloadJson -isnot [string]) { Fail 'RECORD_REJECTED' }
