@@ -12,7 +12,7 @@ import { TEST_CLOCK_EVIDENCE_MAX_AGE_MS } from '../lambda/billing/clock';
 
 export type ClockAwsReadKind='identity'|'app_table'|'privacy_table'|'fixture_identity'|'snapshot'|'financial_partition';
 export interface ClockAwsObservationOptions {
-  kind:'install'|'transition'; clock:Pick<ClockPublisherContext,'ownerSub'|'scope'>; storage:ClockStorageScope;
+  kind:'install'|'transition'|'recovery'; clock:Pick<ClockPublisherContext,'ownerSub'|'scope'>; storage:ClockStorageScope;
   expectedCallerArn:string; userPoolId:string; credentials:AwsCredentialIdentity;
   requestHandler:ClockDynamoHandler; now:()=>number; reserveWire:(kind:ClockAwsReadKind)=>void; requestTimeoutMs?:number;
 }
@@ -57,7 +57,7 @@ export async function prepareClockAwsObserver(options:ClockAwsObservationOptions
   const clock=structuredClone(options.clock),storage=structuredClone(options.storage),kind=options.kind;
   const expectedCallerArn=options.expectedCallerArn,userPoolId=options.userPoolId,handler=options.requestHandler,now=options.now,reserveWire=options.reserveWire;
   const timeout=options.requestTimeoutMs??20000,supplied=options.credentials;
-  requireCondition(kind==='install'||kind==='transition','KIND_INVALID');
+  requireCondition(kind==='install'||kind==='transition'||kind==='recovery','KIND_INVALID');
   requireCondition(typeof now==='function'&&typeof reserveWire==='function'&&handler&&typeof handler.handle==='function','DEPENDENCIES_REQUIRED');
   requireCondition(Number.isSafeInteger(timeout)&&timeout>0&&timeout<=20000,'TIMEOUT_INVALID');
   requireCondition(supplied&&typeof supplied.accessKeyId==='string'&&supplied.accessKeyId.length>0&&typeof supplied.secretAccessKey==='string'&&supplied.secretAccessKey.length>0
@@ -90,7 +90,7 @@ export async function prepareClockAwsObserver(options:ClockAwsObservationOptions
     {kind:'privacy_table',send:(sdk,signal)=>sdk.database.send(new DescribeTableCommand({TableName:privacy}),{abortSignal:signal})},
     {kind:'fixture_identity',send:(sdk,signal)=>sdk.cognito.send(new AdminGetUserCommand({UserPoolId:userPoolId,Username:fixture.syntheticFixture}),{abortSignal:signal})},
     {kind:'snapshot',send:(sdk,signal)=>sdk.document.send(new TransactGetCommand({TransactItems:targets.map(Get=>({Get:structuredClone(Get)}))}),{abortSignal:signal})},
-    ...(kind==='install'?[{kind:'financial_partition' as const,send:(sdk:Clients,signal?:AbortSignal)=>sdk.document.send(new QueryCommand({TableName:app,KeyConditionExpression:'pk = :owner',
+    ...(kind!=='transition'?[{kind:'financial_partition' as const,send:(sdk:Clients,signal?:AbortSignal)=>sdk.document.send(new QueryCommand({TableName:app,KeyConditionExpression:'pk = :owner',
       ExpressionAttributeValues:{':owner':`BILLING#${owner}`},ConsistentRead:true,Limit:100}),{abortSignal:signal})}]:[]),
   ];
   // Capture the installed SDK's exact serialization without any external handler.
@@ -105,7 +105,12 @@ export async function prepareClockAwsObserver(options:ClockAwsObservationOptions
   const guarded:ClockDynamoHandler={handle:async(request,requestOptions)=>{
     requireCondition(active,'WIRE_INACTIVE');fresh();const actual=wire(request,current),planned=expected[current]!;
     requireCondition(actual.hostname===planned.hostname&&actual.target===planned.target&&actual.body===planned.body,'WIRE_BODY_REJECTED');
-    requireCondition(reservations[current]===0,'WIRE_LIMIT_REJECTED');reservations[current]++;reserveWire(current);delegations[current]++;
+    requireCondition(reservations[current]===0,'WIRE_LIMIT_REJECTED');reservations[current]++;
+    const reserved:unknown=reserveWire(current);
+    if(reserved&&typeof(reserved as {then?:unknown}).then==='function'){
+      void Promise.resolve(reserved).catch(()=>undefined);throw Error('CLOCK_AWS_OBSERVATION_ASYNC_RESERVATION_REJECTED');
+    }
+    fresh();delegations[current]++;
     return handler.handle(request,requestOptions);
   }};
   async function bounded(action:Action,sdk:Clients){
@@ -140,12 +145,16 @@ export async function prepareClockAwsObserver(options:ClockAwsObservationOptions
           identity:{ownerSub:owner,enabled:false},profile:items[0]!,flags:items[1],mirror:items[2],customerMapping:items[3],subscriptionSource:items[4],closure:items[5],restoreExclusion:items[6]};
         const evidence={awsAccountId:storage.awsAccountId,callerArn:expectedCallerArn,actualIdentityVerified:true,tablesVerified:true,
           physicalAuthorizationChecked:false,sourceShaVerified:false,stackOwnershipVerified:false,wireReservations:{...reservations},wireDelegations:{...delegations}};
-        if(kind==='install'){
-          requireCondition(items[7]===null,'INSTALL_STATE_PRESENT');const query=responses.financial_partition;
+        if(kind!=='transition'){
+          if(kind==='install')requireCondition(items[7]===null,'INSTALL_STATE_PRESENT');
+          const query=responses.financial_partition;
           requireCondition(record(query)&&Array.isArray(query.Items)&&query.Count===query.Items.length
             &&(query.LastEvaluatedKey===undefined||(record(query.LastEvaluatedKey)&&Object.keys(query.LastEvaluatedKey).length===0)),'PARTITION_INCOMPLETE');
           requireCondition(query.Items.every(row=>record(row)&&row.pk===`BILLING#${owner}`&&typeof row.sk==='string'&&row.sk.length>0),'PARTITION_CROSSED');
           const result:ClockInstallSnapshot={...snapshot,financialPartitionComplete:true,financialRows:structuredClone(query.Items)};
+          // Recovery observes facts even after a partial installation. It does
+          // not satisfy installation guards or grant financial authority.
+          if(kind==='recovery')return{kind:'recovery' as const,snapshot:{...result,financialState:items[7]},...evidence};
           return {kind:'install' as const,snapshot:result,...evidence};
         }
         requireCondition(record(items[7]),'TRANSITION_STATE_MISSING');

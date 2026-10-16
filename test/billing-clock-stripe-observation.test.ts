@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Stripe from 'stripe';
 import { prepareClockStripeObserver } from '../scripts/stripe-test-clock-stripe-observation';
+import * as StripeClockReaders from '../scripts/stripe-test-clock-stripe-observation';
 import { prepareClockInstall, type ClockPublisherScope } from '../scripts/stripe-test-clock-evidence';
 import { resolveFinancialClock, TEST_CLOCK_EVIDENCE_MAX_AGE_MS } from '../lambda/billing/clock';
 import { STRIPE_API_VERSION } from '../lambda/billing/model';
@@ -55,4 +56,59 @@ describe('bounded ready Stripe observation with actual SDK',()=>{
   it.each(['closed','500','status201'] as const)('sanitizes %s failure and never delegates the same GET twice',async kind=>{const f=fixture();f.fail('/v1/account',kind);if(kind==='closed')f.options.requestTimeoutMs=1500;const observer=prepareClockStripeObserver(f.options);await expect(observer.observe()).rejects.toThrow('CLOCK_STRIPE_READ_UNCERTAIN');expect(f.requests).toHaveLength(1);expect(observer.counts()).toMatchObject({wireDelegations:{account:1,customer:0,clock:0}});});
   it('stops when the request budget fails before delegating anything',async()=>{const f=fixture();f.options.reserveWire=()=>{throw new Error('private-rk_test_budget');};const observer=prepareClockStripeObserver(f.options);await expect(observer.observe()).rejects.toThrow('CLOCK_STRIPE_READ_UNCERTAIN');expect(f.requests).toHaveLength(0);expect(observer.counts()).toMatchObject({wireReservations:{account:1,customer:0,clock:0},wireDelegations:{account:0,customer:0,clock:0}});});
   it('bounds a stalled request without reading further or returning a raw error',async()=>{const f=fixture();f.fail('/v1/account','timeout');f.options.requestTimeoutMs=10;const observer=prepareClockStripeObserver(f.options);await expect(observer.observe()).rejects.toThrow('CLOCK_STRIPE_READ_UNCERTAIN');expect(f.requests).toHaveLength(1);});
+});
+
+function recoveryReader(options:Parameters<typeof prepareClockStripeObserver>[0]){
+  const factory=(StripeClockReaders as unknown as Record<string,any>).prepareClockStripeRecoveryObserver;
+  expect(factory).toBeTypeOf('function');return factory(options);
+}
+describe('read-only Stripe clock recovery diagnosis',()=>{
+  it.each(['ready','recovery'])('rejects a reservation that exhausts the evidence window in %s mode',async mode=>{
+    const f=fixture();f.options.reserveWire=()=>{f.setNow(NOW+TEST_CLOCK_EVIDENCE_MAX_AGE_MS);};
+    const reader=mode==='recovery'?recoveryReader(f.options):prepareClockStripeObserver(f.options);
+    await expect(reader.observe()).rejects.toThrow('CLOCK_STRIPE_READ_UNCERTAIN');
+    expect(f.requests).toHaveLength(0);
+    expect(reader.counts()).toMatchObject({wireReservations:{account:1},wireDelegations:{account:0}});
+  });
+  it.each(['dev','test'].flatMap(stage=>['ready','advancing','internal_failure'].map(status=>[stage,status])))('observes %s %s without creating ready evidence',async(stage,status)=>{
+    const f=fixture(stage);f.clock.status=status;const result=await recoveryReader(f.options).observe();
+    expect(result).toMatchObject({status:'clock_observed',physicalAuthorizationChecked:false,providerReadyEvidenceProduced:false,retryAllowed:false,
+      observation:{clock:{id:'clock_one',status},clockExpired:false}});
+    expect(f.requests).toHaveLength(3);expect(f.requests.every(r=>r.method==='GET'&&r.data===''&&r.connected===undefined)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(KEY);expect(JSON.stringify(result)).not.toContain('private@example.invalid');
+  });
+  it('observes an expired clock without publishing evidence or extending its lifetime',async()=>{
+    const f=fixture();f.clock.deletes_after=TIME-1;
+    expect(await recoveryReader(f.options).observe()).toMatchObject({status:'clock_observed',providerReadyEvidenceProduced:false,
+      observation:{clock:{deletes_after:TIME-1},clockExpired:true}});
+  });
+  it('reports only a scoped resource_missing clock response as absent',async()=>{
+    const f=fixture(),original=f.options.httpClient.makeRequest;
+    f.options.httpClient.makeRequest=async(...args)=>{
+      const value=await original(...args);
+      if(args[2].includes('/test_clocks/'))return{...value,getStatusCode:()=>404,toJSON:async()=>({error:{type:'invalid_request_error',code:'resource_missing',message:'private missing-clock error'}})};
+      return value;
+    };
+    const result=await recoveryReader(f.options).observe();
+    expect(result).toMatchObject({status:'clock_not_found',providerReadyEvidenceProduced:false,observation:{clock:null,clockExpired:null}});
+    expect(JSON.stringify(result)).not.toContain('private missing-clock error');expect(f.requests).toHaveLength(3);
+  });
+  it.each(['status','id','live','time','expiry'] as const)('rejects malformed/crossed clock %s facts',async fault=>{
+    const f=fixture();if(fault==='status')f.clock.status='unexpected';if(fault==='id')f.clock.id='clock_other';
+    if(fault==='live')f.clock.livemode=true;if(fault==='time')f.clock.frozen_time=-1;if(fault==='expiry')f.clock.deletes_after='tomorrow';
+    await expect(recoveryReader(f.options).observe()).rejects.toThrow('CLOCK_STRIPE_RECOVERY_CLOCK_INVALID');expect(f.requests).toHaveLength(3);
+  });
+  it('still rejects a Customer belonging to another owner before reading its clock',async()=>{
+    const f=fixture();f.customer.metadata.owner='someone_else';
+    await expect(recoveryReader(f.options).observe()).rejects.toThrow('CLOCK_STRIPE_CUSTOMER_MISMATCH');expect(f.requests).toHaveLength(2);
+  });
+  it('rejects an asynchronous reservation before delegating a provider request',async()=>{
+    const f=fixture();f.options.reserveWire=(()=>Promise.reject(new Error('private asynchronous budget'))) as any;
+    await expect(recoveryReader(f.options).observe()).rejects.toThrow('CLOCK_STRIPE_READ_UNCERTAIN');expect(f.requests).toHaveLength(0);
+  });
+  it('consumes recovery even on connection loss and never repeats the GET',async()=>{
+    const f=fixture();f.fail('/v1/account','closed');f.options.requestTimeoutMs=1500;const reader=recoveryReader(f.options);
+    await expect(reader.observe()).rejects.toThrow('CLOCK_STRIPE_READ_UNCERTAIN');
+    await expect(reader.observe()).rejects.toThrow('CLOCK_STRIPE_ALREADY_CONSUMED');expect(f.requests).toHaveLength(1);
+  });
 });

@@ -12,7 +12,7 @@ const NOW=Date.UTC(2026,9,14,12),OWNER='owner_aws_observer',ACCOUNT='76593287457
 const ARN=`arn:aws:sts::${ACCOUNT}:assumed-role/roadmap-bootstrap-operator/clock-test`;
 const PRIVATE='private-profile-only-in-memory',SECRET='synthetic-aws-secret-do-not-emit';
 const kinds:ClockAwsReadKind[]=['identity','app_table','privacy_table','fixture_identity','snapshot','financial_partition'];
-function input(stage='dev',kind:'install'|'transition'='install'){
+function input(stage='dev',kind:'install'|'transition'|'recovery'='install'){
   const tableName=`roadmap-${stage}`,privacyTableName=`roadmap-privacy-${stage}`;
   const fixture={ownerSub:OWNER,customerId:'cus_aws_observer',testClockId:'clock_aws_observer',bindingId:'aws_observer_binding',
     stage,stripeAccountId:'acct_sandbox',syntheticFixture:`stripe_clock_${stage}_aws_observer`};
@@ -211,6 +211,70 @@ describe('bounded AWS observation for clock publication',()=>{
     if(fault==='restore')s.state[6]={...restoreExclusionKey(OWNER),status:'excluded'};
     const observer=await prepareClockAwsObserver(s.options),observed=await observer.observe();
     await expect(prepareClockInstallTransaction(request(s.i,observed.snapshot))).rejects.toThrow(/^CLOCK_INSTALL_(CLOSED_VERSIONED_FLAGS_REQUIRED|EXISTING_ACTIVE_ADULT_REQUIRED|OPEN_NON_RESTORED_OWNER_REQUIRED|INITIAL_EMPTY_FIXTURE_REQUIRED)$/);
+    expect(s.seen).toHaveLength(6);
+  });
+});
+
+describe('read-only AWS clock recovery inventory',()=>{
+  it('requires a synchronous budget reservation before any AWS delegation',async()=>{
+    const s=setup(input('dev','recovery'));
+    s.options.reserveWire=(()=>Promise.resolve()) as any;
+    const reader=await prepareClockAwsObserver(s.options);
+    await expect(reader.observe()).rejects.toThrow('CLOCK_AWS_OBSERVATION_LOOKUP_FAILED');
+    expect(s.seen).toHaveLength(0);expect(s.destroyed()).toBe(1);
+  });
+  it.each(['dev','test'])('observes an existing %s state without applying install rules',async stage=>{
+    const s=setup(input(stage,'recovery'));
+    s.state[2]={pk:`USER#${OWNER}`,sk:'BILLING#TEST_CLOCK',clockRevision:2,providerReadyEvidence:{status:'advancing'}};
+    s.state[7]={pk:`BILLING#${OWNER}`,sk:'STATE',ownerSub:OWNER,state:'payment_review',revision:8};
+    const before=structuredClone(s.state),observer=await prepareClockAwsObserver(s.options),result=await observer.observe();
+    expect(result).toMatchObject({kind:'recovery',physicalAuthorizationChecked:false,sourceShaVerified:false,stackOwnershipVerified:false,
+      snapshot:{financialState:s.state[7],mirror:s.state[2],financialPartitionComplete:true,financialRows:[]}});
+    expect(s.seen.map(x=>x.kind)).toEqual(kinds);expect(s.reserved).toEqual(kinds);
+    expect(s.state).toEqual(before);expect(s.destroyed()).toBe(1);
+  });
+  it('retains an absent financial state as a recovery fact',async()=>{
+    const s=setup(input('dev','recovery'));
+    const result=await (await prepareClockAwsObserver(s.options)).observe();
+    expect(result).toMatchObject({kind:'recovery',snapshot:{financialState:null,mirror:null,customerMapping:null,financialRows:[]}});
+    expect(s.seen).toHaveLength(6);
+  });
+  it('retains existing audit rows without treating the partition as empty',async()=>{
+    const retained={pk:`BILLING#${OWNER}`,sk:'AUDIT#retained',privateDiagnostic:'only-in-memory'};
+    const s=setup(input('dev','recovery'),(kind,value)=>kind==='financial_partition'?{Items:[marshall(retained)],Count:1,ScannedCount:1}:value);
+    const result=await (await prepareClockAwsObserver(s.options)).observe();
+    expect(result).toMatchObject({kind:'recovery',snapshot:{financialRows:[retained],financialPartitionComplete:true}});
+    expect(s.seen.at(-1)!.body).toMatchObject({ConsistentRead:true,Limit:100});
+    expect(s.seen.at(-1)!.body).not.toHaveProperty('ExclusiveStartKey');
+  });
+  it.each(['pagination','crossed_partition','wrong_count'] as const)('stops an incomplete or crossed %s inventory',async fault=>{
+    const s=setup(input('dev','recovery'),(kind,value)=>{
+      if(kind!=='financial_partition')return value;
+      if(fault==='pagination')return{...value,LastEvaluatedKey:marshall({pk:`BILLING#${OWNER}`,sk:'next'})};
+      if(fault==='wrong_count')return{...value,Count:1};
+      return{Items:[marshall({pk:'BILLING#someone_else',sk:'STATE'})],Count:1};
+    });
+    await expect((await prepareClockAwsObserver(s.options)).observe()).rejects.toThrow('CLOCK_AWS_OBSERVATION_LOOKUP_FAILED');
+    expect(s.seen).toHaveLength(6);expect(s.destroyed()).toBe(1);
+  });
+  it('retains closure/minor/restore facts for diagnosis rather than granting safety',async()=>{
+    const s=setup(input('dev','recovery'));
+    s.state[0]!.accountType='minor';s.state[5]={pk:`ACCOUNT_CLOSURE#${OWNER}`,sk:'STATE',status:'requested'};
+    s.state[6]={...restoreExclusionKey(OWNER),status:'excluded'};
+    const result=await (await prepareClockAwsObserver(s.options)).observe();
+    expect(result.snapshot).toMatchObject({profile:s.state[0],closure:s.state[5],restoreExclusion:s.state[6]});
+    expect(result.physicalAuthorizationChecked).toBe(false);
+  });
+  it('still stops when the synthetic Cognito identity has been enabled',async()=>{
+    const s=setup(input('dev','recovery'),(kind,value)=>kind==='fixture_identity'?{...value,Enabled:true}:value);
+    await expect((await prepareClockAwsObserver(s.options)).observe()).rejects.toThrow('CLOCK_AWS_OBSERVATION_LOOKUP_FAILED');
+    expect(s.seen.map(x=>x.kind)).toEqual(kinds.slice(0,4));
+  });
+  it('captures recovery mode before caller mutation and consumes the observer once',async()=>{
+    const s=setup(input('dev','recovery')),observer=await prepareClockAwsObserver(s.options);
+    s.options.kind='install';s.state[7]={pk:`BILLING#${OWNER}`,sk:'STATE'};
+    expect((await observer.observe()).kind).toBe('recovery');
+    await expect(observer.observe()).rejects.toThrow('CLOCK_AWS_OBSERVATION_ALREADY_CONSUMED');
     expect(s.seen).toHaveLength(6);
   });
 });
