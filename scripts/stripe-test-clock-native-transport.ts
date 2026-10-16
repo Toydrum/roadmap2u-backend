@@ -113,10 +113,11 @@ export function createClockSdkHttpClients(transport:PinnedClockHttps){
   }};
   return {aws,stripe,destroy:()=>transport.destroy()};
 }
-export function prepareClockNativeTransports(options:{stage:string;phase:string;caBundlePath:string;caBundleSha256:string;timeoutMs?:number}){
+export function prepareClockNativeTransports(options:{stage:string;phase:string;caBundlePath:string;caBundleSha256:string;timeoutMs?:number;recoveryReadback?:boolean}){
   if(!['dev','test'].includes(options.stage))throw Error('CLOCK_NATIVE_STAGE');
-  if(!['install','ready','refresh','advance_fence'].includes(options.phase))throw Error('CLOCK_NATIVE_PHASE');
-  const maximum=options.phase==='install'?11:options.phase==='advance_fence'?14:10;
+  if(!['install','ready','refresh','advance_fence','recovery'].includes(options.phase))throw Error('CLOCK_NATIVE_PHASE');
+  if(options.phase==='recovery'&&typeof options.recoveryReadback!=='boolean'||options.phase!=='recovery'&&options.recoveryReadback!==undefined)throw Error('CLOCK_NATIVE_RECOVERY_OPTIONS');
+  const maximum=options.phase==='recovery'?(options.recoveryReadback?10:9):options.phase==='install'?11:options.phase==='advance_fence'?14:10;
   const transport=createPinnedClockHttps({caBundlePath:options.caBundlePath,caBundleSha256:options.caBundleSha256,timeoutMs:options.timeoutMs??10000,
     maximumRequests:maximum,origins:['https://sts.us-east-1.amazonaws.com','https://dynamodb.us-east-1.amazonaws.com','https://cognito-idp.us-east-1.amazonaws.com','https://api.stripe.com']});
   return {...createClockSdkHttpClients(transport),counts:transport.counts,

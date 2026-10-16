@@ -16,7 +16,7 @@ export interface ClockRecoveryManifest {
   schemaVersion:1;kind:'clock_recovery_read_only';sourceSha:string;operationId:string;
   clock:ClockCallerManifest['clock'];storage:ClockCallerManifest['storage'];expectedCallerArn:string;
   cloudformation:ClockCallerManifest['cloudformation'];attemptJournal:JournalBinding;priorJournal:JournalBinding|null;
-  runtime:NonNullable<ClockCallerManifest['runtime']>;
+  runtime:NonNullable<ClockCallerManifest['runtime']>&{awsCliExecutable:string;awsCliSha256:string};
   original:null|{sourceSha:string;requestSha256:string;intentSha256:string;reservationId:string};
 }
 export interface ClockRecoveryAuthority {
@@ -82,13 +82,16 @@ function manifest(raw:unknown,now:number):ClockRecoveryManifest{
     journal(m.priorJournal);requireCondition(m.priorJournal.directoryId!==m.attemptJournal.directoryId
       &&m.priorJournal.directory.replaceAll('\\','/').toLowerCase()!==m.attemptJournal.directory.replaceAll('\\','/').toLowerCase(),'JOURNAL_ALIAS_REJECTED');
   }
-  keys(m.runtime,['powershellExecutable','powershellSha256','caBundleSha256']);path(m.runtime.powershellExecutable);
+  keys(m.runtime,['powershellExecutable','powershellSha256','caBundleSha256','awsCliExecutable','awsCliSha256']);
+  path(m.runtime.powershellExecutable);path(m.runtime.awsCliExecutable);
   requireCondition(typeof m.runtime.powershellSha256==='string'&&HEX.test(m.runtime.powershellSha256)
-    &&typeof m.runtime.caBundleSha256==='string'&&HEX.test(m.runtime.caBundleSha256),'RUNTIME_REJECTED');
+    &&typeof m.runtime.caBundleSha256==='string'&&HEX.test(m.runtime.caBundleSha256)
+    &&typeof m.runtime.awsCliSha256==='string'&&HEX.test(m.runtime.awsCliSha256),'RUNTIME_REJECTED');
   if(m.original!==null){
     keys(m.original,['sourceSha','requestSha256','intentSha256','reservationId']);
-    requireCondition(m.priorJournal!==null&&typeof m.original.sourceSha==='string'&&SOURCE.test(m.original.sourceSha)
-      &&['requestSha256','intentSha256','reservationId'].every(k=>typeof m.original![k]==='string'&&HEX.test(m.original![k] as string)),'ORIGINAL_REJECTED');
+    const original=m.original;
+    requireCondition(m.priorJournal!==null&&typeof original.sourceSha==='string'&&SOURCE.test(original.sourceSha)
+      &&['requestSha256','intentSha256','reservationId'].every(k=>typeof original[k]==='string'&&HEX.test(original[k] as string)),'ORIGINAL_REJECTED');
   }
   return structuredClone(m) as unknown as ClockRecoveryManifest;
 }

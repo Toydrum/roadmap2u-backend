@@ -2,14 +2,15 @@
 
 Recovery uses its own opaque authority. It cannot substitute for
 ClockCallerAuthority, and an old write reply does not authorize recovery.
-The implementation follows the approved scoped-clock recovery requirement;
-native composition and physical acceptance remain pending.
+The implementation follows the approved scoped-clock recovery requirement.
+The native coordinator and CLI are implemented locally; physical acceptance
+remains pending.
 
 ## Review binding
 
 The strict clock_recovery_read_only manifest fixes the current source SHA,
 operation ID, DEV/TEST synthetic scope, account/caller, storage, CloudFormation
-resources, PowerShell/CA pins and two journal bindings. The attempt directory
+resources, PowerShell/AWS CLI/CA pins and two journal bindings. The attempt directory
 is separate from the prior financial journal. It carries no write phase.
 
 A newly captured direct-human reply must say:
@@ -52,16 +53,27 @@ permit the reply to be consumed again. Native ALREADY_RESERVED becomes a
 fixed recovery error; arbitrary process messages stay private. The prior
 financial journal is never written, reset or deleted by these functions.
 
-The authority and attempt remain separate. Before delegation, a future
-coordinator must recheck both against current source/runtime/journal state.
+The authority and attempt remain separate. Before every delegation, the
+coordinator rechecks both against current source/runtime/journal state.
 These functions alone perform no AWS/Stripe request, secret lookup, role
 assumption, repair, ready publication, clock advance or purchase.
 
-## Next composition
+## Coordinator and process boundary
 
-Wire six ownership reads, six AWS observations, three Stripe GET and an
-optional exact original readback through one actual-delegation budget. Add
-the native process preview/execute boundary, explicit credentials in private
-stdin and sanitized diagnostics. Actual runtime/permissions, isolated fixtures,
-authorized physical recovery, temporal PWA DEV/TEST and production acceptance
-are still required.
+The coordinator composes six ownership reads, six AWS observations, three
+Stripe GET and an optional exact original readback through one ordered
+actual-delegation budget. Reservations and actual sends are counted separately.
+Preparation serializes SDK requests without sending them or consuming approval.
+Execution consumes the new native attempt first. Failure stops the sequence;
+neither SDK retries nor a second execution are permitted.
+
+The process supports a credential-free preview and explicit temporary credentials
+in private stdin. AWS CLI uses only the reviewed executable path and hash, checked
+again before each child process. The separate SDK TLS transport accepts at most
+nine reads, or ten with the original readback. Diagnostic output excludes raw
+financial rows, profiles, credentials, URLs and arbitrary error messages. It never
+publishes ready evidence or repairs the original operation. See
+[the CLI contract](stripe-test-clock-recovery-cli.md).
+
+Actual runtime/permissions, isolated fixtures, authorized physical recovery,
+temporal PWA DEV/TEST and production acceptance are still required.

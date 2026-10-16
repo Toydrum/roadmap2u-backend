@@ -36,7 +36,9 @@ export async function authorityFixture(stage = 'dev', phase: 'install' | 'advanc
   const callerExport = fullCaller && existsSync(join(backendRoot, 'scripts/stripe-test-clock-caller.ts')) ? "export * from './scripts/stripe-test-clock-caller';" : '';
   const cliExport=fullCaller&&existsSync(join(backendRoot,'scripts/stripe-test-clock-cli.ts'))?"export * from './scripts/stripe-test-clock-cli';":'';
   const recoveryExport=existsSync(join(backendRoot,'scripts/stripe-test-clock-recovery-authority.ts'))?"export * from './scripts/stripe-test-clock-recovery-authority';":'';
-  buildSync({ stdin: { contents: "export * from './scripts/stripe-test-clock-authority'; export * from './scripts/stripe-test-clock-ownership'; export * from './scripts/stripe-test-clock-durable-store';" + callerExport+cliExport+recoveryExport, resolveDir: backendRoot },
+  const recoveryCallerExport=existsSync(join(backendRoot,'scripts/stripe-test-clock-recovery-caller.ts'))?"export * from './scripts/stripe-test-clock-recovery-caller';":'';
+  const recoveryCliExport=existsSync(join(backendRoot,'scripts/stripe-test-clock-recovery-cli.ts'))?"export * from './scripts/stripe-test-clock-recovery-cli';":'';
+  buildSync({ stdin: { contents: "export * from './scripts/stripe-test-clock-authority'; export * from './scripts/stripe-test-clock-ownership'; export * from './scripts/stripe-test-clock-durable-store';" + callerExport+cliExport+recoveryExport+recoveryCallerExport+recoveryCliExport, resolveDir: backendRoot },
     outfile: bundle, bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent' });
   if (nativeJournal) {
     writeFileSync(join(sourceRoot, 'scripts/stripe-test-clock-journal-windows.ps1'), readFileSync(join(backendRoot, 'scripts/stripe-test-clock-journal-windows.ps1')));

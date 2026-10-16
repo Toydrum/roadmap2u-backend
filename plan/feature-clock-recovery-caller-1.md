@@ -21,6 +21,14 @@ candidates and the previous reader checkpoint remain frozen in their checkouts.
    Keep AWS/Stripe facts private and return only sanitized diagnostic metadata.
 5. Add credential-free preview and the native process boundary using the
    existing pinned TLS transport and explicit credentials in private stdin.
+   Require the reviewed AWS CLI executable path/hash and check its bytes before
+   each child process; capture injected delegates before invoking callbacks.
+
+Steps 1–5 are implemented locally. The coordinator keeps separate reservation
+and actual-send counters and stops at 15/16 reads with no write/advance/replay.
+Type checking now includes the recovery authority, coordinator and CLI through
+explicit type imports in their tests; dynamically bundled fixtures alone had
+left the authority outside the compiler graph. Physical validation is pending.
 
 Test first with real Git/review files and SDK serialization, memory cloud
 handlers, and isolated real NTFS/PowerShell where native consumption is tested.

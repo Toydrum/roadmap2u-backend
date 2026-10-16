@@ -50,6 +50,8 @@ once after the attempt. Results expose only bounded metadata, hashes, counters
 and fixed failures, never credentials, signed headers, private profiles or raw
 transport errors. Existing attempts cannot be resumed or retried. A restart or
 uncertain operation requires a separately reviewed bounded recovery procedure.
+The [read-only recovery CLI](stripe-test-clock-recovery-cli.md) collects those
+diagnostic facts with fresh authority; it does not replay or repair this caller.
 
 ## Validation and remaining work
 

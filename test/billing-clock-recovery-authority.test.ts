@@ -5,11 +5,17 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { AUTH_NOW,cleanupAuthorityFixtures } from './support/clock-authority-fixture';
 import { cleanupRecoveryAuthorityFixtures,recoveryAuthorityFixture } from './support/clock-recovery-authority-fixture';
+export type RecoveryAuthority=Awaited<ReturnType<typeof import('../scripts/stripe-test-clock-recovery-authority').verifyClockRecoveryAuthority>>;
 
 afterAll(()=>{cleanupRecoveryAuthorityFixtures();cleanupAuthorityFixtures();});
 function required(f:any,name:string){expect(f.api[name],name+' is missing').toBeTypeOf('function');return f.api[name];}
 async function verify(f:any,options=f.recoveryOptions()){return required(f,'verifyClockRecoveryAuthority')(options);}
 describe('new read-only clock recovery authority with actual Git review bytes',()=>{
+  it.each(['awsCliExecutable','awsCliSha256'])('requires the reviewed %s runtime pin',async field=>{
+    const f=await recoveryAuthorityFixture(),factory=required(f,'verifyClockRecoveryAuthority');
+    delete f.manifest.runtime[field];f.freezeReview();
+    await expect(factory(f.recoveryOptions())).rejects.toThrow(/^CLOCK_RECOVERY_AUTHORITY_/);
+  });
   it.each(['dev','test'])('binds %s without minting write authority',async stage=>{
     const f=await recoveryAuthorityFixture(stage),authority=await verify(f);
     expect(authority).toMatchObject({stage,sourceSha:f.sourceSha,operationId:f.manifest.operationId,

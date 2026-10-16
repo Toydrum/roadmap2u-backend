@@ -14,8 +14,9 @@ ready publication. They are not a recovery CLI or physical authorization.
 | `prepareClockStripeRecoveryObserver(...)` | 3 Stripe GET | Bound account, Customer and diagnostic clock status |
 | `prepareClockRecoveryReadback(...)` | 1 DynamoDB read | Canonical inspection of the exact original transaction items |
 
-The future coordinator also needs six ownership reads. Its maximum inventory
-is therefore **16 reads**, including the optional original readback. An earlier
+The [recovery coordinator and CLI](stripe-test-clock-recovery-cli.md) add six
+ownership reads. The maximum inventory is **16 reads**, including the optional
+original readback, or 15 when explicitly omitted. An earlier
 local procedure estimated 15 and omitted the AWS observer's independent STS
 identity check. That check remains mandatory. No physical window is authorized
 by this document or by the previous caller's consumed approval.
@@ -39,8 +40,9 @@ guards. Existing install and transition modes retain their business checks.
 
 The eight-item snapshot is atomic. The partition query, ownership reads and
 Stripe reads are separate observations, not one cross-service atomic snapshot.
-A future coordinator must compare their scope, freshness and business facts
-before proposing any next operation. The components return
+A procedure proposing a next financial operation must compare their scope,
+freshness and business facts. The diagnostic coordinator does not authorize
+that operation. The components return
 `physicalAuthorizationChecked=false` and do not verify source/stack ownership.
 
 Stripe still verifies the account, Mexico, the exact non-live Customer,
@@ -87,7 +89,8 @@ npm run typecheck
 npm test -- --exclude test/billing-clock-native-transport.test.ts
 ```
 
-Fresh authority binding, source/stack ownership, native composition/CLI, actual
+The separate recovery authority and coordinator now bind source/review bytes,
+stack ownership, a new native attempt and explicit private CLI input. Actual
 permissions, bounded physical recovery and authenticated/visual DEV/TEST clock
 acceptance remain pending. The earlier synthetic restart drill retained the
 original bytes in the coordinator's memory; it does not prove recovery after

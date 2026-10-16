@@ -16,7 +16,8 @@ export async function recoveryAuthorityFixture(stage='dev',original=false,native
     cloudformation:structuredClone(f.manifest.cloudformation),
     attemptJournal:{directory:'C:/synthetic/recovery-attempts',directoryId:'1'.repeat(64),aclSha256:'2'.repeat(64)},
     priorJournal:original?{directory:'C:/synthetic/financial-journal',directoryId:'3'.repeat(64),aclSha256:'4'.repeat(64)}:null,
-    runtime:{powershellExecutable:'C:/synthetic/pwsh.exe',powershellSha256:'5'.repeat(64),caBundleSha256:f.privateFiles.caBundleSha256},
+    runtime:{powershellExecutable:'C:/synthetic/pwsh.exe',powershellSha256:'5'.repeat(64),caBundleSha256:f.privateFiles.caBundleSha256,
+      awsCliExecutable:'C:/synthetic/aws.exe',awsCliSha256:'6'.repeat(64)},
     original:null,
   };
   let journal:any,prior:any;
@@ -30,7 +31,8 @@ export async function recoveryAuthorityFixture(stage='dev',original=false,native
     journal=f.api.initializeDurableClockJournal({...base,directory:join(parent,'protected','recovery-attempts')});
     if(original)prior=f.api.initializeDurableClockJournal({...base,directory:join(parent,'protected','financial-journal')});
     manifest.attemptJournal={...journal};manifest.priorJournal=prior?{...prior}:null;
-    manifest.runtime={...base,caBundleSha256:f.privateFiles.caBundleSha256};
+    manifest.runtime={...base,caBundleSha256:f.privateFiles.caBundleSha256,
+      awsCliExecutable:'C:/synthetic/aws.exe',awsCliSha256:'6'.repeat(64)};
   }
   const originalRequestRaw=original?JSON.stringify(f.request):undefined;
   const plan=original?await prepareClockJournal(f.request,f.sourceSha):undefined;

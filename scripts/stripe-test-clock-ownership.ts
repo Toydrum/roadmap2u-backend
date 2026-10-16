@@ -3,8 +3,9 @@ import { promisify } from 'node:util';
 import { readFileSync, lstatSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import type { AwsCredentialIdentity } from '@smithy/types';
-import { readClockCallerAuthority, claimClockOwnershipAuthority, reserveDurableClockCallerAttempt, assertDurableClockCallerAttempt, type ClockCallerAuthority, type DurableClockCallerAttempt } from './stripe-test-clock-authority';
+import { readClockCallerAuthority, claimClockOwnershipAuthority, reserveDurableClockCallerAttempt, assertDurableClockCallerAttempt, type ClockCallerAuthority, type DurableClockCallerAttempt, type ClockCallerManifest } from './stripe-test-clock-authority';
 import { assertDurableClockJournal, type DurableClockJournal } from './stripe-test-clock-durable-store';
+import { readClockRecoveryAuthority,assertDurableClockRecoveryAttempt,type ClockRecoveryAuthority,type DurableClockRecoveryAttempt } from './stripe-test-clock-recovery-authority';
 
 export type ClockOwnershipReadKind = 'identity' | 'stack' | 'app' | 'privacy' | 'pool' | 'stack_after';
 interface CliOptions { env: NodeJS.ProcessEnv; timeout: number; signal: AbortSignal }
@@ -29,11 +30,15 @@ function regular(file: string) {
 }
 /** Native CLI reader only. Explicit temporary credentials remain in child memory;
  * there is no profile discovery, secret lookup, role assumption or write command. */
-export function prepareClockOwnershipObserver(options: ClockOwnershipOptions) {
+interface OwnershipContext {
+  read:(now:number)=>Pick<ClockCallerManifest,'clock'|'storage'|'expectedCallerArn'|'cloudformation'|'sourceSha'|'operationId'>;
+  claim:(now:number)=>void;manifestHash:()=>string;
+}
+function prepareClockOwnershipReads(options:Omit<ClockOwnershipOptions,'authority'>,context:OwnershipContext) {
   try {
-    const authority = options.authority, now = options.now, reserve = options.reserveWire, run = options.runCli ?? nativeClockOwnershipCli;
+    const now = options.now, reserve = options.reserveWire, run = options.runCli ?? nativeClockOwnershipCli;
     requireCondition(typeof now === 'function' && typeof reserve === 'function' && typeof run === 'function', 'DEPENDENCIES_REQUIRED');
-    const preparedAt = now(), manifest = readClockCallerAuthority(authority, preparedAt), supplied = options.credentials;
+    const preparedAt = now(), manifest = context.read(preparedAt), supplied = options.credentials;
     requireCondition(supplied && typeof supplied.accessKeyId === 'string' && /^ASIA[A-Z0-9]{16}$/.test(supplied.accessKeyId) &&
       typeof supplied.secretAccessKey === 'string' && supplied.secretAccessKey.length > 0 && typeof supplied.sessionToken === 'string' && supplied.sessionToken.length > 0 &&
       supplied.expiration instanceof Date && supplied.expiration.getTime() > preparedAt + 120000, 'CREDENTIAL_SNAPSHOT_REQUIRED');
@@ -48,7 +53,7 @@ export function prepareClockOwnershipObserver(options: ClockOwnershipOptions) {
     requireCondition(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 20000, 'TIMEOUT_REJECTED');
     let previous = preparedAt, consumed = false;
     function fresh() {
-      const value = now(); readClockCallerAuthority(authority, value);
+      const value = now(); context.read(value);
       requireCondition(Number.isSafeInteger(value) && value >= previous && credentials.expiration.getTime() > value + 30000, 'CONTEXT_EXPIRED');
       previous = value; files(); return value;
     }
@@ -95,7 +100,7 @@ export function prepareClockOwnershipObserver(options: ClockOwnershipOptions) {
       async observe() {
         requireCondition(!consumed, 'ALREADY_CONSUMED'); consumed = true;
         try {
-          fresh(); claimClockOwnershipAuthority(authority, previous); const startedAt = previous;
+          fresh(); context.claim(previous); const startedAt = previous;
           const identity = await read('identity', ['sts', 'get-caller-identity']);
           requireCondition(identity.Account === manifest.storage.awsAccountId && identity.Arn === manifest.expectedCallerArn && typeof identity.UserId === 'string' && identity.UserId.length > 0, 'IDENTITY_MISMATCH');
           const before = stack(await read('stack', ['cloudformation', 'describe-stacks', '--stack-name', cloud.stackId]));
@@ -111,8 +116,7 @@ export function prepareClockOwnershipObserver(options: ClockOwnershipOptions) {
           requireCondition(JSON.stringify(before) === JSON.stringify(after), 'STACK_CHANGED');
           const completedAt = fresh();
           return { status: 'ownership_verified' as const, stage: manifest.clock.scope.stage, ownerSub: manifest.clock.ownerSub, operationId: manifest.operationId,
-            sourceSha: manifest.sourceSha, manifestSha256: authority.manifestSha256, requestSha256: authority.requestSha256,
-            transactionSha256: authority.transactionSha256, readbackSha256: authority.readbackSha256, stackId: cloud.stackId, resources, startedAt, completedAt,
+            sourceSha: manifest.sourceSha, manifestSha256: context.manifestHash(), stackId: cloud.stackId, resources, startedAt, completedAt,
             sourceShaVerified: true, authorizationReceiptBound: true, stackOwnershipVerified: true, physicalExecutionAllowed: false,
             counts: { reservations: { ...counters }, delegations: { ...delegated } } };
         } catch { throw Error('CLOCK_OWNERSHIP_OBSERVATION_FAILED'); }
@@ -122,6 +126,31 @@ export function prepareClockOwnershipObserver(options: ClockOwnershipOptions) {
     const code = error instanceof Error && /^CLOCK_(?:OWNERSHIP|AUTHORITY)_[A-Z_]+$/.test(error.message) ? error.message : 'CLOCK_OWNERSHIP_PREPARATION_FAILED';
     throw Error(code);
   }
+}
+/** Existing write-side authority/consumption contract remains unchanged. */
+export function prepareClockOwnershipObserver(options:ClockOwnershipOptions){
+  const authority=options.authority;
+  const reader=prepareClockOwnershipReads(options,{read:t=>readClockCallerAuthority(authority,t),
+    claim:t=>claimClockOwnershipAuthority(authority,t),manifestHash:()=>authority.manifestSha256});
+  return{...reader,async observe(){
+    const proof=await reader.observe();
+    return{...proof,requestSha256:authority.requestSha256,transactionSha256:authority.transactionSha256,readbackSha256:authority.readbackSha256};
+  }};
+}
+export interface ClockRecoveryOwnershipOptions extends Omit<ClockOwnershipOptions,'authority'> {
+  authority:ClockRecoveryAuthority;attempt:DurableClockRecoveryAttempt;
+  journalDirectory:DurableClockJournal;priorJournalDirectory:DurableClockJournal|null;
+}
+const recoveryOwnershipUses=new WeakSet<object>();
+/** A new read-only attempt is mandatory; write authority cannot substitute. */
+export function prepareClockRecoveryOwnershipObserver(options:ClockRecoveryOwnershipOptions){
+  const authority=options.authority,attempt=options.attempt,journal=options.journalDirectory,prior=options.priorJournalDirectory,
+    now=options.now,reserve=options.reserveWire;
+  const check=(t:number)=>assertDurableClockRecoveryAttempt(attempt,authority,journal,prior,t);
+  return prepareClockOwnershipReads({...options,reserveWire:kind=>{check(now());return reserve(kind);}},{
+    read:t=>readClockRecoveryAuthority(authority,t),manifestHash:()=>authority.manifestSha256,
+    claim:t=>{check(t);requireCondition(!recoveryOwnershipUses.has(attempt),'ALREADY_CONSUMED');recoveryOwnershipUses.add(attempt);},
+  });
 }
 /** Composition boundary for a future physical caller. No credential discovery,
  * automatic continuation or writes are introduced by this wrapper. */
