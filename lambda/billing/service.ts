@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { individualPurchaseAdmitted } from './admission';
 import { purchasesConfigReady } from './config';
 import { canReadTestClock, resolveFinancialClock, financialClockPresentation } from './clock';
@@ -30,6 +31,18 @@ function safeProviderUrl(url: string, kind: 'checkout' | 'portal'): boolean { tr
 
 export class BillingService {
   constructor(readonly deps: BillingServiceDeps) {}
+  /** New synthetic purchases require ready evidence; ordinary recovery and Portal do not. */
+  private async checkoutClock(s: BillingState, expected?: { item: unknown }): Promise<{ item: unknown } | undefined> {
+    if (s.testClock === undefined) return undefined;
+    const cfg = this.deps.config;
+    const context = { ownerSub: s.ownerSub, customerId: s.customerId ?? '', stage: cfg.stage,
+      accountId: cfg.accountId, liveMode: cfg.liveMode, reference: s.testClock };
+    if (!canReadTestClock(context)) throw new BillingError('BILLING_PAYMENT_REVIEW');
+    const item = await this.deps.repository.readTestClock(s.ownerSub);
+    if (resolveFinancialClock({ ...context, now: this.deps.now() }, item).mode !== 'simulation'
+      || (expected && !isDeepStrictEqual(expected.item, item))) throw new BillingError('BILLING_PAYMENT_REVIEW');
+    return { item };
+  }
   async catalog() {
     const c = this.deps.config;
     return { contractVersion: 1 as const, catalogVersion: c.catalogVersion, currency: 'MXN' as const, taxInclusive: true as const, country: 'MX' as const, offerKey: 'premium_individual' as const, planKey: 'premium' as const, prices: billingCatalogPrices(c), purchasesEnabled: purchasesConfigReady(c) && await this.deps.purchasesEnabled() && individualPurchaseAdmitted(c.purchaseAdmission), terms: { version: c.termsVersion, hashes: c.termsHashes, urls: c.termsUrls } };
@@ -70,12 +83,15 @@ export class BillingService {
     if (state.activeCommandId) return pending(state.activeCommandId, state.revision);
     if (state.subscriptionId) throw new BillingError('BILLING_SUBSCRIPTION_EXISTS');
     if (state.revision !== req.expectedBillingRevision) throw new BillingError('BILLING_REVISION_CONFLICT');
+    const observedClock = await this.checkoutClock(state);
     await p.preflight();
+    const clockObservation = await this.checkoutClock(state, observedClock);
     const now = this.deps.now(), op = operationId(cfg, ownerSub, req.commandId);
     const customerOp = operationId(cfg, ownerSub, 'customer');
     const command: BillingCommand = { ownerSub, commandId: req.commandId, kind: 'checkout', fingerprint: paramsFingerprint(req), operationId: op, createdAt: now, updatedAt: now, status: 'reserved', customerKey: `r2u:customer:${customerOp}`, customerParams: { ownerSub, operationId: customerOp, ...(actor.email ? { email: actor.email } : {}) }, checkoutKey: `r2u:checkout:${op}`, buyerEmailVerified: true, priceTerms: { priceId: req.interval === 'month' ? cfg.monthlyPriceId : cfg.annualPriceId, productId: cfg.productId, amountMinor: prices[req.interval].amountMinor, interval: req.interval, currency: 'mxn', taxRateId: cfg.taxRateId, catalogVersion: cfg.catalogVersion }, consent: { accountId: ownerSub, acceptedAt: now, version: req.termsAcceptance.version, hash: req.termsAcceptance.hash, language: req.termsAcceptance.language }, interval: req.interval };
     const reserved = { ...state, revision: state.revision + 1, state: 'checkout_pending' as const, activeCommandId: command.commandId, updatedAt: now, nextReconcileAt: now };
-    if (!await r.commit({ expectedRevision: state.revision, state: reserved, guard: 'adult', actor, command, commandAbsent: true, auditAction: 'billing.checkout_reserved' })) {
+    if (!await r.commit({ expectedRevision: state.revision, state: reserved, guard: 'adult', actor, command, commandAbsent: true,
+      ...(clockObservation ? { clockObservation } : {}), auditAction: 'billing.checkout_reserved' })) {
       state = await r.load(ownerSub); const same = await r.command(ownerSub, req.commandId);
       if (same && same.fingerprint === command.fingerprint) return this.resumeCheckout(ownerSub, same);
       if (state.activeCommandId) return pending(state.activeCommandId, state.revision);
@@ -115,9 +131,11 @@ export class BillingService {
       if (!command.checkoutParams) {
         if (this.deps.now() - command.createdAt >= 23 * 3_600_000) return await this.expireReservation(s, command, actor, fence(), 'no_checkout_authorized', [], []);
         if (!command.priceTerms) return await this.review(s, 'missing_reserved_price', fence());
+        const clockObservation = await this.checkoutClock(s);
         command = { ...command, checkoutParams: { ownerSub, operationId: command.operationId, customerId: s.customerId!, priceId: command.priceTerms.priceId, quantity: 1, mode: 'subscription', taxRateId: command.priceTerms.taxRateId, expiresAt: this.deps.now() + 1_860_000, successUrl: cfg.successUrl, cancelUrl: cfg.cancelUrl }, updatedAt: this.deps.now() };
         const next = { ...s, revision: s.revision + 1, updatedAt: this.deps.now() };
-        if (!await r.commit({ expectedRevision: s.revision, state: next, guard: 'adult', actor, lease: fence(), command, auditAction: 'billing.checkout_parameters_reserved' })) return pending(command.commandId, (await r.load(ownerSub)).revision);
+        if (!await r.commit({ expectedRevision: s.revision, state: next, guard: 'adult', actor, lease: fence(), command,
+          ...(clockObservation ? { clockObservation } : {}), auditAction: 'billing.checkout_parameters_reserved' })) return pending(command.commandId, (await r.load(ownerSub)).revision);
         s = next;
       }
       const remote = command.sessionId ? [await p.retrieveCheckout(command.sessionId)] : await p.findCheckouts(s.customerId!, command.operationId);
@@ -133,8 +151,12 @@ export class BillingService {
         if (snapshot.invoices.some((v) => v.status === 'open' || v.status === 'draft')) return await this.review(s, 'unresolved_remote_invoice', fence());
         if (command.checkoutParams!.expiresAt <= this.deps.now()) return await this.expireReservation(s, command, actor, fence(), 'no_remote_after_expiry', allSessions, snapshot.subscriptions, snapshot);
         if (this.deps.now() - command.createdAt >= 23 * 3_600_000) return await this.review(s, 'checkout_result_unknown_after_retention', fence());
+        const clockObservation = await this.checkoutClock(s);
         const latest = await r.load(ownerSub);
         if (latest.revision !== s.revision || latest.leaseOwner !== lease.owner || latest.leaseRevision !== lease.revision || (latest.leaseUntil ?? 0) <= this.deps.now()) return pending(command.commandId, latest.revision);
+        // No asynchronous work after the lease check; the state read can also cross evidence expiry.
+        if (clockObservation && resolveFinancialClock({ ownerSub, customerId: s.customerId!, stage: cfg.stage,
+          accountId: cfg.accountId, liveMode: cfg.liveMode, reference: s.testClock, now: this.deps.now() }, clockObservation.item).mode !== 'simulation') throw new BillingError('BILLING_PAYMENT_REVIEW');
       }
       let session = remote[0];
       if (!session) {
