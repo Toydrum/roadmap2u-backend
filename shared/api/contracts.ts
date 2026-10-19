@@ -1111,8 +1111,8 @@ export const LIMITS = Object.freeze({
   maxChildrenPerGuardian: 8,
   syncPushMax: 100,
   syncMutationGroupMax: 20,
-  /** BAD code redemptions (invalid/expired) per hour before RATE_LIMITED —
-   *  successful redemptions never count toward the brake. */
+  /** Total bearer-code lookups per account/hour before RATE_LIMITED.
+   *  Valid and invalid lookups share the same allowance. */
   codeAttemptsPerHour: 5,
 });
 
