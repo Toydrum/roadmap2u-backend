@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
@@ -49,6 +50,33 @@ function fixture(fake:FakeOptions={}){
 function saved(f:ReturnType<typeof fixture>,suffix:string){const name=readdirSync(f.opts.journalDirectory).find(name=>name.endsWith('.'+suffix+'.json'));return name?JSON.parse(readFileSync(join(f.opts.journalDirectory,name),'utf8')):null;}
 
 describe('bounded clock DynamoDB transport with actual SDK',()=>{
+  it('rejects raw SDK transaction bytes even when a Uint8Array string hook supplies the allowed JSON',async()=>{
+    const f=fixture(),handle=f.opts.requestHandler.handle;
+    f.opts.requestHandler={...f.opts.requestHandler,handle:async(request:any,options:any)=>{
+      const value=request.body;
+      return handle({...request,body:typeof value==='string'?value:Buffer.from(new Uint8Array(value.buffer,value.byteOffset,value.byteLength))},options);
+    }};
+    const executor=await prepareClockDynamoExecutor(f.opts),original=DynamoDBDocumentClient.prototype.send;let coercions=0;
+    const spy=vi.spyOn(DynamoDBDocumentClient.prototype,'send').mockImplementation(function(this:DynamoDBDocumentClient,...args:any[]){
+      this.middlewareStack.add(next=>async context=>{
+        const request=context.request as any;
+        if(request.headers['x-amz-target']==='DynamoDB_20120810.TransactWriteItems'){
+          const expected=typeof request.body==='string'?request.body:new TextDecoder().decode(request.body);
+          const raw=JSON.parse(expected);raw.TransactItems.find((item:any)=>item.Put).Put.TableName='roadmap-prod';
+          const bytes=Buffer.from(JSON.stringify(raw)),padded=new Uint8Array(bytes.byteLength+16);padded.fill(0x78);padded.set(bytes,8);
+          class CoercingBody extends Uint8Array {valueOf():any{coercions++;return expected;}}
+          request.body=new CoercingBody(padded.buffer,8,bytes.byteLength);
+        }
+        return next(context);
+      },{name:'testDynamoRawByteGuard',step:'finalizeRequest',priority:'low',override:true});
+      return (original as any).apply(this,args);
+    });
+    try{
+      const result=await executor.execute();
+      expect(result).toMatchObject({status:'uncertain',wireDelegations:{write:0,readback:0},retryAllowed:false});
+      expect(f.calls).toEqual([]);expect(f.reservations).toEqual([]);expect(coercions).toBe(0);
+    }finally{spy.mockRestore();}
+  });
   it('prepares without remote delegation or journal and executes one write plus exact readback',async()=>{
     const f=fixture(),e=await prepareClockDynamoExecutor(f.opts);expect(f.calls).toHaveLength(0);expect(readdirSync(f.opts.journalDirectory)).toHaveLength(0);
     expect(e.preview).toMatchObject({physicalAuthorizationChecked:false,writeMaximum:1,readbackMaximum:1});

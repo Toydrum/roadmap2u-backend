@@ -23,7 +23,8 @@ function requireCondition(ok:unknown,reason:string):asserts ok {if(!ok)throw new
 function timestamp(v:unknown):v is number{return typeof v==='number'&&Number.isSafeInteger(v)&&v>=0&&Number.isFinite(new Date(v).getTime());}
 function body(request:HttpRequest):unknown {
   requireCondition(typeof request.body==='string'||request.body instanceof Uint8Array,'WIRE_BODY_REJECTED');
-  return JSON.parse(Buffer.from(request.body).toString('utf8'));
+  const value=request.body;
+  return JSON.parse((typeof value==='string'?Buffer.from(value):Buffer.from(new Uint8Array(value.buffer,value.byteOffset,value.byteLength))).toString('utf8'));
 }
 function client(credentials:AwsCredentialIdentity,handler:ClockDynamoHandler){
   const base=new DynamoDBClient({region:'us-east-1',endpoint:'https://dynamodb.us-east-1.amazonaws.com',credentials,maxAttempts:1,requestHandler:handler});

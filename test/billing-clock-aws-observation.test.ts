@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { STSClient } from '@aws-sdk/client-sts';
+import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { marshall } from '@aws-sdk/util-dynamodb';
 import type { HttpRequest } from '@smithy/types';
 import { FAMILY_BILLING_FLAG_DEFAULTS } from '../lambda/commercial/flags';
@@ -35,7 +36,8 @@ function setup(i=input(),change?:(kind:ClockAwsReadKind,value:any)=>any){
   const state=rows(i);let destroyed=0,now=NOW;
   const json=(value:unknown,statusCode=200)=>({response:{statusCode,headers:{'content-type':'application/x-amz-json-1.0'},body:Buffer.from(JSON.stringify(value))}});
   const handler={destroy:()=>{destroyed++;},handle:async(request:HttpRequest)=>{
-    const body=Buffer.from(request.body as string).toString('utf8');
+    const requestBody=request.body;
+    const body=(typeof requestBody==='string'?Buffer.from(requestBody):Buffer.from(new Uint8Array(requestBody.buffer,requestBody.byteOffset,requestBody.byteLength))).toString('utf8');
     const operation=request.headers['x-amz-target'];
     const wireKind:ClockAwsReadKind=request.hostname.startsWith('sts.')?'identity':request.hostname.startsWith('cognito-idp.')?'fixture_identity':
       operation==='DynamoDB_20120810.DescribeTable'?(JSON.parse(body).TableName===remote.clock.scope.tableName?'app_table':'privacy_table'):
@@ -67,6 +69,61 @@ function request(i:ReturnType<typeof input>,snapshot:any):ClockInstallRequest{
 }
 
 describe('bounded AWS observation for clock publication',()=>{
+  it.each(['actual SDK adapter','offset window with misleading coercion'] as const)('copies %s bytes without invoking string hooks',async mode=>{
+    const originalSend=CognitoIdentityProviderClient.prototype.send;
+    let adapters=0,coercions=0;
+    const send=vi.spyOn(CognitoIdentityProviderClient.prototype,'send').mockImplementation(function(this:CognitoIdentityProviderClient,...args:any[]){
+      this.middlewareStack.add(next=>async context=>{
+        const request=context.request as HttpRequest,value=request.body;
+        if(value instanceof Uint8Array){
+          const Adapter=value.constructor as new(buffer:ArrayBufferLike,offset:number,length:number)=>Uint8Array;
+          const originalValueOf=value.valueOf.bind(value);
+          let view=value;
+          if(mode==='offset window with misleading coercion'){
+            const padded=new Uint8Array(value.byteLength+16);padded.fill(0x78);padded.set(value,8);
+            view=new Adapter(padded.buffer,8,value.byteLength);
+          }
+          Object.defineProperty(view,'valueOf',{value:()=>{coercions++;return mode==='actual SDK adapter'?originalValueOf():'{"TableName":"roadmap-crossed"}';}});
+          request.body=view;adapters++;
+        }
+        return next(context);
+      },{name:'testSdkByteWindow',step:'finalizeRequest',priority:'low',override:true});
+      return (originalSend as any).apply(this,args);
+    });
+    const s=setup(),handle=s.handler.handle;
+    s.options.requestHandler={...s.handler,handle:async request=>{
+      const value=request.body;
+      return handle({...request,body:typeof value==='string'?value:Buffer.from(new Uint8Array(value.buffer,value.byteOffset,value.byteLength))});
+    }};
+    try{
+      const observer=await prepareClockAwsObserver(s.options);await observer.observe();
+      expect(adapters).toBeGreaterThan(0);expect(coercions).toBe(0);
+      expect(s.seen.find(x=>x.kind==='app_table')!.body).toEqual({TableName:'roadmap-dev'});
+      expect(s.seen.find(x=>x.kind==='identity')!.body).toBe('Action=GetCallerIdentity&Version=2011-06-15');
+    }finally{send.mockRestore();}
+  });
+  it('rejects changed SDK bytes even when their string hook claims the expected body',async()=>{
+    const originalSend=CognitoIdentityProviderClient.prototype.send;let observing=false,coercions=0;
+    const send=vi.spyOn(CognitoIdentityProviderClient.prototype,'send').mockImplementation(function(this:CognitoIdentityProviderClient,...args:any[]){
+      this.middlewareStack.add(next=>async context=>{
+        const request=context.request as HttpRequest,value=request.body;
+        if(observing&&value instanceof Uint8Array&&request.headers['x-amz-target']==='AWSCognitoIdentityProviderService.AdminGetUser'){
+          const expected=new TextDecoder().decode(value);const bytes=Buffer.from('{"UserPoolId":"us-east-1_CROSSED","Username":"crossed"}');
+          const Adapter=value.constructor as new(buffer:ArrayBufferLike,offset:number,length:number)=>Uint8Array;
+          const view=new Adapter(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+          Object.defineProperty(view,'valueOf',{value:()=>{coercions++;return expected;}});request.body=view;
+        }
+        return next(context);
+      },{name:'testChangedSdkBytes',step:'finalizeRequest',priority:'low',override:true});
+      return (originalSend as any).apply(this,args);
+    });
+    const s=setup();
+    try{
+      const observer=await prepareClockAwsObserver(s.options);observing=true;
+      await expect(observer.observe()).rejects.toThrow('CLOCK_AWS_OBSERVATION_LOOKUP_FAILED');
+      expect(s.reserved).toEqual(['identity','app_table','privacy_table']);expect(s.seen.map(x=>x.kind)).toEqual(['identity','app_table','privacy_table']);expect(coercions).toBe(0);
+    }finally{send.mockRestore();}
+  });
   it.each(['dev','test'])('collects current %s facts and composes the real installation',async stage=>{
     const s=setup(input(stage)),observer=await prepareClockAwsObserver(s.options);
     expect(s.seen).toEqual([]);expect(s.reserved).toEqual([]);expect(JSON.stringify(observer.preview)).not.toContain(SECRET);
