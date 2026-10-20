@@ -155,8 +155,9 @@ export class BillingService {
         const latest = await r.load(ownerSub);
         if (latest.revision !== s.revision || latest.leaseOwner !== lease.owner || latest.leaseRevision !== lease.revision || (latest.leaseUntil ?? 0) <= this.deps.now()) return pending(command.commandId, latest.revision);
         // No asynchronous work after the lease check; the state read can also cross evidence expiry.
-        if (clockObservation && resolveFinancialClock({ ownerSub, customerId: s.customerId!, stage: cfg.stage,
-          accountId: cfg.accountId, liveMode: cfg.liveMode, reference: s.testClock, now: this.deps.now() }, clockObservation.item).mode !== 'simulation') throw new BillingError('BILLING_PAYMENT_REVIEW');
+        if (resolveFinancialClock({ ownerSub, customerId: s.customerId!, stage: cfg.stage,
+          accountId: cfg.accountId, liveMode: cfg.liveMode, reference: s.testClock, now: this.deps.now(),
+          providerTestClockId: snapshot.customer.testClockId ?? null }, clockObservation?.item).mode === 'blocked') throw new BillingError('BILLING_PAYMENT_REVIEW');
       }
       let session = remote[0];
       if (!session) {

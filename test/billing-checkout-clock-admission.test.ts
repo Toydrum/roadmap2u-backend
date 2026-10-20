@@ -29,6 +29,21 @@ describe('new Checkout uses the protected clock independently of stale projectio
     expect(result.outcome).toBe('redirect'); expect(f.provider.checkoutCreateCalls).toBe(1);
     expect([...f.provider.checkouts.values()][0].expiresAt).toBe(NOW + 1_860_000);
   });
+  it.each([['different', 'clock_other'], ['null', null], ['missing', undefined]])('rejects a %s Customer clock before creating Checkout', async (_, testClockId) => {
+    const f = await clockFixture();
+    Object.assign(f.provider.customers.get(f.customerId)!, {testClockId});
+    await expect(f.service.checkout('adult', f.checkout)).rejects.toMatchObject({code: 'BILLING_PAYMENT_REVIEW'});
+    expect(f.provider.checkoutCreateCalls).toBe(0);
+  });
+  it('rejects an unbound Customer clock without reading the protected mirror', async () => {
+    const f = await fixture(), read = vi.spyOn(f.repository, 'readTestClock'), snapshot = f.provider.snapshot.bind(f.provider);
+    vi.spyOn(f.provider, 'snapshot').mockImplementation(async id => {
+      const value = await snapshot(id);
+      return {...value, customer: {...value.customer, testClockId: 'clock_unbound'}};
+    });
+    await expect(f.service.checkout('adult', request())).rejects.toMatchObject({code: 'BILLING_PAYMENT_REVIEW'});
+    expect(f.provider.checkoutCreateCalls).toBe(0); expect(read).not.toHaveBeenCalled();
+  });
   it('rejects exactly at evidence expiry before the next reconciliation', async () => {
     const f = await clockFixture(); f.setNow(NOW + TEST_CLOCK_EVIDENCE_MAX_AGE_MS);
     expect((await f.service.summary('adult')).canCheckout).toBe(false);
