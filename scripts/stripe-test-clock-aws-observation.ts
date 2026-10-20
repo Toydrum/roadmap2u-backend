@@ -22,7 +22,9 @@ function requireCondition(ok:unknown,reason:string):asserts ok{if(!ok)throw new 
 function record(value:unknown):value is Record<string,unknown>{return !!value&&typeof value==='object'&&!Array.isArray(value);}
 function timestamp(value:unknown):value is number{return typeof value==='number'&&Number.isSafeInteger(value)&&value>=0&&Number.isFinite(new Date(value).getTime());}
 function body(request:HttpRequest):string{
-  requireCondition(typeof request.body==='string'||request.body instanceof Uint8Array,'WIRE_BODY_INVALID');return Buffer.from(request.body).toString('utf8');
+  requireCondition(typeof request.body==='string'||request.body instanceof Uint8Array,'WIRE_BODY_INVALID');
+  const value=request.body;
+  return (typeof value==='string'?Buffer.from(value):Buffer.from(new Uint8Array(value.buffer,value.byteOffset,value.byteLength))).toString('utf8');
 }
 function clients(credentials:AwsCredentialIdentity,requestHandler:ClockDynamoHandler){
   const common={region:'us-east-1',credentials,requestHandler,maxAttempts:1};

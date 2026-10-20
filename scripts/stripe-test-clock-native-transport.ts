@@ -62,7 +62,9 @@ export function createPinnedClockHttps(options:PinnedHttpsOptions){
       requireCondition(!signal?.aborted,'ABORTED');
       try{requireCondition(realpathSync(path)===canonical,'CA');certificate(path,hash);}catch{throw Error('CLOCK_HTTPS_CA');}
       requireCondition(requests<maximum,'LIMIT');requests++;
-      const body=Buffer.from(input.body??''),headers={...input.headers},hostname=input.hostname,port=input.port??443,method=input.method,urlPath=input.path;
+      const value=input.body??'';
+      const body=typeof value==='string'?Buffer.from(value):Buffer.from(new Uint8Array(value.buffer,value.byteOffset,value.byteLength));
+      const headers={...input.headers},hostname=input.hostname,port=input.port??443,method=input.method,urlPath=input.path;
       return new Promise<HttpsResponse>((resolve,reject)=>{
         let req:ClientRequest|undefined,done=false;const chunks:Buffer[]=[];let size=0;
         const cancel=(reason:string)=>finish(Error('CLOCK_HTTPS_'+reason));

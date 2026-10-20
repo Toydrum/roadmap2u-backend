@@ -102,7 +102,7 @@ describe('financial and operational clocks in billing consumers', () => {
     const projector = new BillingProjector({...f,config,nextWorkerId:()=> 'worker-qa'});
     await projector.reconcileOwner('adult');
     expect((await f.repository.load('adult')).state).toBe('active');
-    expect((await f.repository.load('adult')).nextReconcileAt).toBe(NOW+900_000);
+    expect((await f.repository.load('adult')).nextReconcileAt).toBe(NOW+60_000);
     expect((await f.repository.load('adult')).updatedAt).toBe(NOW);
     expect((await f.repository.receipts('adult'))[0].verifiedAt).toBe(NOW);
   });
@@ -157,7 +157,7 @@ describe('financial and operational clocks in billing consumers', () => {
     provider.subscriptions.get('sub_1')!.status='canceled';
     await projector.reconcileOwner('adult');await projector.reconcileOwner('adult');
     expect((await access()).effectivePlanKey).toBe('free');
-    expect((await repository.load('adult')).nextReconcileAt).toBe(NOW+900_000);
+    expect((await repository.load('adult')).nextReconcileAt).toBe(NOW+60_000);
     expect((await repository.load('adult')).updatedAt).toBe(NOW);
     expect((await repository.receipts('adult')).every(i=>i.valid && i.amountPaid === amount && i.verifiedAt === NOW)).toBe(true);
   });
