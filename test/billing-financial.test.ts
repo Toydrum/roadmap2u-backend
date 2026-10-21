@@ -22,6 +22,7 @@ describe('verified financial periods', () => {
     const resolver = new AccessResolver({ tableName: 'roadmap', now: f.now, readSnapshot: async () => ({ grants: [], subscription: source, ownerProfile: { accountType: 'adult' } }), materializeAccess: async () => 'committed' });
     expect((await resolver.resolveFresh('adult')).access.effectivePlanKey).toBe('premium');
     expect((await f.repository.receipts('adult'))[0].paymentIds).toEqual(['ip_in_1']);
+    expect((await f.service.summary('adult')).nextRenewalAt).toBe(source.paidThrough);
   });
   it('duplicates and reversed events converge without granting twice or trusting event timestamps', async () => {
     const f = await paidFixture();
@@ -32,6 +33,7 @@ describe('verified financial periods', () => {
     expect((await f.repository.load('adult')).state).toBe('cancel_at_period_end');
     expect((await f.repository.receipts('adult'))).toHaveLength(1);
     expect((await f.repository.load('adult')).paidThrough).toBe(before.paidThrough);
+    expect((await f.service.summary('adult')).nextRenewalAt).toBeNull();
   });
   it('failed renewal cannot extend access and a recovered invoice grants its actual period only', async () => {
     const f = await paidFixture(); await f.projector.reconcileOwner('adult');
@@ -88,6 +90,9 @@ describe('verified financial periods', () => {
     inv.disputes[0].status = 'won'; await f.projector.reconcileOwner('adult');
     expect(f.repository.sources.get('adult')?.state).toBe('active');
     expect(f.provider.subscriptions.get('sub_1')?.status).toBe('canceled');
+    expect(await f.service.summary('adult')).toMatchObject({
+      state: 'active', paidThrough: inv.lines[0].end, nextRenewalAt: null,
+    });
   });
   it('lost disputes stay invalid and an old dispute cannot remove another subscription period', async () => {
     const f = await paidFixture(), inv = f.provider.invoices.get('in_1')!;
