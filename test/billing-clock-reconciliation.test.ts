@@ -59,12 +59,13 @@ describe('prebound synthetic clock reconciliation cadence', () => {
     expect(provider).not.toHaveBeenCalled(); expect(commit).not.toHaveBeenCalled();
   });
 
-  it.each(['dev', 'test', 'prod'])('keeps ordinary %s owners on fifteen minutes without mirror reads', async stage => {
+  it.each(['dev', 'test', 'prod'])('services a due ordinary %s owner with recovery headroom and no mirror reads', async stage => {
     const f = await setup(stage, false), state = await f.repository.load('adult');
-    expect(state.nextReconcileAt).toBe(NOW + 900000);
+    expect(state.nextReconcileAt).toBe(NOW + 14 * 60000);
     f.repository.states.set('adult', { ...state, nextReconcileAt: NOW });
     const read = vi.spyOn(f.repository, 'readTestClock'); f.setNow(NOW + 60000);
-    expect(await f.reconciler.run('pending')).toEqual({ processed: 0, failed: 0 }); expect(read).not.toHaveBeenCalled();
+    expect(await f.reconciler.run('pending')).toEqual({ processed: 1, failed: 0 }); expect(read).not.toHaveBeenCalled();
+    expect((await f.repository.load('adult')).nextReconcileAt).toBe(NOW + 60000 + 14 * 60000);
   });
 
   it.each([
