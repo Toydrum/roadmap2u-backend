@@ -5,10 +5,11 @@ import { BillingEventWorker as EventWorker } from './worker';
 import type { BillingProjector } from './projection';
 import { createBillingRuntime } from './runtime';
 import { type BillingMetric } from './metrics';
-import { historyPending } from './model';
+import { BillingError, historyPending } from './model';
 import { canReadTestClock, resolveFinancialClock } from './clock';
 
 interface Deps { repository: BillingRepository; provider: BillingProvider; service: Pick<BillingService, 'resumeCheckout'>; worker: Pick<BillingEventWorker, 'process'>; projector: Pick<BillingProjector, 'reconcileOwner'>; config?: Pick<BillingConfig, 'stage' | 'accountId' | 'liveMode'>; now: () => number; metric: (name: BillingMetric, value?: number) => void }
+function deferred(error: unknown): boolean { return historyPending(error) || error instanceof BillingError && error.code === 'BILLING_OPERATION_PENDING'; }
 export class BillingReconciler {
   constructor(readonly deps: Deps) {}
   async run(mode: 'pending' | 'subscriptions' | 'audit'): Promise<{ processed: number; failed: number }> {
@@ -22,7 +23,7 @@ export class BillingReconciler {
           const s = await r.load(customer.ownerSub);
           if (s.customerId !== customer.id) { this.deps.metric('MappingConflict'); failed++; }
           else { await this.deps.projector.reconcileOwner(customer.ownerSub); processed++; }
-        } catch (error) { if (!historyPending(error)) { failed++; this.deps.metric('StripeError'); } }
+        } catch (error) { if (!deferred(error)) { failed++; this.deps.metric('StripeError'); } }
         await r.saveCursor('audit', { stripeCursor: customer.id });
       }
       await r.saveCursor('audit', page.cursor ? { stripeCursor: page.cursor } : undefined);
@@ -41,7 +42,7 @@ export class BillingReconciler {
           await this.deps.projector.reconcileOwner(owner.ownerSub);
         }
         processed++;
-      } catch (error) { if (!historyPending(error)) { failed++; this.deps.metric('StripeError'); } }
+      } catch (error) { if (!deferred(error)) { failed++; this.deps.metric('StripeError'); } }
       if (page.itemCursors?.[index]) await r.saveCursor(kind, page.itemCursors[index]);
     }
     await r.saveCursor(kind, page.cursor);
@@ -55,6 +56,9 @@ export class BillingReconciler {
           let clockChanged = false;
           // Missing trusted runtime config closes this optional fast path.
           const cfg = this.deps.config;
+          // The minute sweep also services ordinary owners when due. A fixed
+          // subscription sweep can arrive just before a deadline and skip it.
+          const ordinaryDue = !!cfg && !!owner.customerId && !owner.testClock && !owner.activeCommandId && owner.nextReconcileAt <= now();
           if (!owner.activeCommandId && !owner.historyPending && cfg && owner.customerId && canReadTestClock({ ownerSub: owner.ownerSub, customerId: owner.customerId,
             stage: cfg.stage, accountId: cfg.accountId, liveMode: cfg.liveMode, reference: owner.testClock })) {
             const clock = resolveFinancialClock({ ownerSub: owner.ownerSub, customerId: owner.customerId, stage: cfg.stage,
@@ -62,12 +66,12 @@ export class BillingReconciler {
             clockChanged = clock.mode === 'simulation' && (owner.reviewReasons.includes('test_clock_unavailable')
               || owner.testClock?.clockRevision !== clock.reference.clockRevision || owner.testClock?.frozenTimeSeconds !== clock.reference.frozenTimeSeconds);
           }
-          if (owner.activeCommandId || owner.historyPending || clockChanged) {
+          if (owner.activeCommandId || owner.historyPending || clockChanged || ordinaryDue) {
             if (owner.activeCommandId) { const c = await r.command(owner.ownerSub, owner.activeCommandId); if (c) await this.deps.service.resumeCheckout(owner.ownerSub, c); }
-            if (owner.historyPending || clockChanged) await this.deps.projector.reconcileOwner(owner.ownerSub);
+            if (owner.historyPending || clockChanged || ordinaryDue) await this.deps.projector.reconcileOwner(owner.ownerSub);
             processed++;
           }
-        } catch (error) { if (!historyPending(error)) { failed++; this.deps.metric('StripeError'); } }
+        } catch (error) { if (!deferred(error)) { failed++; this.deps.metric('StripeError'); } }
         if (owners.itemCursors?.[index]) await r.saveCursor('pending-owners', owners.itemCursors[index]);
       }
       await r.saveCursor('pending-owners', owners.cursor);
