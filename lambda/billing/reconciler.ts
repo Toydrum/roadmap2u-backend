@@ -59,6 +59,7 @@ export class BillingReconciler {
           // The minute sweep also services ordinary owners when due. A fixed
           // subscription sweep can arrive just before a deadline and skip it.
           const ordinaryDue = !!cfg && !!owner.customerId && !owner.testClock && !owner.activeCommandId && owner.nextReconcileAt <= now();
+          if (ordinaryDue) this.deps.metric('ReconciliationLagSeconds', Math.max(0, (now() - owner.nextReconcileAt) / 1000));
           if (!owner.activeCommandId && !owner.historyPending && cfg && owner.customerId && canReadTestClock({ ownerSub: owner.ownerSub, customerId: owner.customerId,
             stage: cfg.stage, accountId: cfg.accountId, liveMode: cfg.liveMode, reference: owner.testClock })) {
             const clock = resolveFinancialClock({ ownerSub: owner.ownerSub, customerId: owner.customerId, stage: cfg.stage,

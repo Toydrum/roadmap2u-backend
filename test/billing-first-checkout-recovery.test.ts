@@ -95,7 +95,7 @@ describe('customer billing country before the first financial object', () => {
     f.provider.subscriptions.set('sub_1', subscription(f.customerId));
     f.provider.invoices.set('in_1', invoice(f.customerId));
     await f.projector.reconcileOwner('adult');
-    expect(await f.repository.load('adult')).toMatchObject({ state: 'active', reviewReasons: [], nextReconcileAt: NOW + 900_000 });
+    expect(await f.repository.load('adult')).toMatchObject({ state: 'active', reviewReasons: [], nextReconcileAt: NOW + 14 * 60_000 });
     expect(f.repository.sources.get('adult')).toMatchObject({ state: 'active', paidThrough: Date.UTC(2026, 10, 11, 12) });
   });
 

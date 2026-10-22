@@ -57,6 +57,15 @@ describe('scheduled recovery of a paid renewal without its webhook', () => {
     expect((await resolver.resolveFresh('adult')).access.effectivePlanKey).toBe('premium');
   });
 
+  it('retains reconciliation lateness monitoring when the minute sweep recovers an ordinary owner', async () => {
+    const f = await paidOwner();
+    f.setNow((await f.repository.load('adult')).nextReconcileAt + 5_000);
+    const metric = vi.fn();
+    const reconciler = new BillingReconciler({ ...f, config, worker: { process: vi.fn() }, metric });
+    expect(await reconciler.run('pending')).toEqual({ processed: 1, failed: 0 });
+    expect(metric).toHaveBeenCalledWith('ReconciliationLagSeconds', 5);
+  });
+
   it.each(['pending', 'subscriptions'] as const)('defers an occupied projection lease in %s without reporting a Stripe failure', async (mode) => {
     const f = await paidOwner();
     f.setNow((await f.repository.load('adult')).nextReconcileAt);
