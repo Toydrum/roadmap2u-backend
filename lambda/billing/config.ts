@@ -2,6 +2,7 @@ import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { BillingError, STRIPE_API_VERSION, type BillingConfig } from './model';
 import { parsePurchaseAdmission } from './admission';
 import { individualBillingPrices } from '../../shared/api/contracts';
+import { financialRetentionPolicyReady, type FinancialRetentionPolicyBinding } from './retention';
 
 export interface PrivateBillingConfig extends BillingConfig { version: 1; apiVersion: typeof STRIPE_API_VERSION; apiKey: string; taxRatePercentage: number }
 const required = ['stage', 'accountId', 'productId', 'monthlyPriceId', 'annualPriceId', 'taxRateId', 'portalConfigurationId', 'catalogVersion', 'termsVersion', 'successUrl', 'cancelUrl', 'portalReturnUrl', 'apiKey'] as const;
@@ -10,6 +11,7 @@ export function purchasesConfigReady(c: BillingConfig): boolean {
   if (!individualBillingPrices(c.catalogVersion)) return false;
   if (!c.liveMode && ['dev', 'test'].includes(c.stage)) return true;
   return c.liveMode && c.stage === 'prod' && !/draft/i.test(c.termsVersion)
+    && financialRetentionPolicyReady(c.financialRetentionPolicy)
     && [c.fiscalApprovalReference, c.commercialTermsApprovalReference, c.generalCommercialTermsApprovalReference].every((v) => typeof v === 'string' && v.trim().length > 0 && !/draft/i.test(v));
 }
 export function parsePrivateConfig(value: unknown): PrivateBillingConfig {
@@ -29,7 +31,7 @@ export async function loadPrivateConfig(parameterName: string, ssm = new SSMClie
   if (!value || result.Parameter?.Type !== 'SecureString' || Buffer.byteLength(value) > 32_768) throw new BillingError('BILLING_PAYMENT_REVIEW');
   try { return parsePrivateConfig(JSON.parse(value)); } catch { throw new BillingError('BILLING_PAYMENT_REVIEW'); }
 }
-export interface WebhookConfig { secret: string; accountId: string; liveMode: boolean; stage: string; apiVersion: typeof STRIPE_API_VERSION }
+export interface WebhookConfig { secret: string; accountId: string; liveMode: boolean; stage: string; apiVersion: typeof STRIPE_API_VERSION; financialRetentionPolicy?: FinancialRetentionPolicyBinding }
 export async function loadWebhookConfig(parameterName: string, ssm = new SSMClient({})): Promise<WebhookConfig> {
   const result = await ssm.send(new GetParameterCommand({ Name: parameterName, WithDecryption: true }));
   try {

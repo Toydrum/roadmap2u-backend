@@ -2,6 +2,9 @@ import { BillingService } from '../../lambda/billing/service';
 import { MemoryBillingRepository } from '../../lambda/billing/repository';
 import { FakeBillingProvider } from '../../lambda/billing/fake-provider';
 import type { BillingConfig, ProviderInvoice, ProviderSubscription } from '../../lambda/billing/model';
+import { FINANCIAL_RETENTION_POLICY } from '../../lambda/billing/retention';
+
+export const approvedRetentionPolicy = { ...FINANCIAL_RETENTION_POLICY, approvalReference: 'synthetic-retention-approval', status: 'approved' as const };
 
 export const NOW = Date.UTC(2026, 9, 11, 12);
 export const config: BillingConfig = {

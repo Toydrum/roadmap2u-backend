@@ -22,7 +22,7 @@ export async function createBillingRuntime(authenticatedOwner?: { ownerSub: stri
   const config = loaded.config;
   if (config.stage !== environment('STAGE')) { billingMetric('ConfigurationError'); throw new Error('billing stage mismatch'); }
   const ddb = billingDynamoClient(), table = environment('TABLE_NAME');
-  const repository = new DynamoBillingRepository({ ddb, table, accountId: config.accountId, stage: config.stage, liveMode: config.liveMode, privacyTable: process.env['PRIVACY_TABLE_NAME'], authenticatedOwner });
+  const repository = new DynamoBillingRepository({ ddb, table, accountId: config.accountId, stage: config.stage, liveMode: config.liveMode, privacyTable: process.env['PRIVACY_TABLE_NAME'], authenticatedOwner, financialRetentionPolicy: config.financialRetentionPolicy });
   const provider = StripeBillingProvider.create(config, config.apiKey, { repository, now, requireLease: true });
   const flagAliases = Object.fromEntries(COMMERCIAL_FLAGS_ATTRIBUTES.map((attribute, i) => [`#flag${i}`, attribute]));
   const flags = new CommercialFlagsResolver({ now, readItem: async () => (await ddb.send(new GetCommand({ TableName: table, Key: { pk: 'COMMERCIAL#CONFIG', sk: 'FLAGS' }, ConsistentRead: true, ProjectionExpression: Object.keys(flagAliases).join(', '), ExpressionAttributeNames: flagAliases }))).Item, emitMetric: () => billingMetric('ConfigurationError') });

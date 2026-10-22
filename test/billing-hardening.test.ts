@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
-import { fixture, config, NOW, request, subscription, invoice } from './support/billing-fixture';
+import { fixture, config, NOW, request, subscription, invoice, approvedRetentionPolicy } from './support/billing-fixture';
 import { BillingClosure } from '../lambda/billing/closure';
 import { BillingProjector } from '../lambda/billing/projection';
 import { BillingService } from '../lambda/billing/service';
@@ -140,7 +140,7 @@ describe('live sales approvals are independent of financial configuration', () =
     const live = { ...config, stage: 'prod', liveMode: true, version: 1, apiVersion: STRIPE_API_VERSION, apiKey: 'sk_live_synthetic', taxRatePercentage: 7.25 };
     expect(() => mod.parsePrivateConfig(live)).not.toThrow();
     expect(mod.purchasesConfigReady(mod.parsePrivateConfig(live))).toBe(false);
-    const approved = { ...live, fiscalApprovalReference: 'owner-fiscal-1', commercialTermsApprovalReference: 'owner-subscription-1', generalCommercialTermsApprovalReference: 'owner-general-1' };
+    const approved = { ...live, fiscalApprovalReference: 'owner-fiscal-1', commercialTermsApprovalReference: 'owner-subscription-1', generalCommercialTermsApprovalReference: 'owner-general-1', financialRetentionPolicy: approvedRetentionPolicy };
     expect(mod.purchasesConfigReady(mod.parsePrivateConfig(approved))).toBe(true);
     for (const change of [{ fiscalApprovalReference: '' }, { commercialTermsApprovalReference: ' ' }, { generalCommercialTermsApprovalReference: '' }, { termsVersion: 'subscription-draft-v1' }]) expect(mod.purchasesConfigReady(mod.parsePrivateConfig({ ...approved, ...change }))).toBe(false);
     expect(mod.purchasesConfigReady(mod.parsePrivateConfig({ ...live, stage: 'test', liveMode: false, apiKey: 'sk_test_synthetic', termsVersion: 'synthetic-draft-v1' }))).toBe(true);

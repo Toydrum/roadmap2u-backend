@@ -3,6 +3,7 @@ import { individualBillingPrices } from '../../shared/api/contracts';
 import type { SubscriptionSourceItem } from '../commercial/model';
 import type { PurchaseAdmission } from './admission';
 import type { BillingClockReference } from './clock';
+import type { FinancialRetentionPolicyBinding } from './retention';
 
 export const STRIPE_API_VERSION = '2026-09-30.endive' as const;
 export const INTEGRATION = 'roadmap2u_individual_v1';
@@ -16,6 +17,7 @@ export interface BillingConfig {
   taxRatePercentage?: number; fiscalApprovalReference?: string;
   commercialTermsApprovalReference?: string; generalCommercialTermsApprovalReference?: string;
   purchaseAdmission?: PurchaseAdmission;
+  financialRetentionPolicy?: FinancialRetentionPolicyBinding;
 }
 export interface BillingActor {
   ownerSub: string; accountType: string; status: string; emailVerified: boolean;
