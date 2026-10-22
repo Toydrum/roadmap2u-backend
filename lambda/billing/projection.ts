@@ -27,12 +27,24 @@ function receipt(ownerSub: string, inv: ProviderInvoice, sub: ProviderSubscripti
   if (actual !== inv.amountPaid || actual !== expected) reasons.push('real_payment_missing');
   const charges = new Set(inv.payments.map((p) => p.chargeId));
   const refundIds = new Set<string>(); let refunded = 0;
+  const chargeRefunds = new Map<string, { succeeded: number; pending: number }>();
   for (const r of inv.refunds) {
     if (refundIds.has(r.id)) continue; refundIds.add(r.id);
     if (!charges.has(r.chargeId) || !Number.isSafeInteger(r.amount) || r.amount < 0) reasons.push('refund_mapping');
-    else if (r.status === 'succeeded') refunded += r.amount;
+    else {
+      const totals = chargeRefunds.get(r.chargeId) ?? { succeeded: 0, pending: 0 };
+      if (r.status === 'succeeded') { refunded += r.amount; totals.succeeded += r.amount; }
+      else if (r.status === 'pending' || r.status === 'requires_action') totals.pending += r.amount;
+      chargeRefunds.set(r.chargeId, totals);
+    }
   }
-  if (refunded > inv.amountPaid || inv.payments.reduce((sum, p) => sum + p.refunded, 0) !== refunded) reasons.push('refund_amount');
+  // Charge.amount_refunded can already include an unsettled refund. Only a
+  // succeeded Refund removes paid access; the charge aggregate must still be
+  // explained by refunds belonging to that charge, never by another payment.
+  if (refunded > inv.amountPaid || inv.payments.some((p) => {
+    const totals = chargeRefunds.get(p.chargeId ?? '') ?? { succeeded: 0, pending: 0 };
+    return !Number.isSafeInteger(p.refunded) || p.refunded < totals.succeeded || p.refunded > totals.succeeded + totals.pending || p.refunded > p.amountPaid;
+  })) reasons.push('refund_amount');
   let suspended = false, lost = false, disputeStatus: string | undefined;
   for (const d of inv.disputes) {
     if (!charges.has(d.chargeId) || !Number.isSafeInteger(d.amount) || d.amount <= 0 || d.amount > inv.amountPaid) { reasons.push('dispute_mapping'); continue; }
