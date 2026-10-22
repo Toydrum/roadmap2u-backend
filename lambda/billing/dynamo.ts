@@ -4,13 +4,14 @@ import { isDeclared, readPrivacyItem } from '../privacy/consent';
 import { readRestoreExclusion } from '../privacy/retention';
 import { TEST_CLOCK_SK, testClockGuard } from './clock';
 import { initialState, type BillingActor, type BillingCommit, type BillingCommand, type BillingRepository, type BillingState, type InvoiceReceipt, type StripeEventEnvelope } from './model';
+import { financialRetentionMetadata, type FinancialRetentionPolicyBinding } from './retention';
 
 interface Options {
   ddb: DynamoDBDocumentClient; table: string; accountId: string; stage: string; liveMode: boolean;
   privacyTable?: string; authenticatedOwner?: { ownerSub: string; emailVerified: boolean };
+  financialRetentionPolicy?: FinancialRetentionPolicyBinding;
 }
 type Tx = NonNullable<TransactWriteCommandInput['TransactItems']>;
-const financial = { retentionScope: 'commercial', retentionPolicyVersion: 'financial-v1-draft', retentionStatus: 'pending_policy_approval' };
 const dueSort = (now: number, id: string) => `NEXT#${String(now).padStart(14, '0')}#${id}`;
 const conditional = (error: unknown) => (error as { name?: string })?.name === 'ConditionalCheckFailedException';
 function transactionConflict(error: unknown): boolean {
@@ -19,7 +20,15 @@ function transactionConflict(error: unknown): boolean {
 }
 /** Financial partitions deliberately survive USER partition erasure and have no forest TTL. */
 export class DynamoBillingRepository implements BillingRepository {
-  constructor(readonly options: Options) {}
+  private readonly financial: ReturnType<typeof financialRetentionMetadata>;
+  constructor(readonly options: Options) { this.financial = financialRetentionMetadata(options.financialRetentionPolicy, options.stage, options.liveMode); }
+  private financialItem(item: Record<string, unknown>): Record<string, unknown> {
+    const tagged: Record<string, unknown> = { ...item, ...this.financial };
+    if (this.financial.retentionPolicyVersion === 'financial-v1-draft') {
+      delete tagged['retentionPolicySha256']; delete tagged['retentionApprovalReference'];
+    }
+    return tagged;
+  }
   private stateKey(id: string) { return { pk: `BILLING#${id}`, sk: 'STATE' }; }
   private commandKey(id: string, commandId: string) { return { pk: `BILLING#${id}`, sk: `COMMAND#${commandId}` }; }
   private eventKey(id: string) { return { pk: `STRIPE_EVENT#${this.options.accountId}#${this.options.stage}#${id}`, sk: 'EVENT' }; }
@@ -71,7 +80,7 @@ export class DynamoBillingRepository implements BillingRepository {
     }
     // A lease can initialize an absent account state at revision zero.
     if (c.expectedRevision === 0 && c.lease) condition = condition.replace('attribute_not_exists(pk)', 'revision = :expectedRevision'), values[':expectedRevision'] = 0;
-    const stateItem = { ...c.state, ...this.stateKey(id), ...financial, ...(c.state.state !== 'closed' ? { gsi1pk: `BILLING#OWNERS#${this.options.stage}`, gsi1sk: dueSort(c.state.nextReconcileAt, id) } : {}) };
+    const stateItem = this.financialItem({ ...c.state, ...this.stateKey(id), ...(c.state.state !== 'closed' ? { gsi1pk: `BILLING#OWNERS#${this.options.stage}`, gsi1sk: dueSort(c.state.nextReconcileAt, id) } : {}) });
     const tx: Tx = [{ Put: { TableName: table, Item: stateItem, ConditionExpression: condition, ...(Object.keys(values).length ? { ExpressionAttributeValues: values } : {}) } }];
     if (c.clockObservation) tx.push(testClockGuard(table, id, c.clockObservation.item));
     if (c.guard === 'adult' || c.guard === 'open' || c.source) {
@@ -83,12 +92,12 @@ export class DynamoBillingRepository implements BillingRepository {
       if (!c.state.closingId) throw new Error('financial closure identity required');
       tx.push({ ConditionCheck: { TableName: table, Key: { pk: `ACCOUNT_CLOSURE#${id}`, sk: 'STATE' }, ConditionExpression: 'closureId = :closureId', ExpressionAttributeValues: { ':closureId': c.state.closingId } } });
     }
-    if (c.command) tx.push({ Put: { TableName: table, Item: { ...c.command, ...this.commandKey(id, c.command.commandId), ...financial }, ...(c.commandAbsent ? { ConditionExpression: 'attribute_not_exists(pk)' } : {}) } });
-    for (const mapping of c.mappings ?? []) tx.push({ Put: { TableName: table, Item: { ...this.mappingKey(mapping.kind, mapping.id), ...financial, ownerSub: id, accountId: this.options.accountId, stage: this.options.stage, liveMode: this.options.liveMode }, ConditionExpression: 'attribute_not_exists(ownerSub) OR ownerSub = :owner', ExpressionAttributeValues: { ':owner': id } } });
-    for (const invoice of c.invoices ?? []) tx.push({ Put: { TableName: table, Item: { ...invoice, pk: `BILLING#${id}`, sk: `INVOICE#${invoice.invoiceId}`, ...financial } } });
+    if (c.command) tx.push({ Put: { TableName: table, Item: this.financialItem({ ...c.command, ...this.commandKey(id, c.command.commandId) }), ...(c.commandAbsent ? { ConditionExpression: 'attribute_not_exists(pk)' } : {}) } });
+    for (const mapping of c.mappings ?? []) tx.push({ Put: { TableName: table, Item: { ...this.mappingKey(mapping.kind, mapping.id), ...this.financial, ownerSub: id, accountId: this.options.accountId, stage: this.options.stage, liveMode: this.options.liveMode }, ConditionExpression: 'attribute_not_exists(ownerSub) OR ownerSub = :owner', ExpressionAttributeValues: { ':owner': id } } });
+    for (const invoice of c.invoices ?? []) tx.push({ Put: { TableName: table, Item: this.financialItem({ ...invoice, pk: `BILLING#${id}`, sk: `INVOICE#${invoice.invoiceId}` }) } });
     if (c.source) tx.push({ Put: { TableName: table, Item: c.source, ConditionExpression: 'attribute_not_exists(revision) OR revision < :nextRevision', ExpressionAttributeValues: { ':nextRevision': c.source.revision } } });
     // Commercial audit shares the financial transaction and never inherits forest retention.
-    tx.push({ Put: { TableName: table, Item: { pk: `BILLING#${id}`, sk: `AUDIT#${String(c.state.updatedAt).padStart(14, '0')}#${c.state.revision}`, ...financial, action: c.auditAction, revision: c.state.revision, occurredAt: c.state.updatedAt }, ConditionExpression: 'attribute_not_exists(pk)' } });
+    tx.push({ Put: { TableName: table, Item: { pk: `BILLING#${id}`, sk: `AUDIT#${String(c.state.updatedAt).padStart(14, '0')}#${c.state.revision}`, ...this.financial, action: c.auditAction, revision: c.state.revision, occurredAt: c.state.updatedAt }, ConditionExpression: 'attribute_not_exists(pk)' } });
     if (tx.length > 100) throw new Error('billing transaction exceeds bounded financial history');
     try { await ddb.send(new TransactWriteCommand({ TransactItems: tx })); return true; } catch (error) { if (transactionConflict(error)) return false; throw error; }
   }
@@ -102,7 +111,7 @@ export class DynamoBillingRepository implements BillingRepository {
     try { await this.options.ddb.send(new UpdateCommand({ TableName: this.options.table, Key: this.stateKey(id), UpdateExpression: 'REMOVE leaseOwner, leaseUntil', ConditionExpression: 'leaseOwner = :owner', ExpressionAttributeValues: { ':owner': owner } })); } catch (error) { if (!conditional(error)) throw error; }
   }
   async putEvent(event: StripeEventEnvelope): Promise<boolean> {
-    try { await this.options.ddb.send(new PutCommand({ TableName: this.options.table, Item: { ...event, ...this.eventKey(event.eventId), ...financial, gsi1pk: `BILLING#EVENTS#${this.options.stage}`, gsi1sk: dueSort(event.nextAttemptAt, event.eventId) }, ConditionExpression: 'attribute_not_exists(pk)' })); return true; } catch (error) { if (conditional(error)) return false; throw error; }
+    try { await this.options.ddb.send(new PutCommand({ TableName: this.options.table, Item: { ...event, ...this.eventKey(event.eventId), ...this.financial, gsi1pk: `BILLING#EVENTS#${this.options.stage}`, gsi1sk: dueSort(event.nextAttemptAt, event.eventId) }, ConditionExpression: 'attribute_not_exists(pk)' })); return true; } catch (error) { if (conditional(error)) return false; throw error; }
   }
   async event(id: string) { return this.strong<StripeEventEnvelope>(this.eventKey(id)); }
   async finishEvent(id: string, status: 'processed' | 'ignored' | 'review', now: number) {
@@ -124,9 +133,9 @@ export class DynamoBillingRepository implements BillingRepository {
     try {
       await this.options.ddb.send(new TransactWriteCommand({ TransactItems: [
         { ConditionCheck: { TableName: this.options.table, Key: this.stateKey(guard.ownerSub), ConditionExpression: 'leaseOwner = :owner AND leaseRevision = :revision AND leaseUntil > :now', ExpressionAttributeValues: { ':owner': guard.owner, ':revision': guard.revision, ':now': guard.now } } },
-        { Put: { TableName: this.options.table, Item: { pk: `BILLING#RECONCILER#${this.options.stage}`, sk: `CURSOR#${name}`, ...financial, cursor } } },
+        { Put: { TableName: this.options.table, Item: { pk: `BILLING#RECONCILER#${this.options.stage}`, sk: `CURSOR#${name}`, ...this.financial, cursor } } },
       ] }));
     } catch (e) { if (transactionConflict(e)) throw Object.assign(new Error('history lease lost'), { continuation: true }); throw e; }
   }
-  async saveCursor(name: string, cursor?: Record<string, unknown>) { await this.options.ddb.send(new PutCommand({ TableName: this.options.table, Item: { pk: `BILLING#RECONCILER#${this.options.stage}`, sk: `CURSOR#${name}`, ...financial, ...(cursor ? { cursor } : {}) } })); }
+  async saveCursor(name: string, cursor?: Record<string, unknown>) { await this.options.ddb.send(new PutCommand({ TableName: this.options.table, Item: { pk: `BILLING#RECONCILER#${this.options.stage}`, sk: `CURSOR#${name}`, ...this.financial, ...(cursor ? { cursor } : {}) } })); }
 }

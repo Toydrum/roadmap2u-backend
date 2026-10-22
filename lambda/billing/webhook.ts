@@ -40,7 +40,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<HttpRespon
   try {
     const config = await loadWebhookConfig(environment('STRIPE_WEBHOOK_SECRET_PARAMETER'));
     if (config.stage !== environment('STAGE')) throw new Error();
-    const repository = new DynamoBillingRepository({ ddb: billingDynamoClient(), table: environment('TABLE_NAME'), accountId: config.accountId, liveMode: config.liveMode, stage: config.stage });
+    const repository = new DynamoBillingRepository({ ddb: billingDynamoClient(), table: environment('TABLE_NAME'), accountId: config.accountId, liveMode: config.liveMode, stage: config.stage, financialRetentionPolicy: config.financialRetentionPolicy });
     const sqs = new SQSClient({});
     return await createWebhookHandler({ repository, config, now: Date.now, metric: billingMetric, enqueue: async (eventId) => { await sqs.send(new SendMessageCommand({ QueueUrl: environment('BILLING_EVENT_QUEUE_URL'), MessageBody: JSON.stringify({ eventId }) })); } })(event);
   } catch { billingMetric('ConfigurationError'); return response(503); }

@@ -2,7 +2,7 @@ import {describe, expect, it, vi} from 'vitest';
 import {BillingService} from '../lambda/billing/service';
 import {BillingProjector} from '../lambda/billing/projection';
 import {TEST_CLOCK_EVIDENCE_MAX_AGE_MS} from '../lambda/billing/clock';
-import {fixture, config, request, NOW} from './support/billing-fixture';
+import {fixture, config, request, NOW, approvedRetentionPolicy} from './support/billing-fixture';
 
 async function clockFixture() {
   const f = await fixture(), customerId = 'cus_clock_admission';
@@ -164,7 +164,7 @@ describe('new Checkout uses the protected clock independently of stale projectio
   it('a marked PROD restore is rejected without reading the protected mirror', async () => {
     const f = await clockFixture(), read = vi.spyOn(f.repository, 'readTestClock');
     const service = new BillingService({...f, config: {...config, stage: 'prod', liveMode: true, termsVersion: 'approved',
-      fiscalApprovalReference: 'fiscal', commercialTermsApprovalReference: 'subscription', generalCommercialTermsApprovalReference: 'general'}, purchasesEnabled: async () => true});
+      fiscalApprovalReference: 'fiscal', commercialTermsApprovalReference: 'subscription', generalCommercialTermsApprovalReference: 'general', financialRetentionPolicy: approvedRetentionPolicy}, purchasesEnabled: async () => true});
     await expect(service.checkout('adult', {...f.checkout, termsAcceptance: {...f.checkout.termsAcceptance, version: 'approved'}})).rejects.toMatchObject({code: 'BILLING_PAYMENT_REVIEW'});
     expect(read).not.toHaveBeenCalled(); expect(f.provider.checkoutCreateCalls).toBe(0); expect(f.repository.commands.size).toBe(0);
   });
