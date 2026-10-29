@@ -8,6 +8,8 @@ import { COMMON_ACCOUNT_VERSIONS, commonAccountPrivacyDocument, ADULT_PRIVACY_VE
 import { K, type Deps, type ProfileItem } from '../lambda/db';
 import { changePrivacyConsent, getPrivacyStatus, requireCloudConsent, requireAdultAdmission, privacyDocumentHash, requireOwnAccountAdmission, exportOwnPrivacy } from '../lambda/privacy/consent';
 import { handleEvent } from '../lambda/router';
+import { verifyPrivateAdolescentRepresentation } from '../lambda/privacy/adolescents';
+import { PRIVACY_OPERATOR_READ_ATTRIBUTES } from '../lambda/privacy/operator';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
 
 const NOW = 1_800_000_000_000;
@@ -111,5 +113,28 @@ describe('common account privacy admission', () => {
     await expect(changePrivacyConsent(ctx(), { action: 'accept_adolescent', commandId: 'private-attempt', expectedRevision: 1, language: 'es', ...ADULT_PRIVACY_VERSIONS, documentHash: privacyDocumentHash('es'), invitationId: 'a'.repeat(64), acceptTerms: true, understandsPrivacy: true })).rejects.toMatchObject({ code: 'CONFLICT' });
     expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(before);
     expect(rows.get(key(K.profile(OWNER)))?.privacyMode).toBeUndefined();
+  });
+
+  it('verifies an existing invitation for a historical guardian with common evidence only with the full metadata projection', async () => {
+    const legacy = { ...ADULT_PRIVACY_VERSIONS, language: 'es', documentHash: privacyDocumentHash('es') };
+    await changePrivacyConsent(ctx(), { ...legacy, action: 'declare_adult', commandId: 'legacy-guardian', expectedRevision: 0, declareAdult: true, acceptTerms: true });
+    await changePrivacyConsent(ctx(), commonCommand('accept_account_terms', 1));
+    await changePrivacyConsent(ctx(), commonCommand('grant_cloud', 2));
+    const invitationId = 'b'.repeat(64);
+    rows.set(`ADOLESCENT_INVITE#${invitationId}/STATE`, { pk: `ADOLESCENT_INVITE#${invitationId}`, sk: 'STATE', invitationId, state: 'pending_verification', revision: 1, guardianId: OWNER, recipientUsername: 'legacy_teen', majorityAt: '2030-01-01', expiresAt: NOW + 86400000, language: 'es', documentHash: privacyDocumentHash('es') });
+    const command = { invitationId, commandId: 'verified-existing-invitation', expectedRevision: 1, caseId: 'verified-case', guardianId: OWNER, recipientUsername: 'legacy_teen', majorityAt: '2030-01-01' };
+    const operator = { roleArn: 'arn:aws:iam::765932874577:role/roadmap2u/dev/operators/roadmap2u-dev-privacy-operator', arn: 'arn:aws:sts::765932874577:assumed-role/roadmap2u-dev-privacy-operator/test' };
+    const commonFields = new Set(['accountTermsAcceptedAt', 'accountTermsLanguage', 'accountTermsDocumentHash', 'cloudDocumentFamily']);
+    let allowed: readonly string[] = PRIVACY_OPERATOR_READ_ATTRIBUTES.filter((field) => !commonFields.has(field));
+    ddb.on(GetCommand).callsFake((input) => {
+      const item = rows.get(key(input.Key ?? {}));
+      return { Item: item && input.TableName === 'main' ? Object.fromEntries(Object.entries(item).filter(([field]) => allowed.includes(field))) : item };
+    });
+    const before = ddb.commandCalls(TransactWriteCommand).length;
+    await expect(verifyPrivateAdolescentRepresentation(deps(), command, operator)).rejects.toMatchObject({ code: 'PRIVACY_REVISION_CONFLICT' });
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(before);
+    allowed = PRIVACY_OPERATOR_READ_ATTRIBUTES;
+    await expect(verifyPrivateAdolescentRepresentation(deps(), command, operator)).resolves.toBeUndefined();
+    expect(rows.get(`ADOLESCENT_INVITE#${invitationId}/STATE`)).toMatchObject({ state: 'authorized', authorizationMethod: 'operator_verified' });
   });
 });
