@@ -22,7 +22,7 @@ export interface BillingConfig {
 export interface BillingActor {
   ownerSub: string; accountType: string; status: string; emailVerified: boolean;
   adultDeclarationCurrent: boolean; privacyMode?: string; privacyRevision?: number;
-  declarationHash?: string; email?: string; closing?: boolean;
+  declarationHash?: string; accountTermsCurrent?: boolean; accountTermsHash?: string; email?: string; closing?: boolean;
 }
 export interface BillingState {
   testClock?: BillingClockReference;
@@ -103,7 +103,7 @@ export interface StripeEventEnvelope {
 }
 export interface BillingCommit {
   clockObservation?: { item: unknown };
-  expectedRevision: number; state: BillingState; guard: 'adult' | 'open' | 'closure' | 'none';
+  expectedRevision: number; state: BillingState; guard: 'standard' | 'adult' | 'open' | 'closure' | 'none';
   actor?: BillingActor; command?: BillingCommand; commandAbsent?: boolean;
   invoices?: InvoiceReceipt[]; source?: SubscriptionSourceItem;
   mappings?: { kind: 'customer' | 'subscription' | 'checkout'; id: string }[];
@@ -177,5 +177,9 @@ export function rejectedCheckoutExpiry(error: unknown): boolean {
   return e?.type === 'StripeInvalidRequestError' && e.param === 'expires_at';
 }
 export function eligible(actor: BillingActor | null): actor is BillingActor {
-  return !!actor && actor.accountType === 'adult' && actor.status === 'active' && !actor.closing && actor.privacyMode !== 'adolescent_private' && actor.emailVerified === true && actor.adultDeclarationCurrent === true;
+  return canManageBilling(actor) && actor.emailVerified === true && (actor.accountTermsCurrent === true || actor.adultDeclarationCurrent === true);
+}
+/** Cancellation stays available independently of new-sale terms and email admission. */
+export function canManageBilling(actor: BillingActor | null): actor is BillingActor {
+  return !!actor && actor.accountType === 'adult' && actor.status === 'active' && !actor.closing && actor.privacyMode === undefined;
 }

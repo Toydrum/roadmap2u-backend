@@ -34,8 +34,8 @@ export function handleEvent(event: PreSignUpTriggerEvent): PreSignUpTriggerEvent
     throw new Error('username must match ^[a-z0-9_]{3,20}$');
   }
 
-  // Guardian-created minors intentionally have no email. Direct self-signup
-  // always creates an adult and therefore requires a recovery address.
+  // Guardian-created minors intentionally have no email. An ordinary direct
+  // self-signup requires its own recovery address, without declaring an age.
   if (
     event.triggerSource === 'PreSignUp_SignUp' &&
     !selfSignupEmailIsValid(event.request.userAttributes.email)

@@ -25,6 +25,9 @@ describe('explicit local contract copies', () => {
       copyFileSync(join(root, 'scripts', 'sync-contracts.mjs'), script);
       for (const name of [
         'api/contracts.ts',
+        'api/historical-privacy-documents.ts',
+        'api/common-account-documents.ts',
+        'api/subscription-terms-documents.ts',
         'db/schema.ts',
         'auth/auth-types.ts',
         'i18n/es.ts',

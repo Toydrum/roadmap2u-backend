@@ -60,13 +60,13 @@ export function parseAccessCodeSecret(
   return { version, key: Buffer.from(secret, 'utf8') };
 }
 
-function profileCondition(tableName: string, ownerSub: string): TransactItem {
+function profileCondition(tableName: string, ownerSub: string, ordinaryAccount = false): TransactItem {
   return {
     ConditionCheck: {
       TableName: tableName,
       Key: K.profile(ownerSub),
       ConditionExpression:
-        'attribute_exists(pk) AND userId = :ownerSub AND accountType = :adult AND attribute_exists(email) AND (attribute_not_exists(#status) OR #status = :active)',
+        'attribute_exists(pk) AND userId = :ownerSub AND accountType = :adult AND attribute_exists(email) AND (attribute_not_exists(#status) OR #status = :active)' + (ordinaryAccount ? ' AND attribute_not_exists(privacyMode)' : ''),
       ExpressionAttributeNames: { '#status': 'status' },
       ExpressionAttributeValues: {
         ':ownerSub': ownerSub,
@@ -131,7 +131,7 @@ export function buildRedemptionTransaction(
           },
         },
       },
-      profileCondition(tableName, proposal.ownerSub),
+      profileCondition(tableName, proposal.ownerSub, true),
       closureCondition(tableName, proposal.ownerSub),
       {
         Put: {

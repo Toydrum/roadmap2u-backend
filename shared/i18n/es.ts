@@ -5,6 +5,10 @@
  */
 export const ES = {
   privacy: {
+    accountTitle: "Tu cuenta empieza aquí",
+    accountBody: "Puedo usar Free o elegir Premium individual. Acepto los términos de cuenta; mi autorización de nube se elige después, por separado.",
+    accountTermsRequired: "Acepto los términos de cuenta para continuar.",
+    accountConfirm: "Acepto los términos de cuenta",
     title: 'Mi privacidad',
     cloudTitle: 'Tu bosque, tu decisión sobre la nube',
     cloudBody:
@@ -265,7 +269,7 @@ export const ES = {
     privacy: {
       title: 'Aviso de privacidad',
       intro:
-        'RoadMap2U funciona primero en tu dispositivo. Este aviso explica el tratamiento de datos de cuentas adultas y de cuentas adolescentes privadas de 12 a 17 años.',
+        'RoadMap2U funciona primero en tu dispositivo. Este aviso explica el tratamiento de datos de las cuentas comunes y de las modalidades privadas o supervisadas existentes.',
       sections: [
         {
           title: 'Responsable y contacto',
@@ -282,9 +286,9 @@ export const ES = {
           ],
         },
         {
-          title: 'Adolescentes con cuenta privada',
+          title: 'Cuentas adolescentes privadas existentes',
           paragraphs: [
-            'La modalidad de 12 a 17 años utiliza una declaración autenticada de padre, madre o tutor: correo confirmado, inicio de sesión reciente, cuenta adulta admitida y Premium vigente. Guardamos nombre completo y calidad declarados, identificadores del responsable y destinatario exacto, fecha de mayoría, texto, idioma, versiones y evidencia de las decisiones. Este alta no verifica documentos de identidad, parentesco o tutela. No envíes identificaciones en tus notas ni en el formulario de la app.',
+            'Las cuentas privadas existentes de 12 a 17 años conservan su declaración autenticada de padre, madre o tutor: correo confirmado, inicio de sesión reciente, cuenta adulta admitida y Premium vigente. Guardamos nombre completo y calidad declarados, identificadores del responsable y destinatario exacto, fecha de mayoría, texto, idioma, versiones y evidencia de las decisiones. Este alta no verifica documentos de identidad, parentesco o tutela. No envíes identificaciones en tus notas ni en el formulario de la app.',
             'El adolescente recibe su propia explicación y decide por separado si usa la nube. Su bosque no permite amistades, visitas, búsqueda de usuarios ni conexiones con bosques ajenos. La autorización del representante no le concede lectura cotidiana ni exportación del bosque, cobertura familiar o Premium.',
             'La capacidad de nube del adolescente depende del Premium vigente de ese representante; el bosque conserva los límites Free. Si termina esa capacidad, se detiene la nube sin borrar la cuenta o el bosque. Descargar datos y ejercer derechos de privacidad no requiere Premium.',
             'Al cumplir 18 años conserva cuenta y datos; termina la autorización parental y se requiere su propia aceptación adulta y autorización de nube, junto con una capacidad propia cuando corresponda. La restricción social permanece. Una disputa o cambio de representante se atiende por soporte con verificación; no existe transferencia automática.',
@@ -331,7 +335,7 @@ export const ES = {
         {
           title: 'Cuenta y modalidad de uso',
           paragraphs: [
-            'Adultos eligen su modalidad y aceptan estos términos. Adolescentes de 12 a 17 años usan cuenta privada tras declaración autenticada de padre, madre o tutor, además de su propia aceptación y correo confirmado. Quien autoriza declara verazmente su nombre, relación y facultad de representación; la app comprueba su cuenta, no sus documentos civiles. No se ofrece alta de menores de 12 en esta modalidad.',
+            'El registro común requiere correo propio confirmado y aceptación expresa de estos términos. Permite usar Free o elegir Premium individual sin elegir edad ni declarar mayoría de edad. La nube requiere una autorización expresa y separada. Las cuentas privadas o supervisadas existentes conservan su modalidad, restricciones, vínculos y datos; no se convierten automáticamente en cuentas comunes.',
             'Cada persona protege sus credenciales y proporciona datos de cuenta veraces. La cuenta privada adolescente no permite visitas ni amistades, y la autorización del representante no abre sus notas. El bosque local se conserva al entrar, salir o rechazar la nube.',
           ],
         },
@@ -340,7 +344,7 @@ export const ES = {
           paragraphs: [
             'La sincronización necesita autorización de privacidad vigente y la capacidad comercial correspondiente. Tener Premium no sustituye el consentimiento. Autorizar privacidad no concede Premium ni familia.',
             'La nube adolescente se vincula al Premium vigente de la cuenta responsable que registró la autorización y conserva los límites Free: dos árboles activos y diez ramas visibles por árbol. Terminar el Premium o retirar una autorización detiene nuevas operaciones de nube y conserva los datos. El adolescente no recibe Premium propio, funciones sociales ni acceso familiar por este vínculo.',
-            'Las funciones familiares permanecen desactivadas en este lanzamiento. Las concesiones patrocinadas son gratuitas y no se venden. Las condiciones de pagos, renovaciones, cancelaciones y devoluciones se describirán antes de habilitar compras; esta modalidad no ofrece compra ni activa Stripe.',
+            'Las funciones familiares y sociales permanecen desactivadas en este lanzamiento. Las concesiones patrocinadas son gratuitas y no se venden. Premium individual requiere pago confirmado y aceptación expresa de sus condiciones de precio, renovación, cancelación y devolución antes de comprar; la compra no autoriza la nube.',
           ],
         },
         {
@@ -1128,7 +1132,7 @@ export const ES = {
       busy: 'Revisando…',
       success: 'Premium ya está activo en tu cuenta 🌿',
       returnCta: 'Volver a mi bosque',
-      adultOnly: 'Las llaves se canjean desde una cuenta adulta con correo confirmado.',
+      adultOnly: 'Las llaves se canjean desde mi propia cuenta con correo confirmado.',
       signInHint: 'Entra o crea tu cuenta; después podrás pegar la llave aquí.',
       errors: {
         invalid: 'Esta llave no es válida o ya venció.',
@@ -1146,7 +1150,7 @@ export const ES = {
       'Ensayo {stage}: la fecha financiera es {date}. Este acceso de prueba requiere conexión.',
     simulationUnavailable:
       'Ensayo {stage}: esperamos una lectura válida del reloj. El bosque local sigue disponible.',
-    termsVersion: 'individual-subscription-2026-10-28-v1',
+    termsVersion: 'individual-subscription-2026-10-29-v2',
     title: 'Mi suscripción',
     intro:
       'Aquí puedo conocer mi suscripción y gestionar sus pagos con calma. Mi bosque se conserva.',
@@ -1154,11 +1158,11 @@ export const ES = {
     settingsHint: 'Precios, periodo pagado y gestión de mi cuenta',
     accountBack: 'Volver a mi cuenta',
     signIn: 'Iniciar sesión',
-    signInHint: 'La suscripción pertenece a mi cuenta adulta con correo confirmado.',
-    adultOnly: 'La compra está disponible para mi propia cuenta adulta con correo confirmado.',
+    signInHint: 'La suscripción pertenece a mi cuenta con correo confirmado.',
+    adultOnly: 'La compra está disponible para mi propia cuenta con correo confirmado.',
     catalogUnavailable: 'La oferta necesita una revisión. Puedo consultar de nuevo o pedir ayuda.',
     purchasesClosed: 'Las nuevas compras están en pausa. Puedo seguir gestionando mi suscripción.',
-    available: 'Disponible para cuentas adultas',
+    available: 'Disponible para mi propia cuenta',
     month: 'Cada mes',
     year: 'Cada año',
     monthly: '{amount} MXN cada mes',
@@ -1168,7 +1172,8 @@ export const ES = {
     recurring:
       'La renovación es automática. Puedo cancelarla al terminar el periodo pagado desde el Portal.',
     termsTitle: 'Condiciones de suscripción',
-    termsDraft: 'Versión individual-subscription-2026-10-28-v1.',
+    termsDraft: 'Versión individual-subscription-2026-10-29-v2.',
+    termsUnavailable: 'Esta versión de las condiciones no está disponible. Puedo solicitar el texto aceptado en overseer@roadmap2u.com.',
     termsRead: 'Leer las condiciones',
     termsAccept:
       'Acepto las condiciones de suscripción y el cobro recurrente de la modalidad elegida.',
@@ -1206,7 +1211,7 @@ export const ES = {
     review: 'Mi pago está en revisión. Soporte puede acompañarme.',
     closed: 'Mi facturación está cerrada.',
     termsText:
-      'Premium individual para mi propia cuenta adulta con correo confirmado, en México: $114.84 MXN cada mes o $1,100.84 MXN cada año, precio final con impuestos incluidos. El importe anual se cobra en un solo pago por adelantado. Ambas modalidades ofrecen las mismas capacidades. Autorizo el cobro recurrente con tarjeta mediante Stripe según la modalidad que elija; se renueva automáticamente hasta que cancele. Puedo cancelar la renovación en el Portal y conservar Premium hasta que termine mi periodo pagado. No hay prueba gratuita, cupones, cambios de modalidad durante una suscripción ni días de gracia: un pago pendiente o no confirmado no extiende el acceso. Mi precio se conserva al menos doce meses desde el primer pago exitoso mientras continúe la misma suscripción; una nueva compra tras su cancelación definitiva usa el precio vigente. Soporte revisa devoluciones: la total retira el periodo afectado y la parcial conserva el acceso; una disputa suspende el periodo afectado y detiene futuras renovaciones. Cerrar la cuenta detiene renovaciones y no solicita automáticamente una devolución. El bosque local y otras fuentes de acceso patrocinado se conservan al terminar Premium. La compra no sustituye mis decisiones de privacidad ni concede Premium al adolescente o funciones familiares. El comprobante de Stripe no es un CFDI. Solicito CFDI en jescricdy1@gmail.com con mis datos fiscales y correo de entrega; para ayuda, aclaraciones o devolución escribo a overseer@roadmap2u.com. Los datos comerciales tienen una conservación separada del bosque.',
+      'Premium individual para mi propia cuenta con correo confirmado, en México: $114.84 MXN cada mes o $1,100.84 MXN cada año, precio final con impuestos incluidos. El importe anual se cobra en un solo pago por adelantado. Ambas modalidades ofrecen las mismas capacidades. Autorizo el cobro recurrente con tarjeta mediante Stripe según la modalidad que elija; se renueva automáticamente hasta que cancele. Puedo cancelar la renovación en el Portal y conservar Premium hasta que termine mi periodo pagado. No hay prueba gratuita, cupones, cambios de modalidad durante una suscripción ni días de gracia: un pago pendiente o no confirmado no extiende el acceso. Mi precio se conserva al menos doce meses desde el primer pago exitoso mientras continúe la misma suscripción; una nueva compra tras su cancelación definitiva usa el precio vigente. Soporte revisa devoluciones: la total retira el periodo afectado y la parcial conserva el acceso; una disputa suspende el periodo afectado y detiene futuras renovaciones. Cerrar la cuenta detiene renovaciones y no solicita automáticamente una devolución. El bosque local y otras fuentes de acceso patrocinado se conservan al terminar Premium. La compra no sustituye mis decisiones de privacidad ni cambia la modalidad de las cuentas privadas existentes; las funciones familiares permanecen desactivadas. El comprobante de Stripe no es un CFDI. Solicito CFDI en jescricdy1@gmail.com con mis datos fiscales y correo de entrega; para ayuda, aclaraciones o devolución escribo a overseer@roadmap2u.com. Los datos comerciales tienen una conservación separada del bosque.',
   },
   accountStatus: {
     free: 'Plan Free',
@@ -1237,7 +1242,7 @@ export const ES = {
     forgotLink: '¿Se te olvidó tu contraseña?',
     createTitle: 'Crear mi cuenta',
     createHint:
-      'Cuenta con correo propio. De 12 a 17 años necesito una invitación privada autorizada mediante la declaración autenticada de mi padre, madre o tutor.',
+      'Cuenta con correo propio confirmado y aceptación de los términos. Puedo usar Free o elegir Premium individual; la nube es una decisión separada.',
     displayName: '¿Cómo te llamamos?',
     email: 'Tu correo',
     passwordNew: 'Elige una contraseña',
@@ -1266,6 +1271,7 @@ export const ES = {
     profileTitle: 'Tu cuenta',
     signedInAs: 'Estás aquí como',
     roleAdult: 'Cuenta adulta',
+    roleAccount: "Mi cuenta",
     roleMinor: 'Cuenta joven',
     sessionStale: 'Tu sesión necesita un respiro — vuelve a entrar cuando quieras usar la nube.',
     signOutCta: 'Cerrar sesión',
@@ -1505,6 +1511,7 @@ export const ES = {
       COMMERCIAL_CONFIGURATION_UNAVAILABLE:
         'No pudimos confirmar tu acceso ahora. Tu copia local sigue disponible; inténtalo después.',
       ADULT_MINOR_FRIENDSHIP_FORBIDDEN: 'Ese vínculo de amistad no está disponible.',
+      ACCOUNT_TERMS_REQUIRED: "Mi cuenta necesita mi aceptación de los términos para continuar.",
       ADULT_DECLARATION_REQUIRED:
         'Necesito confirmar que tengo 18 años o más y revisar los términos.',
       CLOUD_CONSENT_REQUIRED: 'Mi nube está en pausa. Puedo revisar la autorización en Ajustes.',
@@ -1526,7 +1533,7 @@ export const ES = {
       BILLING_OPERATION_PENDING:
         'Mi operación sigue en proceso. Puedo consultar sin volver a pagar.',
       BILLING_TERMS_OUTDATED: 'Las condiciones cambiaron. Puedo leerlas y decidir de nuevo.',
-      BILLING_BUYER_INELIGIBLE: 'La compra requiere mi propia cuenta adulta con correo confirmado.',
+      BILLING_BUYER_INELIGIBLE: 'La compra requiere mi propia cuenta con correo confirmado.',
       BILLING_SUBSCRIPTION_EXISTS: 'Ya tengo una suscripción. Puedo gestionarla desde el Portal.',
       BILLING_PAYMENT_REVIEW: 'Mi pago requiere revisión. Soporte puede acompañarme.',
       CHECKOUT_IN_PROGRESS:
@@ -1671,7 +1678,7 @@ export const ES = {
       {
         icon: '💳',
         title: 'Mi suscripción individual',
-        body: 'En Cuenta o Ajustes abro Mi suscripción para consultar la oferta vigente, mi periodo pagado y el Portal. Premium individual cuesta $114.84 MXN cada mes o $1,100.84 MXN cada año, precio final con impuestos incluidos y las mismas capacidades. La renovación es automática y puedo cancelarla al final del periodo pagado. La compra es para mi propia cuenta adulta con correo confirmado, en México, con aceptación expresa de las condiciones recurrentes. Si un pago sigue pendiente, puedo consultar de nuevo o pedir ayuda sin repetirlo. El Portal sigue disponible para una suscripción existente aunque las compras estén cerradas o Premium haya vencido. No hay días de gracia; mi bosque local y los patrocinios vigentes se conservan. Premium no sustituye privacidad ni concede Premium al adolescente o funciones familiares. Soporte y devoluciones: overseer@roadmap2u.com. Solicitudes de CFDI: jescricdy1@gmail.com, con mis datos fiscales y correo de entrega; el recibo de Stripe no es un CFDI.',
+        body: 'En Cuenta o Ajustes abro Mi suscripción para consultar la oferta vigente, mi periodo pagado y el Portal. Premium individual cuesta $114.84 MXN cada mes o $1,100.84 MXN cada año, precio final con impuestos incluidos y las mismas capacidades. La renovación es automática y puedo cancelarla al final del periodo pagado. La compra es para mi propia cuenta con correo confirmado, en México, con aceptación expresa de las condiciones recurrentes. Si un pago sigue pendiente, puedo consultar de nuevo o pedir ayuda sin repetirlo. El Portal sigue disponible para una suscripción existente aunque las compras estén cerradas o Premium haya vencido. No hay días de gracia; mi bosque local y los patrocinios vigentes se conservan. Premium no sustituye privacidad ni concede Premium al adolescente o funciones familiares. Soporte y devoluciones: overseer@roadmap2u.com. Solicitudes de CFDI: jescricdy1@gmail.com, con mis datos fiscales y correo de entrega; el recibo de Stripe no es un CFDI.',
       },
     ],
   },

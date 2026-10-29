@@ -65,6 +65,18 @@ beforeEach(() => {
   cognito.on(AdminDeleteUserCommand).resolves({});
 });
 describe('closure and the independent privacy register', () => {
+  it('archives common terms and cloud document identity under a consent hold without forest data', async () => {
+    const snapshot = { pk: 'USER#adult', sk: 'PRIVACY#ADULT', userId: 'adult', revision: 2, updatedAt: NOW, accountTermsAcceptedAt: NOW - 1000, accountTermsLanguage: 'es', accountTermsDocumentHash: 'c'.repeat(64), cloudConsent: 'revoked', cloudDocumentFamily: 'common', cloudDocumentHash: 'c'.repeat(64), erasure: 'none' };
+    const ledger = decisionLedgerPut(deps(), snapshot as AdultPrivacyItem).Put!.Item;
+    ddb.on(GetCommand).callsFake((input) => ({ Item: input.Key?.pk === closure.pk ? closure : input.Key?.pk === 'PRIVACY_STATE#adult' ? ledger : undefined }));
+    ddb.on(QueryCommand).callsFake((input) => ({ Items: input.TableName === 'privacy' && input.ExpressionAttributeValues?.[':pk'] === 'HOLD#adult'
+      ? [{ pk: 'HOLD#adult', sk: 'CASE#common', userId: 'adult', caseId: 'common', scope: 'consent', state: 'active', legalBasis: 'specific preservation obligation', expiresAt: NOW + 86400000, reviewAt: NOW + 10000 }]
+      : input.TableName === 'main' && input.ExpressionAttributeValues?.[':prefix'] === 'PRIVACY#' ? [{ ...snapshot, record: { notes: 'private forest' } }] : [] }));
+    await expect(processAccountClosureMessage(deps(), { sub: 'adult', closureId: 'close-1' })).resolves.toBe('completed');
+    const archived = ddb.commandCalls(TransactWriteCommand).flatMap((call) => call.args[0].input.TransactItems ?? []).find((item) => item.Put?.Item?.pk === 'CONSENT_ARCHIVE#adult' && item.Put.Item.sk === 'PRIVACY#ADULT')?.Put?.Item;
+    expect(archived).toMatchObject({ accountTermsAcceptedAt: NOW - 1000, accountTermsLanguage: 'es', accountTermsDocumentHash: 'c'.repeat(64), cloudDocumentFamily: 'common' });
+    expect(archived).not.toHaveProperty('adultDeclaredAt'); expect(archived).not.toHaveProperty('record');
+  });
   it('forest-only erasure neither resolves billing nor rewrites an individual paid source', async () => {
     const resolve = vi.spyOn(BillingClosure.prototype, 'resolve');
     const state = { pk: 'USER#adult', sk: 'PRIVACY#ADULT', userId: 'adult', revision: 2, updatedAt: NOW, cloudConsent: 'revoked', erasure: 'requested', erasureId: 'forest-1' };

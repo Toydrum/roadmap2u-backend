@@ -377,7 +377,10 @@ export async function handleEvent(event: RouterEvent, injected?: Deps): Promise<
     )
       throw new ApiError('FORBIDDEN');
     if (!found.route.pattern.startsWith('/privacy/') && found.route.pattern !== '/me') {
-      await privacy.requireAdultAdmission(ctx);
+      if (found.route.pattern.startsWith('/sync/') ||
+          (found.route.pattern === '/users/:id/forest' && found.params['id'] === ctx.callerId)) {
+        await privacy.requireOwnAccountAdmission(ctx);
+      } else await privacy.requireAdultAdmission(ctx);
     }
     await requireFamilyRollout(ctx, method, found.route.pattern);
     // PATH params spread LAST (0.0.115 S1): a crafted `?userId=` used to

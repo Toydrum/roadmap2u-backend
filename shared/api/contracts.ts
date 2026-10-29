@@ -1,3 +1,6 @@
+import { HISTORICAL_PRIVACY_DOCUMENTS } from './historical-privacy-documents';
+export { COMMON_ACCOUNT_VERSIONS, commonAccountPrivacyDocument } from './common-account-documents';
+import { COMMON_ACCOUNT_VERSIONS } from './common-account-documents';
 import {
   CheckIn,
   ExportEnvelope,
@@ -34,34 +37,7 @@ export function adultPrivacyDocument(
   language: 'es' | 'en',
   dictionary: Pick<Dict, 'legal' | 'privacy'>,
 ) {
-  return {
-    versions: ADULT_PRIVACY_VERSIONS,
-    language,
-    notice: dictionary.legal.privacy,
-    terms: dictionary.legal.terms,
-    declaration: {
-      adult: dictionary.privacy.adultCheckbox,
-      terms: dictionary.privacy.termsCheckbox,
-    },
-    cloud: {
-      title: dictionary.privacy.cloudTitle,
-      body: dictionary.privacy.cloudBody,
-      sensitive: dictionary.privacy.cloudSensitive,
-      authorization: dictionary.privacy.cloudCheckbox,
-    },
-    adolescent: {
-      version: 'private-adolescent-2026-10-07-v2',
-      explanation: dictionary.privacy.adolescentBody,
-      authorizationModel: dictionary.privacy.automaticAuthorization,
-      declaredName: dictionary.privacy.guardianName,
-      declaredRelationship: dictionary.privacy.guardianRelationship,
-      parentRelationship: dictionary.privacy.parentRelationship,
-      legalGuardianRelationship: dictionary.privacy.legalGuardianRelationship,
-      understanding: dictionary.privacy.adolescentCheckbox,
-      representation: dictionary.privacy.representationCheckbox,
-      authorization: dictionary.privacy.guardianCheckbox,
-    },
-  };
+  return HISTORICAL_PRIVACY_DOCUMENTS[language];
 }
 
 export type PrivacyConsentState = 'absent' | 'granted' | 'revoked' | 'version_review_required';
@@ -72,6 +48,11 @@ export interface PrivacyStatus {
   enforcement: 'off' | 'enforce';
   revision: number;
   adultDeclared: boolean;
+  /** Ordinary own-account admission; this is not an age declaration. */
+  accountAdmission?: 'absent' | 'standard';
+  accountTermsAccepted?: boolean;
+  commonVersions?: typeof COMMON_ACCOUNT_VERSIONS;
+  commonDocumentHash?: string;
   cloudConsent: PrivacyConsentState;
   canUseCloud: boolean;
   erasure: CloudErasureState;
@@ -93,6 +74,7 @@ export interface PrivacyStatus {
 export interface PrivacyCommandBase {
   commandId: string;
   expectedRevision: number;
+  documentFamily?: 'common' | 'legacy';
   language: 'es' | 'en';
   noticeVersion: string;
   termsVersion: string;
@@ -101,6 +83,7 @@ export interface PrivacyCommandBase {
 }
 export type PrivacyConsentCommand = PrivacyCommandBase &
   (
+    | { action: 'accept_account_terms'; documentFamily: 'common'; acceptTerms: true }
     | { action: 'declare_adult'; declareAdult: true; acceptTerms: true }
     | { action: 'grant_cloud'; accepted: true }
     | { action: 'revoke_cloud' | 'erase_cloud' }
@@ -1054,6 +1037,7 @@ export const SERVER_API_ERROR_CODES = Object.freeze([
   'RESPONSIBLE_SCOPE_REQUIRED',
   'CONSENT_INCOMPLETE',
   'ADULT_DECLARATION_REQUIRED',
+  'ACCOUNT_TERMS_REQUIRED',
   'CLOUD_CONSENT_REQUIRED',
   'PRIVACY_REVISION_CONFLICT',
   'PRIVACY_ERASURE_PENDING',

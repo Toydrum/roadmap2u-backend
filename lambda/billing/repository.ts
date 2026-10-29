@@ -26,7 +26,8 @@ export class MemoryBillingRepository implements BillingRepository {
     const old = this.states.get(c.state.ownerSub) ?? initialState(c.state.ownerSub);
     if (old.revision !== c.expectedRevision) return false;
     const actor = this.actors.get(c.state.ownerSub);
-    if ((c.guard === 'adult' || c.guard === 'open') && (!actor || actor.status !== 'active' || actor.closing)) return false;
+    if ((c.guard === 'standard' || c.guard === 'adult' || c.guard === 'open') && (!actor || actor.status !== 'active' || actor.closing)) return false;
+    if (c.guard === 'standard' && (actor!.accountType !== 'adult' || actor!.privacyMode !== undefined || (!actor!.accountTermsCurrent && !actor!.adultDeclarationCurrent) || actor!.privacyRevision !== c.actor?.privacyRevision || actor!.accountTermsHash !== c.actor?.accountTermsHash || actor!.declarationHash !== c.actor?.declarationHash)) return false;
     if (c.guard === 'adult' && (actor!.accountType !== 'adult' || !actor!.adultDeclarationCurrent || actor!.privacyMode === 'adolescent_private')) return false;
     if (c.lease && (old.leaseOwner !== c.lease.owner || old.leaseRevision !== c.lease.revision || (old.leaseUntil ?? 0) <= c.lease.now)) return false;
     if (!c.lease && (old.leaseUntil ?? 0) > c.state.updatedAt) return false;

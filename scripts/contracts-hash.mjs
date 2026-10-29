@@ -9,6 +9,9 @@ const contractsRoot =
   rootIndex >= 0 ? resolve(process.argv[rootIndex + 1] ?? '') : join(backendRoot, 'shared');
 const contractFiles = [
   'api/contracts.ts',
+  'api/historical-privacy-documents.ts',
+  'api/common-account-documents.ts',
+  'api/subscription-terms-documents.ts',
   'db/schema.ts',
   'auth/auth-types.ts',
   'i18n/es.ts',

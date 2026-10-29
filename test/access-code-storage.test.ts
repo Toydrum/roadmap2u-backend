@@ -75,6 +75,12 @@ function redemptionProposal(): RedemptionCommitProposal {
 }
 
 describe('access-code secret parsing and DynamoDB transaction builders', () => {
+  it('atomically excludes private-account conversion from ordinary code redemption', () => {
+    const tx = buildRedemptionTransaction(redemptionProposal(), 'roadmap-dev', auditWriter()).TransactItems!;
+    const guard = tx.find((item) => item.ConditionCheck?.Key?.sk === 'PROFILE')!.ConditionCheck!;
+    expect(guard.ConditionExpression).toContain('attribute_not_exists(privacyMode)');
+    expect(guard.ConditionExpression).toContain('attribute_exists(email)');
+  });
   beforeEach(() => ddbMock.reset());
 
   it.each(['redemption', 'extend-grant', 'revoke-grant'] as const)('fences every captured coverage field during %s', (kind) => {

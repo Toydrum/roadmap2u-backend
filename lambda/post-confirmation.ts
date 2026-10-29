@@ -14,9 +14,10 @@ import {
 } from './family/model';
 
 /**
- * Cognito PostConfirmation → the DynamoDB profile item. Self-signup is always
- * an ADULT (minors are born via AdminCreateUser in family.createChild, which
- * writes its own profile). custom:accountType is stamped here — the client
+ * Cognito PostConfirmation → the DynamoDB profile item. Self-signup uses the
+ * technical adult identity type; age-neutral own-account admission is recorded
+ * separately by explicit terms consent. Guardian-created minors retain their
+ * separate profile/recovery model. custom:accountType is stamped here — the client
  * never writes it (defense-in-depth; GET /me stays the authz truth).
  */
 let deps: Deps | null = null;
