@@ -3,6 +3,10 @@ import { Dict } from './es';
 /** English UI copy — must mirror ES exactly; the compiler enforces it. */
 export const EN: Dict = {
   privacy: {
+    accountTitle: "Your account starts here",
+    accountBody: "I can use Free or choose individual Premium. I accept the account terms; cloud authorization is a separate choice later.",
+    accountTermsRequired: "I accept the account terms to continue.",
+    accountConfirm: "I accept the account terms",
     title: 'My privacy',
     cloudTitle: 'Your forest, your cloud choice',
     cloudBody:
@@ -263,7 +267,7 @@ export const EN: Dict = {
     privacy: {
       title: 'Privacy notice',
       intro:
-        'RoadMap2U works on your device first. This notice explains data processing for adult accounts and private adolescent accounts for ages 12 to 17.',
+        'RoadMap2U works on your device first. This notice explains data processing for common accounts and existing private or supervised modalities.',
       sections: [
         {
           title: 'Controller and contact',
@@ -280,9 +284,9 @@ export const EN: Dict = {
           ],
         },
         {
-          title: 'Private adolescent accounts',
+          title: 'Existing private adolescent accounts',
           paragraphs: [
-            'The ages-12-to-17 modality uses an authenticated parent or guardian declaration: confirmed email, recent sign-in, admitted adult account and current Premium. We record declared full name and relationship, responsible account and exact recipient identifiers, date of majority, text, language, versions and decision evidence. This signup does not verify identity, parentage or guardianship documents. Do not send identity documents in your notes or the app form.',
+            'Existing private accounts for ages 12 to 17 retain their authenticated parent or guardian declaration: confirmed email, recent sign-in, admitted adult account and current Premium. We record declared full name and relationship, responsible account and exact recipient identifiers, date of majority, text, language, versions and decision evidence. This signup does not verify identity, parentage or guardianship documents. Do not send identity documents in your notes or the app form.',
             'The adolescent receives their own explanation and separately decides whether to use cloud. Their forest permits no friendships, visits, user discovery or connections to other forests. Representative authorization grants no everyday forest reading or export, family coverage or Premium.',
             'Adolescent cloud capacity depends on that representative’s current Premium; the forest keeps Free limits. If that capacity ends, cloud stops without erasing the account or forest. Downloading data and exercising privacy rights do not require Premium.',
             'At 18, account and data remain; parental authorization ends and personal adult acceptance and cloud authorization are required, along with independent capacity where applicable. Social restrictions remain. Disputes and changes of representative are handled through verified support; there is no automatic transfer.',
@@ -329,7 +333,7 @@ export const EN: Dict = {
         {
           title: 'Account and modality',
           paragraphs: [
-            'Adults choose their modality and accept these terms. Adolescents aged 12 to 17 use a private account after an authenticated parent or guardian declaration, together with their own acceptance and confirmed email. The authorizing person truthfully declares their name, relationship and authority to represent them; the app checks their account, not civil documents. This modality does not offer registration for children under 12.',
+            'Common signup requires my own confirmed email and express acceptance of these terms. It provides Free or the choice of individual Premium without an age choice or declaration of adulthood. Cloud requires separate express authorization. Existing private or supervised accounts retain their modality, restrictions, links and data; they do not automatically become common accounts.',
             'Each person protects their credentials and provides truthful account information. A private adolescent account has no visits or friendships, and representative authorization does not open their notes. Local forest content remains when signing in, out or declining cloud.',
           ],
         },
@@ -338,7 +342,7 @@ export const EN: Dict = {
           paragraphs: [
             'Sync requires current privacy authorization and the appropriate commercial capacity. Premium does not replace consent. Authorizing privacy does not grant Premium or family membership.',
             'Adolescent cloud is linked to the current Premium of the responsible account that recorded authorization and keeps Free limits: two active trees and ten visible branches per tree. Ending Premium or withdrawing either authorization stops new cloud operations and preserves data. This link does not give the adolescent personal Premium, social functions or family access.',
-            'Family functions remain disabled for this release. Sponsored grants are free and are not sold. Payment, renewal, cancellation and refund conditions will be described before enabling purchases; this modality does not offer a purchase or activate Stripe.',
+            'Family and social functions remain disabled for this release. Sponsored grants are free and are not sold. Individual Premium requires confirmed payment and express acceptance of price, renewal, cancellation and refund conditions before purchase; purchasing does not authorize cloud.',
           ],
         },
         {
@@ -1124,7 +1128,7 @@ export const EN: Dict = {
       busy: 'Checking…',
       success: 'Premium is now active on your account 🌿',
       returnCta: 'Return to my forest',
-      adultOnly: 'Keys are redeemed from an adult account with a confirmed email.',
+      adultOnly: 'Keys are redeemed from my own account with a confirmed email.',
       signInHint: 'Sign in or create your account; then you can paste the key here.',
       errors: {
         invalid: 'This key is invalid or has expired.',
@@ -1142,7 +1146,7 @@ export const EN: Dict = {
       'Simulation {stage}: the financial date is {date}. This test access requires a connection.',
     simulationUnavailable:
       'Simulation {stage}: waiting for a valid clock reading. The local forest remains available.',
-    termsVersion: 'individual-subscription-2026-10-28-v1',
+    termsVersion: 'individual-subscription-2026-10-29-v2',
     title: 'My subscription',
     intro:
       'I can review my subscription and manage its payments at my own pace. My forest stays here.',
@@ -1150,11 +1154,11 @@ export const EN: Dict = {
     settingsHint: 'Prices, paid period, and account management',
     accountBack: 'Return to my account',
     signIn: 'Sign in to my account',
-    signInHint: 'The subscription belongs to my adult account with a verified email.',
-    adultOnly: 'Purchasing is available for my own adult account with a verified email.',
+    signInHint: 'The subscription belongs to my account with a verified email.',
+    adultOnly: 'Purchasing is available for my own account with a verified email.',
     catalogUnavailable: 'The offer needs a review. I can check again or ask for help.',
     purchasesClosed: 'New purchases are paused. I can still manage my subscription.',
-    available: 'Available for adult accounts',
+    available: 'Available for my own account',
     month: 'Every month',
     year: 'Every year',
     monthly: '{amount} MXN every month',
@@ -1164,7 +1168,8 @@ export const EN: Dict = {
     recurring:
       'Renewal is automatic. I can cancel renewal at the end of my paid period in the Portal.',
     termsTitle: 'Subscription terms',
-    termsDraft: 'Version individual-subscription-2026-10-28-v1.',
+    termsDraft: 'Version individual-subscription-2026-10-29-v2.',
+    termsUnavailable: 'This version of the terms is not available. I can request the accepted text at overseer@roadmap2u.com.',
     termsRead: 'Read the terms',
     termsAccept: 'I accept the subscription terms and recurring charges for my chosen interval.',
     countryAccept: 'I declare Mexico as my commercial country.',
@@ -1200,7 +1205,7 @@ export const EN: Dict = {
     review: 'My payment is under review. Support can help me.',
     closed: 'My billing is closed.',
     termsText:
-      'Individual Premium for my own adult account with a verified email, in Mexico: $114.84 MXN every month or $1,100.84 MXN every year, final price including taxes. The annual total is charged in one advance payment. Both intervals provide the same capabilities. I authorize recurring card charges through Stripe for the interval I choose; the subscription renews automatically until I cancel. I can cancel renewal in the Portal and keep Premium until my paid period ends. There is no free trial, coupons, interval change during a subscription, or grace period: pending or unconfirmed payment does not extend access. My price is protected for at least twelve months from the first successful payment while the same subscription continues; a new purchase after its final cancellation uses the current price. Support reviews refunds: a full refund removes the affected period and a partial refund keeps access; a dispute suspends the affected period and stops future renewals. Closing the account stops renewals and does not automatically request a refund. My local forest and other sponsored access sources remain when Premium ends. A purchase does not replace my privacy choices or give an adolescent personal Premium or family features. A Stripe receipt is not a CFDI. I request a CFDI at jescricdy1@gmail.com with my tax details and delivery email; for help, payment clarification or a refund I write to overseer@roadmap2u.com. Commercial records have retention separate from the forest.',
+      'Individual Premium for my own account with a verified email, in Mexico: $114.84 MXN every month or $1,100.84 MXN every year, final price including taxes. The annual total is charged in one advance payment. Both intervals provide the same capabilities. I authorize recurring card charges through Stripe for the interval I choose; the subscription renews automatically until I cancel. I can cancel renewal in the Portal and keep Premium until my paid period ends. There is no free trial, coupons, interval change during a subscription, or grace period: pending or unconfirmed payment does not extend access. My price is protected for at least twelve months from the first successful payment while the same subscription continues; a new purchase after its final cancellation uses the current price. Support reviews refunds: a full refund removes the affected period and a partial refund keeps access; a dispute suspends the affected period and stops future renewals. Closing the account stops renewals and does not automatically request a refund. My local forest and other sponsored access sources remain when Premium ends. A purchase does not replace my privacy choices or change the modality of existing private accounts; family features remain disabled. A Stripe receipt is not a CFDI. I request a CFDI at jescricdy1@gmail.com with my tax details and delivery email; for help, payment clarification or a refund I write to overseer@roadmap2u.com. Commercial records have retention separate from the forest.',
   },
   accountStatus: {
     free: 'Free plan',
@@ -1231,7 +1236,7 @@ export const EN: Dict = {
     forgotLink: 'Forgot your password?',
     createTitle: 'Create my account',
     createHint:
-      'An account with my own email. At 12 to 17, I need a private invitation authorized through the authenticated declaration of my parent or guardian.',
+      'An account with my own confirmed email and acceptance of the terms. I can use Free or choose individual Premium; cloud is a separate choice.',
     displayName: 'What should we call you?',
     email: 'Your email',
     passwordNew: 'Choose a password',
@@ -1260,6 +1265,7 @@ export const EN: Dict = {
     profileTitle: 'Your account',
     signedInAs: 'You are here as',
     roleAdult: 'Adult account',
+    roleAccount: "My account",
     roleMinor: 'Young account',
     sessionStale: 'Your session needs a breather — sign in again when you want to use the cloud.',
     signOutCta: 'Sign out',
@@ -1497,6 +1503,7 @@ export const EN: Dict = {
       COMMERCIAL_CONFIGURATION_UNAVAILABLE:
         'We could not confirm your access right now. Your local copy remains available; try again later.',
       ADULT_MINOR_FRIENDSHIP_FORBIDDEN: 'That friendship link is not available.',
+      ACCOUNT_TERMS_REQUIRED: "My account needs my acceptance of the terms to continue.",
       ADULT_DECLARATION_REQUIRED: 'I need to confirm that I am 18 or older and review the terms.',
       CLOUD_CONSENT_REQUIRED: 'My cloud is paused. I can review authorization in Settings.',
       PRIVACY_REVISION_CONFLICT: 'My decision changed in another session. I can review it again.',
@@ -1514,7 +1521,7 @@ export const EN: Dict = {
       BILLING_OPERATION_PENDING:
         'My operation is still in progress. I can check without paying again.',
       BILLING_TERMS_OUTDATED: 'The terms changed. I can read them and decide again.',
-      BILLING_BUYER_INELIGIBLE: 'Purchasing requires my own adult account with a verified email.',
+      BILLING_BUYER_INELIGIBLE: 'Purchasing requires my own account with a verified email.',
       BILLING_SUBSCRIPTION_EXISTS: 'I already have a subscription. I can manage it in the Portal.',
       BILLING_PAYMENT_REVIEW: 'My payment needs a review. Support can help me.',
       CHECKOUT_IN_PROGRESS:
@@ -1659,7 +1666,7 @@ export const EN: Dict = {
       {
         icon: '💳',
         title: 'My individual subscription',
-        body: 'From Account or Settings I open My subscription to check the current offer, my paid period and the Portal. Individual Premium costs $114.84 MXN every month or $1,100.84 MXN every year, final price including taxes with the same capabilities. Renewal is automatic and I can cancel it at the end of the paid period. A purchase is for my own adult account with confirmed email, in Mexico, with explicit acceptance of recurring conditions. If a payment is pending, I can check again or ask for help without repeating it. The Portal remains available for an existing subscription even when purchases are closed or Premium has expired. There are no grace days; my local forest and current sponsored grants remain. Premium does not replace privacy or grant Premium to an adolescent or enable family functions. Support and refunds: overseer@roadmap2u.com. CFDI requests: jescricdy1@gmail.com, with my tax details and delivery email; a Stripe receipt is not a CFDI.',
+        body: 'From Account or Settings I open My subscription to check the current offer, my paid period and the Portal. Individual Premium costs $114.84 MXN every month or $1,100.84 MXN every year, final price including taxes with the same capabilities. Renewal is automatic and I can cancel it at the end of the paid period. A purchase is for my own account with confirmed email, in Mexico, with explicit acceptance of recurring conditions. If a payment is pending, I can check again or ask for help without repeating it. The Portal remains available for an existing subscription even when purchases are closed or Premium has expired. There are no grace days; my local forest and current sponsored grants remain. Premium does not replace privacy or grant Premium to an adolescent or enable family functions. Support and refunds: overseer@roadmap2u.com. CFDI requests: jescricdy1@gmail.com, with my tax details and delivery email; a Stripe receipt is not a CFDI.',
       },
     ],
   },

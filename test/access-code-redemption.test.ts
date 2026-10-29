@@ -134,6 +134,11 @@ function expectApiError(error: unknown, code: string): void {
 }
 
 describe('AccessCodeRedeemer', () => {
+  it('does not redeem a personal code for a known private account despite its technical adult token', async () => {
+    const { redeemer, proposals } = makeDeps({ readAccountSnapshot: vi.fn(async () => account({ profile: profile({ privacyMode: 'adolescent_private' }) })) });
+    await expect(redeem(redeemer)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(proposals).toHaveLength(0);
+  });
   beforeEach(() => vi.restoreAllMocks());
   it('fences a protected clock observation when issuing a real-time sponsored grant',async()=>{
     const testClock={ownerSub:OWNER,clockRevision:2};

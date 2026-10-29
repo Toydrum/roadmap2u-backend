@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import {
   ADULT_PRIVACY_VERSIONS,
+  COMMON_ACCOUNT_VERSIONS,
   ApiError,
   adultPrivacyDocument,
+  commonAccountPrivacyDocument,
   type CloudErasureState,
   type PrivacyConsentCommand,
   type PrivacyExportPage,
@@ -40,9 +42,13 @@ export interface AdultPrivacyItem {
   adultDeclaredAt?: number;
   declarationLanguage?: 'es' | 'en';
   declarationDocumentHash?: string;
+  accountTermsAcceptedAt?: number;
+  accountTermsLanguage?: 'es' | 'en';
+  accountTermsDocumentHash?: string;
   cloudConsent: 'absent' | 'granted' | 'revoked';
   cloudLanguage?: 'es' | 'en';
   cloudDocumentHash?: string;
+  cloudDocumentFamily?: 'common';
   erasure: CloudErasureState;
   erasureId?: string;
   erasureRequestedAt?: number;
@@ -83,7 +89,8 @@ interface PrivacyEvidence {
   requestHash: string;
   action: PrivacyConsentCommand['action'];
   documentHash: string;
-  document: ReturnType<typeof adultPrivacyDocument>;
+  document: ReturnType<typeof adultPrivacyDocument> | ReturnType<typeof commonAccountPrivacyDocument>;
+  documentFamily?: 'common';
   authentication: 'verified_jwt_subject';
   authenticatedAt?: number;
 }
@@ -108,6 +115,24 @@ export function privacyDocumentHash(language: 'es' | 'en'): string {
   return createHash('sha256')
     .update(JSON.stringify(adultPrivacyDocument(language, language === 'es' ? ES : EN)))
     .digest('hex');
+}
+export function commonPrivacyDocumentHash(language: 'es' | 'en'): string {
+  return createHash('sha256').update(JSON.stringify(commonAccountPrivacyDocument(language))).digest('hex');
+}
+/** Enrollment remains explicit even after a document becomes stale. */
+export function isCommonEnrolled(item: AdultPrivacyItem | undefined): boolean {
+  return !!item && ['accountTermsAcceptedAt', 'accountTermsLanguage', 'accountTermsDocumentHash'].some((name) => Object.hasOwn(item, name));
+}
+export function isAccountTermsCurrent(item: AdultPrivacyItem | undefined): boolean {
+  return !!item && Number.isSafeInteger(item.accountTermsAcceptedAt) && item.accountTermsAcceptedAt! >= 0 &&
+    (item.accountTermsLanguage === 'es' || item.accountTermsLanguage === 'en') &&
+    item.accountTermsDocumentHash === commonPrivacyDocumentHash(item.accountTermsLanguage);
+}
+export function isOrdinaryOwnAccount(profile: Pick<ProfileItem, 'accountType' | 'privacyMode'>): boolean {
+  return profile.accountType === 'adult' && profile.privacyMode === undefined;
+}
+function hasOwnAdmission(profile: Pick<ProfileItem, 'accountType' | 'privacyMode'>, item: AdultPrivacyItem | undefined): boolean {
+  return isOrdinaryOwnAccount(profile) && (isAccountTermsCurrent(item) || isDeclared(item));
 }
 async function strong<T>(deps: Deps, key: { pk: string; sk: string }): Promise<T | undefined> {
   const response = await deps.ddb.send(
@@ -165,7 +190,9 @@ function cloudIsCurrent(item: AdultPrivacyItem): boolean {
   return (
     item.cloudConsent === 'granted' &&
     (item.cloudLanguage === 'es' || item.cloudLanguage === 'en') &&
-    item.cloudDocumentHash === privacyDocumentHash(item.cloudLanguage)
+    item.cloudDocumentHash === (item.cloudDocumentFamily === 'common'
+      ? commonPrivacyDocumentHash(item.cloudLanguage) : item.cloudDocumentFamily === undefined
+        ? privacyDocumentHash(item.cloudLanguage) : '')
   );
 }
 export function privateAdolescentMode(): 'off' | 'enforce' {
@@ -207,6 +234,7 @@ export function privacyStatusFor(
   now = Date.now(),
 ): PrivacyStatus {
   const declared = profile.accountType === 'adult' && isDeclared(item);
+  const standard = hasOwnAdmission(profile, item);
   const adolescent = adolescentAdmission(profile, item, now);
   const guardianCurrent =
     adolescent &&
@@ -219,7 +247,7 @@ export function privacyStatusFor(
     item.adolescentDocumentHash === privacyDocumentHash(item.adolescentLanguage);
   const current = item ? cloudIsCurrent(item) && (!adolescent || adolescentUnderstood) : false;
   const consent =
-    item?.cloudConsent === 'granted' && (!(declared || guardianCurrent) || !current)
+    item?.cloudConsent === 'granted' && (!(standard || declared || guardianCurrent) || !current)
       ? 'version_review_required'
       : (item?.cloudConsent ?? 'absent');
   const erasure = item?.erasure ?? 'none';
@@ -230,9 +258,13 @@ export function privacyStatusFor(
     enforcement: adultPrivacyMode(),
     revision: item?.revision ?? 0,
     adultDeclared: declared,
+    accountAdmission: standard ? 'standard' : 'absent',
+    accountTermsAccepted: isOrdinaryOwnAccount(profile) && isAccountTermsCurrent(item),
+    commonVersions: COMMON_ACCOUNT_VERSIONS,
+    commonDocumentHash: commonPrivacyDocumentHash(language),
     cloudConsent: consent,
     canUseCloud:
-      (declared || (guardianCurrent && privateAdolescentMode() === 'enforce')) &&
+      (standard || declared || (guardianCurrent && privateAdolescentMode() === 'enforce')) &&
       current &&
       (erasure === 'none' || erasure === 'completed'),
     erasure,
@@ -322,7 +354,10 @@ function parseCommand(value: unknown): PrivacyConsentCommand {
     'cloudConsentVersion',
     'documentHash',
   ];
-  if (record['action'] === 'declare_adult') keys.push('declareAdult', 'acceptTerms');
+  if (Object.hasOwn(record, 'documentFamily')) keys.push('documentFamily');
+  const common = record['documentFamily'] === 'common';
+  if (record['action'] === 'accept_account_terms') keys.push('acceptTerms');
+  else if (record['action'] === 'declare_adult') keys.push('declareAdult', 'acceptTerms');
   else if (record['action'] === 'grant_cloud') keys.push('accepted');
   else if (record['action'] === 'accept_adolescent')
     keys.push('invitationId', 'acceptTerms', 'understandsPrivacy');
@@ -336,10 +371,13 @@ function parseCommand(value: unknown): PrivacyConsentCommand {
     !Number.isSafeInteger(record['expectedRevision']) ||
     (record['expectedRevision'] as number) < 0 ||
     (record['language'] !== 'es' && record['language'] !== 'en') ||
-    Object.entries(ADULT_PRIVACY_VERSIONS).some(([key, version]) => record[key] !== version) ||
+    (Object.hasOwn(record, 'documentFamily') && !['common', 'legacy'].includes(String(record['documentFamily']))) ||
+    (common && ['declare_adult', 'accept_adolescent'].includes(String(record['action']))) ||
+    Object.entries(common ? COMMON_ACCOUNT_VERSIONS : ADULT_PRIVACY_VERSIONS).some(([key, version]) => record[key] !== version) ||
     typeof record['documentHash'] !== 'string' ||
     !HASH.test(record['documentHash']) ||
-    record['documentHash'] !== privacyDocumentHash(record['language'] as 'es' | 'en') ||
+    record['documentHash'] !== (common ? commonPrivacyDocumentHash : privacyDocumentHash)(record['language'] as 'es' | 'en') ||
+    (record['action'] === 'accept_account_terms' && (!common || record['acceptTerms'] !== true)) ||
     (record['action'] === 'declare_adult' &&
       (record['declareAdult'] !== true || record['acceptTerms'] !== true)) ||
     (record['action'] === 'grant_cloud' && record['accepted'] !== true) ||
@@ -378,6 +416,8 @@ export async function changePrivacyConsent(ctx: Ctx, body: unknown): Promise<Pri
   privacyTableName(ctx.deps);
   const profile = await requireWritableOwner(ctx, ctx.callerId);
   const old = await readPrivacyItem(ctx.deps, ctx.callerId);
+  const common = command.documentFamily === 'common';
+  if (common && !isOrdinaryOwnAccount(profile)) throw new ApiError('FORBIDDEN');
   const duePrivate =
     profile.privacyMode === 'adolescent_private' &&
     !!profile.majorityAt &&
@@ -409,7 +449,9 @@ export async function changePrivacyConsent(ctx: Ctx, body: unknown): Promise<Pri
     throw new ApiError('PRIVACY_REVISION_CONFLICT');
   if ((old?.revision ?? 0) >= Number.MAX_SAFE_INTEGER)
     throw new ApiError('PRIVACY_REVISION_CONFLICT');
-  if (command.action === 'grant_cloud' && !adolescent && !isDeclared(old))
+  if (command.action === 'grant_cloud' && common && !hasOwnAdmission(profile, old))
+    throw new ApiError('ACCOUNT_TERMS_REQUIRED');
+  if (command.action === 'grant_cloud' && !common && !adolescent && !isDeclared(old))
     throw new ApiError('ADULT_DECLARATION_REQUIRED');
   if (command.action === 'grant_cloud' && adolescent && privateAdolescentMode() !== 'enforce')
     throw new ApiError('FORBIDDEN');
@@ -442,12 +484,16 @@ export async function changePrivacyConsent(ctx: Ctx, body: unknown): Promise<Pri
       declarationDocumentHash: command.documentHash,
       ...(duePrivate ? { guardianConsent: 'ended', cloudConsent: 'revoked' } : {}),
     });
+  if (command.action === 'accept_account_terms')
+    Object.assign(next, { accountTermsAcceptedAt: now, accountTermsLanguage: command.language, accountTermsDocumentHash: command.documentHash });
   if (command.action === 'grant_cloud')
     Object.assign(next, {
       cloudConsent: 'granted',
       cloudLanguage: command.language,
       cloudDocumentHash: command.documentHash,
+      ...(common ? { cloudDocumentFamily: 'common' as const } : {}),
     });
+  if (command.action === 'grant_cloud' && !common) delete next.cloudDocumentFamily;
   if (command.action === 'revoke_cloud' || command.action === 'erase_cloud')
     next.cloudConsent = 'revoked';
   if (command.action === 'erase_cloud')
@@ -466,7 +512,8 @@ export async function changePrivacyConsent(ctx: Ctx, body: unknown): Promise<Pri
     action: command.action,
     requestHash: requestHash(command),
     documentHash: command.documentHash,
-    document: adultPrivacyDocument(command.language, command.language === 'es' ? ES : EN),
+    document: common ? commonAccountPrivacyDocument(command.language) : adultPrivacyDocument(command.language, command.language === 'es' ? ES : EN),
+    ...(common ? { documentFamily: 'common' as const } : {}),
     authentication: 'verified_jwt_subject',
     ...(ctx.authenticatedAt === undefined ? {} : { authenticatedAt: ctx.authenticatedAt }),
   };
@@ -499,7 +546,7 @@ export async function changePrivacyConsent(ctx: Ctx, body: unknown): Promise<Pri
               TableName: ctx.deps.table,
               Key: K.profile(ctx.callerId),
               ConditionExpression:
-                'attribute_exists(pk) AND accountType = :kind AND (attribute_not_exists(#status) OR #status = :active)',
+                'attribute_exists(pk) AND accountType = :kind AND (attribute_not_exists(#status) OR #status = :active)' + (common ? ' AND attribute_not_exists(privacyMode)' : ''),
               ExpressionAttributeNames: { '#status': 'status' },
               ExpressionAttributeValues: { ':kind': profile.accountType, ':active': 'active' },
             },
@@ -568,12 +615,22 @@ export interface CloudConsentGuard {
   responsiblePremium?: ResponsiblePremiumCloud;
 }
 export async function requireAdultAdmission(ctx: Ctx): Promise<void> {
-  if (adultPrivacyMode() === 'off') return;
-  const profile = await requireWritableOwner(ctx, ctx.callerId);
+  const mode = adultPrivacyMode();
   const state = await readPrivacyItem(ctx.deps, ctx.callerId);
+  if (isCommonEnrolled(state) && !isDeclared(state)) throw new ApiError('FORBIDDEN');
+  if (mode === 'off') return;
+  const profile = await requireWritableOwner(ctx, ctx.callerId);
   if (adolescentAdmission(profile, state, ctx.deps.now())) return;
   if (profile.accountType !== 'adult') throw new ApiError('FORBIDDEN');
   if (!isDeclared(state)) throw new ApiError('ADULT_DECLARATION_REQUIRED');
+}
+/** Own cloud operations do not confer family or social authority. */
+export async function requireOwnAccountAdmission(ctx: Ctx): Promise<void> {
+  const profile = await requireWritableOwner(ctx, ctx.callerId);
+  const state = await readPrivacyItem(ctx.deps, ctx.callerId);
+  if (hasOwnAdmission(profile, state)) return;
+  if (isCommonEnrolled(state)) throw new ApiError('ACCOUNT_TERMS_REQUIRED');
+  await requireAdultAdmission(ctx);
 }
 export async function requireCloudConsent(
   ctx: Ctx,
@@ -588,8 +645,8 @@ export async function requireCloudConsent(
   const profile = await requireWritableOwner(ctx, userId);
   const status = privacyStatusFor(profile, state, 'es', ctx.deps.now());
   if (status.scope === 'unsupported') throw new ApiError('FORBIDDEN');
-  if (status.scope === 'adult' && !status.adultDeclared)
-    throw new ApiError('ADULT_DECLARATION_REQUIRED');
+  if (status.scope === 'adult' && !status.adultDeclared && status.accountAdmission !== 'standard')
+    throw new ApiError(isCommonEnrolled(state) ? 'ACCOUNT_TERMS_REQUIRED' : 'ADULT_DECLARATION_REQUIRED');
   if (status.scope === 'adolescent_private' && privateAdolescentMode() !== 'enforce')
     throw new ApiError('FORBIDDEN');
   const additionalConditions =

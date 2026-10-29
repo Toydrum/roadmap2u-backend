@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { individualPurchaseAdmitted } from './admission';
 import { purchasesConfigReady } from './config';
 import { canReadTestClock, resolveFinancialClock, financialClockPresentation } from './clock';
-import { BillingError, billingCatalogPrices, digest, eligible, historyPending, nonterminal, operationId, rejectedCheckoutExpiry, type BillingActor, type BillingCommand, type BillingConfig, type BillingProvider, type BillingRepository, type BillingState, type Interval, type ProviderCheckout, type ProviderSnapshot } from './model';
+import { BillingError, billingCatalogPrices, digest, eligible, canManageBilling, historyPending, nonterminal, operationId, rejectedCheckoutExpiry, type BillingActor, type BillingCommand, type BillingConfig, type BillingProvider, type BillingRepository, type BillingState, type Interval, type ProviderCheckout, type ProviderSnapshot } from './model';
 
 type CheckoutRequest = { commandId: string; expectedBillingRevision: number; interval: Interval; catalogVersion: string; country: 'MX'; termsAcceptance: { version: string; hash: string; language: 'es' | 'en'; accepted: true } };
 type PortalRequest = { commandId: string; expectedBillingRevision: number };
@@ -59,7 +59,7 @@ export class BillingService {
       : clock.mode !== 'blocked' && s.paidThrough !== null && s.paidThrough <= clock.now && ['active', 'cancel_at_period_end'].includes(s.state) ? 'expired' : s.state;
     const review = state === 'payment_review';
     const simulation=financialClockPresentation(clock,cfg.stage,observedAt);
-    return { ...(simulation?{simulation}:{}),contractVersion: 1 as const, state, interval: s.interval, paidThrough: s.paidThrough, nextRenewalAt: s.subscriptionId && !s.cancelAtPeriodEnd && ['active', 'past_due'].includes(state) ? s.paidThrough : null, cancelAtPeriodEnd: s.cancelAtPeriodEnd, processing: review ? 'review' as const : (s.activeCommandId || s.historyPending) ? 'pending' as const : 'idle' as const, canCheckout: enabled && purchasesConfigReady(this.deps.config) && individualPurchaseAdmitted(this.deps.config.purchaseAdmission, ownerSub) && !s.historyPending && eligible(actor) && !s.closingId && !s.closedAt && !review && !s.activeCommandId && !s.subscriptionId, canOpenPortal: !!s.customerId && !s.closedAt && actor.accountType === 'adult', revision: s.revision };
+    return { ...(simulation?{simulation}:{}),contractVersion: 1 as const, state, interval: s.interval, paidThrough: s.paidThrough, nextRenewalAt: s.subscriptionId && !s.cancelAtPeriodEnd && ['active', 'past_due'].includes(state) ? s.paidThrough : null, cancelAtPeriodEnd: s.cancelAtPeriodEnd, processing: review ? 'review' as const : (s.activeCommandId || s.historyPending) ? 'pending' as const : 'idle' as const, canCheckout: enabled && purchasesConfigReady(this.deps.config) && individualPurchaseAdmitted(this.deps.config.purchaseAdmission, ownerSub) && !s.historyPending && eligible(actor) && !s.closingId && !s.closedAt && !review && !s.activeCommandId && !s.subscriptionId, canOpenPortal: !!s.customerId && !s.closedAt && canManageBilling(actor), revision: s.revision };
   }
   async checkout(ownerSub: string, value: unknown): Promise<BillingResult> {
     const req = parseCheckout(value), { repository: r, provider: p, config: cfg } = this.deps;
@@ -90,7 +90,7 @@ export class BillingService {
     const customerOp = operationId(cfg, ownerSub, 'customer');
     const command: BillingCommand = { ownerSub, commandId: req.commandId, kind: 'checkout', fingerprint: paramsFingerprint(req), operationId: op, createdAt: now, updatedAt: now, status: 'reserved', customerKey: `r2u:customer:${customerOp}`, customerParams: { ownerSub, operationId: customerOp, ...(actor.email ? { email: actor.email } : {}) }, checkoutKey: `r2u:checkout:${op}`, buyerEmailVerified: true, priceTerms: { priceId: req.interval === 'month' ? cfg.monthlyPriceId : cfg.annualPriceId, productId: cfg.productId, amountMinor: prices[req.interval].amountMinor, interval: req.interval, currency: 'mxn', taxRateId: cfg.taxRateId, catalogVersion: cfg.catalogVersion }, consent: { accountId: ownerSub, acceptedAt: now, version: req.termsAcceptance.version, hash: req.termsAcceptance.hash, language: req.termsAcceptance.language }, interval: req.interval };
     const reserved = { ...state, revision: state.revision + 1, state: 'checkout_pending' as const, activeCommandId: command.commandId, updatedAt: now, nextReconcileAt: now };
-    if (!await r.commit({ expectedRevision: state.revision, state: reserved, guard: 'adult', actor, command, commandAbsent: true,
+    if (!await r.commit({ expectedRevision: state.revision, state: reserved, guard: 'standard', actor, command, commandAbsent: true,
       ...(clockObservation ? { clockObservation } : {}), auditAction: 'billing.checkout_reserved' })) {
       state = await r.load(ownerSub); const same = await r.command(ownerSub, req.commandId);
       if (same && same.fingerprint === command.fingerprint) return this.resumeCheckout(ownerSub, same);
@@ -110,9 +110,9 @@ export class BillingService {
       const current = await r.command(ownerSub, command.commandId);
       if (!current || current.operationId !== command.operationId || current.kind !== 'checkout') throw new BillingError('BILLING_REVISION_CONFLICT');
       command = current;
-      const actor = await r.actor(ownerSub);
+      let actor = await r.actor(ownerSub);
       // Background retries use the verified admission recorded at reservation, then recheck
-      // the current profile/declaration. HTTP checkout separately requires a verified JWT.
+      // the current profile and applicable account terms. HTTP checkout separately requires a verified JWT.
       if (!actor || !eligible({ ...actor, emailVerified: command.buyerEmailVerified === true })) throw new BillingError('BILLING_BUYER_INELIGIBLE');
       if (s.closedAt || s.closingId) throw new BillingError('BILLING_BUYER_INELIGIBLE');
       if (command.status === 'complete' || command.status === 'expired') return pending(command.commandId, s.revision);
@@ -125,7 +125,7 @@ export class BillingService {
         const customer = found[0] ?? await p.createCustomer(command.customerParams, command.customerKey);
         if (customer.ownerSub !== ownerSub || customer.liveMode !== cfg.liveMode) return await this.review(s, 'customer_mapping', fence());
         const next = { ...s, customerId: customer.id, revision: s.revision + 1, updatedAt: this.deps.now() };
-        if (!await r.commit({ expectedRevision: s.revision, state: next, command, guard: 'adult', actor, lease: fence(), mappings: [{ kind: 'customer', id: customer.id }], auditAction: 'billing.customer_bound' })) return pending(command.commandId, (await r.load(ownerSub)).revision);
+        if (!await r.commit({ expectedRevision: s.revision, state: next, command, guard: 'standard', actor, lease: fence(), mappings: [{ kind: 'customer', id: customer.id }], auditAction: 'billing.customer_bound' })) return pending(command.commandId, (await r.load(ownerSub)).revision);
         s = next;
       }
       if (!command.checkoutParams) {
@@ -134,7 +134,7 @@ export class BillingService {
         const clockObservation = await this.checkoutClock(s);
         command = { ...command, checkoutParams: { ownerSub, operationId: command.operationId, customerId: s.customerId!, priceId: command.priceTerms.priceId, quantity: 1, mode: 'subscription', taxRateId: command.priceTerms.taxRateId, expiresAt: this.deps.now() + 1_860_000, successUrl: cfg.successUrl, cancelUrl: cfg.cancelUrl }, updatedAt: this.deps.now() };
         const next = { ...s, revision: s.revision + 1, updatedAt: this.deps.now() };
-        if (!await r.commit({ expectedRevision: s.revision, state: next, guard: 'adult', actor, lease: fence(), command,
+        if (!await r.commit({ expectedRevision: s.revision, state: next, guard: 'standard', actor, lease: fence(), command,
           ...(clockObservation ? { clockObservation } : {}), auditAction: 'billing.checkout_parameters_reserved' })) return pending(command.commandId, (await r.load(ownerSub)).revision);
         s = next;
       }
@@ -144,7 +144,7 @@ export class BillingService {
         const [snapshot, allSessions] = await Promise.all([p.snapshot(s.customerId!, { ownerSub, lease }), p.findCheckouts(s.customerId!)]);
         if (snapshot.customer.ownerSub !== ownerSub || snapshot.customer.liveMode !== cfg.liveMode) return await this.review(s, 'customer_mapping', fence());
         if (snapshot.subscriptions.some(nonterminal)) {
-          await r.commit({ expectedRevision: s.revision, state: { ...s, revision: s.revision + 1, subscriptionId: snapshot.subscriptions.find(nonterminal)!.id, state: 'payment_review', reviewReasons: ['unmapped_existing_subscription'], nextReconcileAt: this.deps.now(), updatedAt: this.deps.now() }, guard: 'adult', actor, lease: fence(), auditAction: 'billing.remote_subscription_blocked' });
+          await r.commit({ expectedRevision: s.revision, state: { ...s, revision: s.revision + 1, subscriptionId: snapshot.subscriptions.find(nonterminal)!.id, state: 'payment_review', reviewReasons: ['unmapped_existing_subscription'], nextReconcileAt: this.deps.now(), updatedAt: this.deps.now() }, guard: 'standard', actor, lease: fence(), auditAction: 'billing.remote_subscription_blocked' });
           throw new BillingError('BILLING_SUBSCRIPTION_EXISTS');
         }
         if (allSessions.some((v) => v.status === 'open')) return await this.review(s, 'other_open_checkout', fence());
@@ -161,6 +161,8 @@ export class BillingService {
       }
       let session = remote[0];
       if (!session) {
+        actor = await r.actor(ownerSub);
+        if (!actor || !eligible({ ...actor, emailVerified: command.buyerEmailVerified === true })) throw new BillingError('BILLING_BUYER_INELIGIBLE');
         try { session = await p.createCheckout(command.checkoutParams!, command.checkoutKey); }
         catch (error) {
           if (!rejectedCheckoutExpiry(error)) throw error;
@@ -186,7 +188,7 @@ export class BillingService {
     const { repository: r, config, now } = this.deps;
     const state = { ...s, revision: s.revision + 1, activeCommandId: undefined, state: s.paidThrough ? 'expired' as const : 'none' as const, updatedAt: now(), nextReconcileAt: now() };
     const expired: BillingCommand = { ...command, status: 'expired', updatedAt: now(), recoveryEvidence: { checkedAt: now(), accountId: config.accountId, stage: config.stage, reason, sessionIds: sessions.map((v) => v.id), subscriptionIds: subscriptions.map((v) => v.id), invoiceIds: snapshot?.invoices.map((v) => v.id) ?? [] } };
-    await r.commit({ expectedRevision: s.revision, state, guard: 'adult', actor, lease, command: expired, auditAction: 'billing.checkout_expiry_verified' });
+    await r.commit({ expectedRevision: s.revision, state, guard: 'standard', actor, lease, command: expired, auditAction: 'billing.checkout_expiry_verified' });
     return pending(command.commandId, (await r.load(s.ownerSub)).revision);
   }
   private async saveCheckout(s: BillingState, command: BillingCommand, session: ProviderCheckout, actor: BillingActor, lease: { owner: string; revision: number; now: number }): Promise<BillingResult> {
@@ -194,7 +196,7 @@ export class BillingService {
     if (session.customerId !== s.customerId || session.ownerSub !== s.ownerSub || session.operationId !== command.operationId || (session.url && !safeProviderUrl(session.url, 'checkout'))) return this.review(s, 'checkout_mapping', lease);
     const state: BillingState = { ...s, revision: s.revision + 1, updatedAt: now(), nextReconcileAt: now() + 60_000, ...(session.subscriptionId ? { subscriptionId: session.subscriptionId } : {}), ...(session.status === 'expired' ? { activeCommandId: undefined, state: s.paidThrough ? 'expired' : 'none' } : {}) };
     const saved: BillingCommand = { ...command, sessionId: session.id, status: session.status === 'open' ? 'redirect' : session.status === 'complete' ? 'complete' : 'expired', url: session.url ?? undefined, expiresAt: session.expiresAt, resultRevision: state.revision, updatedAt: now() };
-    if (!await r.commit({ expectedRevision: s.revision, state, guard: 'adult', actor, lease, command: saved, mappings: [{ kind: 'checkout', id: session.id }, ...(session.subscriptionId ? [{ kind: 'subscription' as const, id: session.subscriptionId }] : [])], auditAction: 'billing.checkout_observed' })) return pending(command.commandId, (await r.load(s.ownerSub)).revision);
+    if (!await r.commit({ expectedRevision: s.revision, state, guard: 'standard', actor, lease, command: saved, mappings: [{ kind: 'checkout', id: session.id }, ...(session.subscriptionId ? [{ kind: 'subscription' as const, id: session.subscriptionId }] : [])], auditAction: 'billing.checkout_observed' })) return pending(command.commandId, (await r.load(s.ownerSub)).revision);
     return saved.status === 'redirect' && saved.url && saved.expiresAt! > now() ? redirect(saved) : pending(command.commandId, state.revision);
   }
   private async review(s: BillingState, reason: string, lease: { owner: string; revision: number; now: number }): Promise<BillingResult> {
@@ -204,7 +206,7 @@ export class BillingService {
   async portal(ownerSub: string, value: unknown): Promise<BillingResult> {
     commandBase(value, ['commandId', 'expectedBillingRevision']); const req = value as PortalRequest;
     const { repository: r, provider: p, config: cfg } = this.deps;
-    const actor = await r.actor(ownerSub); if (!actor || actor.status !== 'active' || actor.closing || actor.accountType !== 'adult' || actor.privacyMode === 'adolescent_private') throw new BillingError('BILLING_BUYER_INELIGIBLE');
+    const actor = await r.actor(ownerSub); if (!canManageBilling(actor)) throw new BillingError('BILLING_BUYER_INELIGIBLE');
     let s = await r.load(ownerSub), c = await r.command(ownerSub, req.commandId);
     if (c && (c.kind !== 'portal' || c.fingerprint !== digest(req))) throw new BillingError('BILLING_REVISION_CONFLICT');
     if (!s.customerId || s.closedAt) throw new BillingError('BILLING_BUYER_INELIGIBLE');

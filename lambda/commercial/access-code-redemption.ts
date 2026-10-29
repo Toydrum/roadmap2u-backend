@@ -101,6 +101,7 @@ function isEligibleProfile(
     profile.sk === 'PROFILE' &&
     profile.userId === ownerSub &&
     profile.accountType === 'adult' &&
+    profile.privacyMode === undefined &&
     (profile.status === undefined || profile.status === 'active') &&
     typeof profile.email === 'string' &&
     profile.email.length > 0,

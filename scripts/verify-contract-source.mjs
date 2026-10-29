@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 const backendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const contractFiles = [
   'api/contracts.ts',
+  'api/historical-privacy-documents.ts',
+  'api/common-account-documents.ts',
+  'api/subscription-terms-documents.ts',
   'db/schema.ts',
   'auth/auth-types.ts',
   'i18n/es.ts',

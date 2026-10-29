@@ -1,6 +1,6 @@
 import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient, type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import type { Deps, ProfileItem } from '../db';
-import { isDeclared, readPrivacyItem } from '../privacy/consent';
+import { isDeclared, isAccountTermsCurrent, readPrivacyItem } from '../privacy/consent';
 import { readRestoreExclusion } from '../privacy/retention';
 import { TEST_CLOCK_SK, testClockGuard } from './clock';
 import { initialState, type BillingActor, type BillingCommit, type BillingCommand, type BillingRepository, type BillingState, type InvoiceReceipt, type StripeEventEnvelope } from './model';
@@ -46,7 +46,7 @@ export class DynamoBillingRepository implements BillingRepository {
     ]);
     if (!p || p.userId !== ownerSub || exclusion?.scope === 'account') return null;
     const privacy = await readPrivacyItem(deps, ownerSub);
-    return { ownerSub, accountType: p.accountType, status: p.status ?? 'active', emailVerified: this.options.authenticatedOwner?.ownerSub === ownerSub && this.options.authenticatedOwner.emailVerified, adultDeclarationCurrent: isDeclared(privacy), ...(p.privacyMode ? { privacyMode: p.privacyMode } : {}), ...(p.email ? { email: p.email } : {}), ...(privacy ? { privacyRevision: privacy.revision, declarationHash: privacy.declarationDocumentHash } : {}), closing: !!closure };
+    return { ownerSub, accountType: p.accountType, status: p.status ?? 'active', emailVerified: this.options.authenticatedOwner?.ownerSub === ownerSub && this.options.authenticatedOwner.emailVerified, adultDeclarationCurrent: isDeclared(privacy), accountTermsCurrent: isAccountTermsCurrent(privacy), ...(p.privacyMode ? { privacyMode: p.privacyMode } : {}), ...(p.email ? { email: p.email } : {}), ...(privacy ? { privacyRevision: privacy.revision, declarationHash: privacy.declarationDocumentHash, accountTermsHash: privacy.accountTermsDocumentHash } : {}), closing: !!closure };
   }
   async load(id: string): Promise<BillingState> { return { ...initialState(id), ...await this.strong<BillingState>(this.stateKey(id)) }; }
   async readTestClock(id: string): Promise<unknown> {
@@ -83,11 +83,21 @@ export class DynamoBillingRepository implements BillingRepository {
     const stateItem = this.financialItem({ ...c.state, ...this.stateKey(id), ...(c.state.state !== 'closed' ? { gsi1pk: `BILLING#OWNERS#${this.options.stage}`, gsi1sk: dueSort(c.state.nextReconcileAt, id) } : {}) });
     const tx: Tx = [{ Put: { TableName: table, Item: stateItem, ConditionExpression: condition, ...(Object.keys(values).length ? { ExpressionAttributeValues: values } : {}) } }];
     if (c.clockObservation) tx.push(testClockGuard(table, id, c.clockObservation.item));
-    if (c.guard === 'adult' || c.guard === 'open' || c.source) {
-      tx.push({ ConditionCheck: { TableName: table, Key: { pk: `USER#${id}`, sk: 'PROFILE' }, ConditionExpression: `attribute_exists(pk) AND (attribute_not_exists(#status) OR #status = :active)${c.guard === 'adult' ? ' AND accountType = :adult AND attribute_not_exists(privacyMode)' : ''}`, ExpressionAttributeNames: { '#status': 'status' }, ExpressionAttributeValues: { ':active': 'active', ...(c.guard === 'adult' ? { ':adult': 'adult' } : {}) } } });
+    if (c.guard === 'standard' || c.guard === 'adult' || c.guard === 'open' || c.source) {
+      const ownAccount = c.guard === 'standard' || c.guard === 'adult';
+      tx.push({ ConditionCheck: { TableName: table, Key: { pk: `USER#${id}`, sk: 'PROFILE' }, ConditionExpression: `attribute_exists(pk) AND (attribute_not_exists(#status) OR #status = :active)${ownAccount ? ' AND accountType = :adult AND attribute_not_exists(privacyMode)' : ''}`, ExpressionAttributeNames: { '#status': 'status' }, ExpressionAttributeValues: { ':active': 'active', ...(ownAccount ? { ':adult': 'adult' } : {}) } } });
       tx.push({ ConditionCheck: { TableName: table, Key: { pk: `ACCOUNT_CLOSURE#${id}`, sk: 'STATE' }, ConditionExpression: 'attribute_not_exists(pk)' } });
     }
     if (c.guard === 'adult' && c.actor?.privacyRevision !== undefined) tx.push({ ConditionCheck: { TableName: table, Key: { pk: `USER#${id}`, sk: 'PRIVACY#ADULT' }, ConditionExpression: 'revision = :privacyRevision AND declarationDocumentHash = :declarationHash AND attribute_exists(adultDeclaredAt)', ExpressionAttributeValues: { ':privacyRevision': c.actor.privacyRevision, ':declarationHash': c.actor.declarationHash } } });
+    if (c.guard === 'standard') {
+      const actor = c.actor;
+      if (!actor || actor.ownerSub !== id || actor.privacyRevision === undefined || (!actor.accountTermsCurrent && !actor.adultDeclarationCurrent)) return false;
+      tx.push({ ConditionCheck: { TableName: table, Key: { pk: `USER#${id}`, sk: 'PRIVACY#ADULT' },
+        ConditionExpression: actor.accountTermsCurrent
+          ? 'revision = :privacyRevision AND accountTermsDocumentHash = :termsHash AND attribute_exists(accountTermsAcceptedAt)'
+          : 'revision = :privacyRevision AND declarationDocumentHash = :termsHash AND attribute_exists(adultDeclaredAt)',
+        ExpressionAttributeValues: { ':privacyRevision': actor.privacyRevision, ':termsHash': actor.accountTermsCurrent ? actor.accountTermsHash : actor.declarationHash } } });
+    }
     if (c.guard === 'closure') {
       if (!c.state.closingId) throw new Error('financial closure identity required');
       tx.push({ ConditionCheck: { TableName: table, Key: { pk: `ACCOUNT_CLOSURE#${id}`, sk: 'STATE' }, ConditionExpression: 'closureId = :closureId', ExpressionAttributeValues: { ':closureId': c.state.closingId } } });

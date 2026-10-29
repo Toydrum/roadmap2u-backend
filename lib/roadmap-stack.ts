@@ -54,6 +54,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const ROOT_DOMAIN = 'roadmap2u.com';
 const CONTRACT_FILES = [
   'api/contracts.ts',
+  'api/historical-privacy-documents.ts',
+  'api/common-account-documents.ts',
+  'api/subscription-terms-documents.ts',
   'db/schema.ts',
   'auth/auth-types.ts',
   'i18n/es.ts',
