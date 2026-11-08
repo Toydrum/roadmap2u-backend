@@ -33,6 +33,8 @@ const COMMAND_OPTIONS = {
     'expected-revision',
     'quota-mode',
     'capability-mode',
+    'free-quota-v2-enabled',
+    'cloud-auto-start-enabled',
     'access-code-issuance-enabled',
     'access-code-redemption-enabled',
     'family-creation-enabled',
@@ -319,6 +321,8 @@ function buildRequest(command, options) {
       }
     }
     for (const [optionName, fieldName] of [
+      ['free-quota-v2-enabled', 'freeQuotaV2Enabled'],
+      ['cloud-auto-start-enabled', 'cloudAutoStartEnabled'],
       ['access-code-issuance-enabled', 'accessCodeIssuanceEnabled'],
       ['access-code-redemption-enabled', 'accessCodeRedemptionEnabled'],
       ['family-creation-enabled', 'familyCreationEnabled'],

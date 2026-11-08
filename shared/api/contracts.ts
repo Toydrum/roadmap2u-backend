@@ -203,6 +203,21 @@ export const FAMILY_OFFER_DEFINITIONS: readonly OfferDefinition[] = Object.freez
   }),
 ]);
 
+export const LEGACY_FREE_LIMITS = Object.freeze({ maxActiveTrees: 2, maxVisibleBranchesPerTree: 10 } as const);
+export const FREE_LIMITS = Object.freeze({ maxActiveTrees: 1, maxVisibleBranchesPerTree: 5 } as const);
+export type FreeLimits = typeof LEGACY_FREE_LIMITS | typeof FREE_LIMITS;
+
+export function isFreeLimits(limits: unknown): limits is FreeLimits {
+  if (typeof limits !== 'object' || limits === null) return false;
+  const { maxActiveTrees, maxVisibleBranchesPerTree } = limits as Partial<FreeLimits>;
+  return (
+    (maxActiveTrees === LEGACY_FREE_LIMITS.maxActiveTrees &&
+      maxVisibleBranchesPerTree === LEGACY_FREE_LIMITS.maxVisibleBranchesPerTree) ||
+    (maxActiveTrees === FREE_LIMITS.maxActiveTrees &&
+      maxVisibleBranchesPerTree === FREE_LIMITS.maxVisibleBranchesPerTree)
+  );
+}
+
 export interface PlanCatalog {
   version: '2026-09-family-v1';
   pricingVersion: 'family-launch-2026';
@@ -212,7 +227,7 @@ export interface PlanCatalog {
   offers: readonly OfferDefinition[];
   plans: {
     free: {
-      limits: { maxActiveTrees: 2; maxVisibleBranchesPerTree: 10 };
+      limits: FreeLimits;
       capabilities: { cloudSync: false; social: false; family: false };
     };
     premium: {
@@ -239,7 +254,7 @@ export const PREPAYMENT_PLAN_CATALOG: PlanCatalog = Object.freeze({
   offers: FAMILY_OFFER_DEFINITIONS,
   plans: Object.freeze({
     free: Object.freeze({
-      limits: Object.freeze({ maxActiveTrees: 2, maxVisibleBranchesPerTree: 10 }),
+      limits: LEGACY_FREE_LIMITS,
       capabilities: Object.freeze({ cloudSync: false, social: false, family: false }),
     }),
     premium: Object.freeze({
@@ -250,6 +265,14 @@ export const PREPAYMENT_PLAN_CATALOG: PlanCatalog = Object.freeze({
         year: Object.freeze({ amountMinor: 94900 }),
       }),
     }),
+  }),
+});
+
+export const REDUCED_PLAN_CATALOG: PlanCatalog = Object.freeze({
+  ...PREPAYMENT_PLAN_CATALOG,
+  plans: Object.freeze({
+    ...PREPAYMENT_PLAN_CATALOG.plans,
+    free: Object.freeze({ ...PREPAYMENT_PLAN_CATALOG.plans.free, limits: FREE_LIMITS }),
   }),
 });
 
@@ -266,6 +289,8 @@ export interface AccessSource {
 export interface AccessSummary {
   /** Online-only synthetic financial time. Never a device/offline entitlement. */
   simulation?: BillingSimulation;
+  /** Current server rollout state. Never persisted as an offline entitlement. */
+  cloudAutoStartEnabled?: boolean;
   effectivePlanKey: PlanKey;
   catalogVersion: string;
   status: 'active' | 'expired';
@@ -346,13 +371,16 @@ export const BILLING_STATES = Object.freeze([
 export type BillingState = (typeof BILLING_STATES)[number];
 
 /** Missing access is always a bounded Free lease; it never guesses Premium. */
-export function createFreeAccessSummary(now: number = Date.now()): AccessSummary {
+export function createFreeAccessSummary(
+  now: number = Date.now(),
+  limits: FreeLimits = LEGACY_FREE_LIMITS,
+): AccessSummary {
   return {
     effectivePlanKey: 'free',
     catalogVersion: PREPAYMENT_PLAN_CATALOG.version,
     status: 'active',
     activeSources: [{ kind: 'default', sourceId: 'default', planKey: 'free', validUntil: null }],
-    limits: { ...PREPAYMENT_PLAN_CATALOG.plans.free.limits },
+    limits: { ...limits },
     capabilities: { ...PREPAYMENT_PLAN_CATALOG.plans.free.capabilities },
     usage: { activeTrees: 0, visibleBranchesByTree: {} },
     revision: 0,

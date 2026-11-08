@@ -63,6 +63,22 @@ function createResolver(readItem: () => Promise<unknown>, initialNow = 0) {
 }
 
 describe('commercial configuration flags — exact parser', () => {
+  it('reads each rollout control independently without requiring a backfill of the flags item', async () => {
+    const { resolver } = createResolver(async () => ({ ...RAW_FLAGS, freeQuotaV2Enabled: true }));
+    await expect(resolver.resolve()).resolves.toMatchObject({
+      status: 'available', flags: { freeQuotaV2Enabled: true },
+    });
+  });
+
+  it('can re-read rollout controls inside the standard cache window', async () => {
+    const { resolver, readItem } = createResolver(async () => ({ ...RAW_FLAGS, cloudAutoStartEnabled: true }));
+    await resolver.resolve();
+    readItem.mockResolvedValueOnce({ ...RAW_FLAGS, revision: RAW_FLAGS.revision + 1 });
+    await expect(resolver.resolveFresh()).resolves.toMatchObject({
+      status: 'available', freshness: 'fresh', flags: { revision: RAW_FLAGS.revision + 1 },
+    });
+  });
+
   it('accepts all seven new controls while payments remain disabled', async () => {
     const item = { ...RAW_FLAGS, ...FAMILY_DEFAULTS, familyCatalogEnabled: true,
       familyCreationEnabled: true, minorLinkingEnabled: true, minorSocialEnabled: true,

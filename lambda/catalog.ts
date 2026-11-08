@@ -1,5 +1,6 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { FREE_LIMITS } from '@app/api/contracts';
 import { LEGACY_PREPAYMENT_CATALOG, PREPAYMENT_CATALOG } from './commercial/catalog';
 import {
   COMMERCIAL_FLAGS_ATTRIBUTES,
@@ -18,17 +19,24 @@ interface CatalogDeps {
 export function createCatalogHandler(
   deps: CatalogDeps,
 ): (_event?: unknown) => Promise<HttpResponse> {
-  return async () => {
+  return async (event) => {
+    const policyV2 = (event as { queryStringParameters?: Record<string, string> } | undefined)
+      ?.queryStringParameters?.['policy'] === '2';
     const config = await deps.resolveFlags();
     const current = config.status === 'available' && config.freshness !== 'stale';
     const family = current && config.flags.familyCatalogEnabled;
+    const catalog = family ? PREPAYMENT_CATALOG : LEGACY_PREPAYMENT_CATALOG;
+    const useTightenedQuota = policyV2 && config.status === 'available' && config.flags.freeQuotaV2Enabled === true;
     return {
       statusCode: 200,
       headers: {
         'content-type': 'application/json',
-        'cache-control': current ? 'public, max-age=30' : 'no-store',
+        'cache-control': current && !policyV2 ? 'public, max-age=30' : 'no-store',
       },
-      body: JSON.stringify(family ? PREPAYMENT_CATALOG : LEGACY_PREPAYMENT_CATALOG),
+      body: JSON.stringify(useTightenedQuota ? {
+        ...catalog,
+        plans: { ...catalog.plans, free: { ...catalog.plans.free, limits: FREE_LIMITS } },
+      } : catalog),
     };
   };
 }

@@ -1,9 +1,10 @@
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
-import { ApiError, LIMITS } from '@app/api/contracts';
+import { ApiError, FREE_LIMITS, LIMITS } from '@app/api/contracts';
 import { accountClosureKey } from '../account-closure';
 import { WRITABLE_PROFILE_CONDITION } from '../authz';
 import { K, type ProfileItem } from '../db';
-import type { AccessItem, GrantItem } from './model';
+import { isOrdinaryForestAccount } from './catalog';
+import type { AccessItem, AccessLimits, GrantItem } from './model';
 import {
   createAccessPutProposal,
   deriveAccessItem,
@@ -386,12 +387,12 @@ function baseUsageMutation(
 }
 
 function quotaWouldDeny(
-  access: AccessItem,
+  limits: AccessLimits,
   usage: MigratedUsage,
   expectedVisibleBranches: ReadonlyMap<string, number>,
   aggregate: AggregatedUsageDelta,
 ): boolean {
-  const activeTreeLimit = access.limits.maxActiveTrees;
+  const activeTreeLimit = limits.maxActiveTrees;
   if (
     aggregate.quotaActiveTrees > 0 &&
     activeTreeLimit !== null &&
@@ -400,7 +401,7 @@ function quotaWouldDeny(
     return true;
   }
 
-  const branchLimit = access.limits.maxVisibleBranchesPerTree;
+  const branchLimit = limits.maxVisibleBranchesPerTree;
   if (branchLimit === null) return false;
   for (const tree of aggregate.trees.values()) {
     if (tree.quotaVisibleBranches <= 0) continue;
@@ -581,6 +582,15 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
           snapshot.profile?.accountType === 'minor' &&
           snapshot.profile?.privacyMode === 'adolescent_private',
       );
+      const useTightenedQuota = resolvedFlags?.freeQuotaV2Enabled === true && access.effectivePlanKey === 'free' &&
+        snapshot.profile !== undefined && isOrdinaryForestAccount(snapshot.profile);
+      if (useTightenedQuota && resolvedFlags?.quotaMode === 'enforce' && !usage &&
+        (aggregate.quotaActiveTrees > 0 || [...aggregate.trees.values()].some((tree) => tree.quotaVisibleBranches > 0))) {
+        throw new ApiError('USAGE_MIGRATION_IN_PROGRESS');
+      }
+      const guardIndividualSource = snapshot.profile !== undefined && isOrdinaryForestAccount(snapshot.profile) &&
+        access.activeSources.some((source) => source.kind === 'subscription' && source.scope === 'individual') &&
+        hasCloudGrowth(snapshot.deltas);
 
       const items: TransactItem[] = [
         profileGuard(this.deps.tableName, request.ownerSub),
@@ -588,7 +598,8 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
         currentMigrationGuard,
         ...(snapshot.access
           ? [accessGuard(this.deps.tableName, access, accessCheckedAt),
-              ...(access.simulationOnly ? paidSourceGuards(this.deps.tableName,request.ownerSub,snapshot) : [])]
+              ...(access.simulationOnly || guardIndividualSource
+                ? paidSourceGuards(this.deps.tableName, request.ownerSub, snapshot) : [])]
           : [
               createAccessPutProposal(this.deps.tableName, access, undefined),
               ...paidSourceGuards(this.deps.tableName, request.ownerSub, snapshot),
@@ -622,7 +633,7 @@ export class CommercialMutationWriter<TRequest extends { readonly ownerSub: stri
           emitQuotaDecision(
             this.deps.emitDecision,
             resolvedFlags,
-            quotaWouldDeny(access, usage, expectedVisibleBranches, aggregate),
+            quotaWouldDeny(useTightenedQuota ? FREE_LIMITS : access.limits, usage, expectedVisibleBranches, aggregate),
           );
         }
         items.push(

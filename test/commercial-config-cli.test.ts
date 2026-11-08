@@ -78,6 +78,26 @@ function deps(overrides: Record<string, unknown> = {}) {
 }
 
 describe('commercial config CLI', () => {
+  it('previews independent quota activation and automatic cloud rollback controls', async () => {
+    const { runCommercialConfigCli } = await cliModule();
+    const fixture = deps({ getCallerIdentity: vi.fn(async () => ({ Account: ACCOUNT, Arn: FLAG_ARN })) });
+    const argv = [
+      '--stage', 'dev', '--url', URL, '--reason', 'prepare ordinary account rollout', '--expected-revision', '7',
+      '--free-quota-v2-enabled', 'true', '--cloud-auto-start-enabled', 'false',
+    ];
+    await expect(runCommercialConfigCli({ ...fixture.options, command: 'set-flags', argv })).resolves.toBe(0);
+    const hash = /dryRunHash=([a-f0-9]{64})/.exec(fixture.output.join('\n'))?.[1];
+    expect(hash).toBeDefined();
+    expect(fixture.options.fetch).not.toHaveBeenCalled();
+    const send = vi.fn(async (_url: string, _request: { body: string }) => ({ ok: true, status: 200,
+      text: async () => JSON.stringify({ command: 'set-flags', revision: 8 }) }));
+    await expect(runCommercialConfigCli({ ...fixture.options, fetch: send, command: 'set-flags',
+      argv: [...argv, '--apply', '--confirm-stage', 'dev', '--confirm-hash', hash] })).resolves.toBe(0);
+    expect(JSON.parse(send.mock.calls[0]![1].body).changes).toEqual({
+      freeQuotaV2Enabled: true, cloudAutoStartEnabled: false,
+    });
+  });
+
   it('previews an explicit individual-only version2 activation without calling AWS writes', async () => {
     const { runCommercialConfigCli } = await cliModule();
     const fixture = deps({ getCallerIdentity: vi.fn(async () => ({ Account: ACCOUNT, Arn: FLAG_ARN })) });

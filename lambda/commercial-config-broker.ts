@@ -7,8 +7,11 @@ import type { AuditWriter } from './commercial/audit';
 import {
   FAMILY_BILLING_FLAG_DEFAULTS,
   FAMILY_BILLING_FLAG_NAMES,
+  ROLLOUT_FLAG_NAMES,
   type FamilyBillingFlags,
   type CommercialMode,
+  type RolloutFlagName,
+  type RolloutFlags,
 } from './commercial/flags';
 import { isTrustedRequestId } from './request-id';
 
@@ -51,6 +54,7 @@ interface BootstrapFlagsRequest {
 
 type MutableFlagName =
   | keyof FamilyBillingFlags
+  | RolloutFlagName
   | 'schemaVersion' | 'paymentScope' | 'premiumPaymentsEnabled' | 'individualCheckoutEnabled'
   | 'quotaMode'
   | 'capabilityMode'
@@ -59,7 +63,7 @@ type MutableFlagName =
 
 type MutableFlagChanges = Readonly<
   Partial<
-    FamilyBillingFlags & {
+    FamilyBillingFlags & RolloutFlags & {
       quotaMode: CommercialMode;
       capabilityMode: CommercialMode;
       accessCodeIssuanceEnabled: boolean;
@@ -101,9 +105,11 @@ const MUTABLE_FLAG_NAMES = Object.freeze<readonly MutableFlagName[]>([
   'accessCodeIssuanceEnabled',
   'accessCodeRedemptionEnabled',
   ...FAMILY_BILLING_FLAG_NAMES,
+  ...ROLLOUT_FLAG_NAMES,
   'schemaVersion', 'paymentScope', 'premiumPaymentsEnabled', 'individualCheckoutEnabled',
 ]);
 const MUTABLE_FLAG_NAME_SET = new Set<string>(MUTABLE_FLAG_NAMES);
+const ROLLOUT_FLAG_NAME_SET = new Set<MutableFlagName>(ROLLOUT_FLAG_NAMES);
 const MAX_REASON_BYTES = 256;
 const MAX_BODY_BYTES = 4096;
 const STAGE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
@@ -343,24 +349,28 @@ async function setFlags(
   const nextRevision = request.expectedRevision + 1;
   const versioned = request.changes.schemaVersion === 2;
   const changedFields = MUTABLE_FLAG_NAMES.filter((field) => Object.hasOwn(request.changes, field));
+  const rolloutOnly = changedFields.every((field) => ROLLOUT_FLAG_NAME_SET.has(field));
+  // Remove disabled rollout fields so the previous release can parse FLAGS after rollback.
+  const removedFields = changedFields.filter((field) => ROLLOUT_FLAG_NAME_SET.has(field) && request.changes[field] === false);
+  const assignedFields = changedFields.filter((field) => !removedFields.includes(field));
   const expressionParts = [
     '#revision = :nextRevision',
     '#updatedAt = :updatedAt',
     '#updatedBy = :updatedBy',
     '#reason = :reason',
-    ...changedFields.map((field) => `#${field} = :${field}`),
+    ...assignedFields.map((field) => `#${field} = :${field}`),
   ];
   const names: Record<string, string> = {
     '#revision': 'revision',
     '#updatedAt': 'updatedAt',
     '#updatedBy': 'updatedBy',
     '#reason': 'reason',
-    '#premiumPaymentsEnabled': 'premiumPaymentsEnabled',
+    ...(rolloutOnly ? {} : { '#premiumPaymentsEnabled': 'premiumPaymentsEnabled' }),
   };
   const values: Record<string, unknown> = {
     ':expectedRevision': request.expectedRevision,
     ':nextRevision': nextRevision,
-    ':paymentsDisabled': false,
+    ...(rolloutOnly ? {} : { ':paymentsDisabled': false }),
     ':updatedAt': now,
     ':updatedBy': actorArn,
     ':reason': request.reason,
@@ -371,10 +381,10 @@ async function setFlags(
   }
   for (const field of changedFields) {
     names[`#${field}`] = field;
-    values[`:${field}`] = request.changes[field];
+    if (!removedFields.includes(field)) values[`:${field}`] = request.changes[field];
   }
   // Complete legacy rows atomically, preserving any already-configured controls.
-  for (const field of FAMILY_BILLING_FLAG_NAMES) {
+  for (const field of rolloutOnly ? [] : FAMILY_BILLING_FLAG_NAMES) {
     if (changedFields.includes(field)) continue;
     names[`#${field}`] = field;
     values[`:default_${field}`] = FAMILY_BILLING_FLAG_DEFAULTS[field];
@@ -389,11 +399,11 @@ async function setFlags(
             Update: {
               TableName: deps.tableName,
               Key: CONFIG_KEY,
-              UpdateExpression: `SET ${expressionParts.join(', ')}`,
+              UpdateExpression: `SET ${expressionParts.join(', ')}${removedFields.length ? ` REMOVE ${removedFields.map((field) => `#${field}`).join(', ')}` : ''}`,
               ConditionExpression:
                 versioned
                   ? 'attribute_exists(pk) AND attribute_exists(sk) AND #revision = :expectedRevision AND ((attribute_not_exists(#schemaVersion) AND #premiumPaymentsEnabled = :paymentsDisabled) OR #schemaVersion = :billingSchemaVersion)'
-                  : 'attribute_exists(pk) AND attribute_exists(sk) AND #revision = :expectedRevision AND #premiumPaymentsEnabled = :paymentsDisabled',
+                  : `attribute_exists(pk) AND attribute_exists(sk) AND #revision = :expectedRevision${rolloutOnly ? '' : ' AND #premiumPaymentsEnabled = :paymentsDisabled'}`,
               ExpressionAttributeNames: names,
               ExpressionAttributeValues: values,
             },

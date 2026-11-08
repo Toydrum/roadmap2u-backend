@@ -2,6 +2,16 @@ import { Dict } from './es';
 
 /** English UI copy — must mirror ES exactly; the compiler enforces it. */
 export const EN: Dict = {
+  premiumCloud: {
+    title: 'Forest sync',
+    useAuthorization: 'I want to connect this device using my current cloud authorization.',
+    device: 'The forest on this device is mine and I authorize syncing it with {account}.',
+    local: 'We couldn’t confirm your authorization. You can continue and keep your forest on this device.',
+    waiting: 'Confirming Premium to start syncing…',
+    syncing: 'Syncing your forest…',
+    current: 'Your forest is up to date.',
+    attention: 'Your forest is still on this device. You can review the connection in Settings.',
+  },
   privacy: {
     accountTitle: "Your account starts here",
     accountBody: "I can use Free or choose individual Premium. I accept the account terms; cloud authorization is a separate choice later.",
@@ -136,7 +146,7 @@ export const EN: Dict = {
       body: 'RoadMap2U is an app for organizing goals and tasks in visual trees. Each goal becomes a tree, with branches for small steps and alternative paths at your own pace.',
       primary: 'Create my forest for free',
       secondary: 'See how it works',
-      microcopy: 'No card required · start with 2 trees and 10 branches per tree',
+      microcopy: 'No card required · start with {trees} and {branches} branches per tree',
     },
     steps: {
       eyebrow: 'From intention to path',
@@ -190,9 +200,10 @@ export const EN: Dict = {
         price: '$0 MXN',
         cadence: 'to begin',
         summary: 'Get to know the app with a forest of your own that truly works.',
+        activeTrees: { one: '1 active tree', many: '{count} active trees' },
         features: [
-          '2 active trees',
-          '10 visible branches per tree',
+          '{trees}',
+          '{branches} visible branches per tree',
           'Check-in, focus, almanac, and harvest',
           'Local-first use, export, and accessibility',
         ],
@@ -218,7 +229,7 @@ export const EN: Dict = {
         {
           question: 'What can I do with Free?',
           answer:
-            'You can use the full personal cycle with 2 active trees and up to 10 visible branches per tree: check-in, focus, gentle dates, rituals, almanac, harvest, backup, and accessibility.',
+            'You can use the full personal cycle with {trees} and up to {branches} visible branches per tree. It includes check-in, focus, gentle dates, rituals, almanac, harvest, backup, and accessibility.',
         },
         {
           question: 'Where can I check Premium availability?',
@@ -245,7 +256,7 @@ export const EN: Dict = {
     final: {
       eyebrow: 'Your path does not have to look like anyone else’s',
       title: 'Plant the first version of your forest.',
-      body: 'Two trees and ten branches per tree are enough to feel how RoadMap2U thinks.',
+      body: 'Try RoadMap2U with {trees} and {branches} branches per tree.',
       cta: 'Start for free',
     },
     footer: {
@@ -805,6 +816,7 @@ export const EN: Dict = {
       accessLeaseRequired:
         'We could not confirm your access yet. Check your connection and try again.',
       activeTreeLimit: 'Your plan allows up to {limit} active trees. Archive one to plant another.',
+      activeTreeLimitOne: 'Your plan allows 1 active tree. Archive it to plant another.',
       visibleBranchLimit:
         'That tree allows up to {limit} visible branches. Archive one before planting more.',
       starterBranches:
@@ -1113,6 +1125,7 @@ export const EN: Dict = {
     planLimit: {
       title: 'You reached your Free plan limit',
       activeTrees: 'Your forest can have up to {limit} active trees on Free.',
+      activeTree: 'Your forest can have 1 active tree on Free.',
       visibleBranches: 'Your tree can have up to {limit} visible branches on Free.',
       usage: '{current}/{limit}',
       plansCta: 'View plans',

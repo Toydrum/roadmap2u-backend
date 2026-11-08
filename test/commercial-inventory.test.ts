@@ -389,7 +389,7 @@ describe('commercial inventory', () => {
     );
   });
 
-  it('applies the branch limit per tree and inventories missing hearts on restorable archives', async () => {
+  it.each([1, 2])('applies quota policy %s per tree and inventories missing hearts on restorable archives', async (quotaPolicy) => {
     const { runCommercialInventory } = (await inventoryModule()) as {
       runCommercialInventory(options: Record<string, unknown>): Promise<any>;
     };
@@ -443,9 +443,11 @@ describe('commercial inventory', () => {
       stage: 'dev',
       tableName: 'roadmap-dev',
       ddb,
+      quotaPolicy,
     });
 
     expect(manifest).toMatchObject({
+      schemaVersion: quotaPolicy,
       totals: {
         trees: 4,
         restorableTrees: 3,
@@ -455,24 +457,26 @@ describe('commercial inventory', () => {
       classifications: {
         missingHeart: { trees: 1 },
         overQuota: {
-          owners: 0,
-          ownersOverActiveTreeLimit: 0,
-          ownersOverBranchLimit: 0,
-          treesOverVisibleBranchLimit: 0,
+          activeTreeLimit: quotaPolicy === 1 ? 2 : 1,
+          visibleBranchLimit: quotaPolicy === 1 ? 10 : 5,
+          owners: quotaPolicy === 1 ? 0 : 1,
+          ownersOverActiveTreeLimit: quotaPolicy === 1 ? 0 : 1,
+          ownersOverBranchLimit: quotaPolicy === 1 ? 0 : 1,
+          treesOverVisibleBranchLimit: quotaPolicy === 1 ? 0 : 2,
           treesOnly: 0,
           branchesOnly: 0,
-          both: 0,
+          both: quotaPolicy === 1 ? 0 : 1,
         },
       },
     });
   });
 
-  it('invokes the dedicated executor with SigV4 and writes only its validated manifest under EVIDENCE_ROOT', async () => {
+  it.each([1, 2])('requests quota policy %s via SigV4 and writes only the validated aggregate', async (quotaPolicy) => {
     const { runCommercialInventoryCli, withStableInventoryManifestHash } =
       (await inventoryModule()) as Record<string, any>;
     const profile = 'private-operator-profile';
     const manifest = withStableInventoryManifestHash({
-      schemaVersion: 1,
+      schemaVersion: quotaPolicy,
       operation: 'commercial-inventory',
       mode: 'dry-run',
       stage: 'dev',
@@ -493,8 +497,8 @@ describe('commercial inventory', () => {
         invalidRecordShape: { records: 0 },
         profileWithoutCreationTimestamp: { profiles: 0 },
         overQuota: {
-          activeTreeLimit: 2,
-          visibleBranchLimit: 10,
+          activeTreeLimit: quotaPolicy === 1 ? 2 : 1,
+          visibleBranchLimit: quotaPolicy === 1 ? 10 : 5,
           owners: 0,
           ownersOverActiveTreeLimit: 0,
           ownersOverBranchLimit: 0,
@@ -524,6 +528,7 @@ describe('commercial inventory', () => {
           '--stage', 'dev',
           '--url', FUNCTION_URL,
           '--profile', profile,
+          ...(quotaPolicy === 2 ? ['--quota-policy', '2'] : []),
         ],
         evidenceRoot: EVIDENCE_ROOT,
         write: (line: string) => lines.push(line),
@@ -542,7 +547,7 @@ describe('commercial inventory', () => {
     expect(url).toBe(FUNCTION_URL);
     expect(request).toMatchObject({
       method: 'POST',
-      body: JSON.stringify({ command: 'commercial-inventory', stage: 'dev' }),
+      body: JSON.stringify({ command: 'commercial-inventory', stage: 'dev', ...(quotaPolicy === 2 ? { quotaPolicy } : {}) }),
       redirect: 'error',
     });
     expect(request.headers.Authorization).toContain(
@@ -560,6 +565,7 @@ describe('commercial inventory', () => {
       'commercial-inventory mode=dry-run stage=dev region=us-east-1',
       'executionLimit=single-invocation-no-checkpoint timeoutSeconds=900',
       `manifestHash=${manifest.manifestHash}`,
+      ...(quotaPolicy === 2 ? ['quotaPolicy=2 population=all-inventoried-owners'] : []),
       'totals profiles=1 records=3 activeTrees=1 visibleBranches=2',
       'classifications missingHeart=0 invalidRecordShape=0 profileWithoutCreationTimestamp=0 overQuotaOwners=0',
     ]);

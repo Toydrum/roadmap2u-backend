@@ -11,14 +11,14 @@ async function executorModule(): Promise<Record<string, any>> {
   );
 }
 
-async function sanitizedManifest(): Promise<Record<string, any>> {
+async function sanitizedManifest(quotaPolicy = 1): Promise<Record<string, any>> {
   const inventory = (await import(
     pathToFileURL(
       join(process.cwd(), 'scripts', 'commercial-inventory.mjs'),
     ).href
   )) as Record<string, any>;
   return inventory.withStableInventoryManifestHash({
-    schemaVersion: 1,
+    schemaVersion: quotaPolicy,
     operation: 'commercial-inventory',
     mode: 'dry-run',
     stage: 'dev',
@@ -39,8 +39,8 @@ async function sanitizedManifest(): Promise<Record<string, any>> {
       invalidRecordShape: { records: 1 },
       profileWithoutCreationTimestamp: { profiles: 0 },
       overQuota: {
-        activeTreeLimit: 2,
-        visibleBranchLimit: 10,
+        activeTreeLimit: quotaPolicy === 1 ? 2 : 1,
+        visibleBranchLimit: quotaPolicy === 1 ? 10 : 5,
         owners: 0,
         ownersOverActiveTreeLimit: 0,
         ownersOverBranchLimit: 0,
@@ -80,6 +80,19 @@ function event(
 }
 
 describe('commercial inventory executor', () => {
+  it('allows only the fixed v2 analysis and validates that the result used it', async () => {
+    const { createCommercialInventoryExecutor } = await executorModule();
+    const manifest = await sanitizedManifest(2);
+    const runInventory = vi.fn().mockResolvedValueOnce(manifest).mockResolvedValueOnce(await sanitizedManifest());
+    const execute = createCommercialInventoryExecutor({ stage: 'dev', tableName: 'roadmap-dev', accountId: ACCOUNT, roleName: ROLE, ddb: { send: vi.fn() }, runInventory });
+    const request = event({ command: 'commercial-inventory', stage: 'dev', quotaPolicy: 2 });
+    const context = { getRemainingTimeInMillis: () => 120_000 };
+
+    await expect(execute(request, context)).resolves.toMatchObject({ statusCode: 200, body: JSON.stringify(manifest) });
+    expect(runInventory).toHaveBeenCalledWith(expect.objectContaining({ quotaPolicy: 2 }));
+    await expect(execute(request, context)).rejects.toThrow('invalid sanitized manifest');
+  });
+
   it('runs the fixed inventory once for an exact IAM actor/request and returns only the aggregate manifest', async () => {
     const { createCommercialInventoryExecutor } = await executorModule();
     const manifest = await sanitizedManifest();

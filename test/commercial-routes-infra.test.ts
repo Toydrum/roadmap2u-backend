@@ -259,6 +259,17 @@ describe('commercial route runtime isolation', () => {
         },
       },
     });
+    expect(bySid('ReadAccessPolicyFlags')).toMatchObject({
+      Action: 'dynamodb:GetItem',
+      Resource: tableResource,
+      Condition: {
+        'ForAllValues:StringEquals': {
+          'dynamodb:LeadingKeys': ['COMMERCIAL#CONFIG'],
+          'dynamodb:Attributes': [...COMMERCIAL_FLAGS_ATTRIBUTES],
+        },
+        Null: { 'dynamodb:Attributes': 'false' },
+      },
+    });
     expect(bySid('QueryCommercialAccessGrants')).toMatchObject({
       Action: 'dynamodb:Query',
       Resource: tableResource,

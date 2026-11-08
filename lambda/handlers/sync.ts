@@ -382,14 +382,18 @@ function transactItemKey(item: TransactItem): string {
   return `${pk}\u0000${sk}`;
 }
 
-function assertMutationTransaction(items: readonly TransactItem[], guardianWrite: boolean): void {
+function assertMutationTransaction(
+  items: readonly TransactItem[],
+  guardianWrite: boolean,
+  privacyGuardCount: number,
+): void {
   // Two paid-source guards; supervised coverage shares a key with the scope guard.
   // Up to six Household v2 facts plus the responsible's profile and closure.
   const clockGuards = items.filter(item=> item.ConditionCheck?.Key?.['sk'] === TEST_CLOCK_SK).length;
-  // Only server-built mirror condition checks add capacity. Client group/record
-  // limits and the ordinary 48/55 budgets remain unchanged.
+  // Privacy and mirror guards are built by the server. Client group/record
+  // limits and the 48/55 budget for ordinary operations remain unchanged.
   if (clockGuards > (guardianWrite ? 2 : 1)) throw new ApiError('LIMIT_EXCEEDED');
-  const maximum = (guardianWrite ? 55 : 48) + clockGuards;
+  const maximum = (guardianWrite ? 55 : 48) + clockGuards + privacyGuardCount;
   if (items.length > maximum || items.length > 100) {
     throw new ApiError('LIMIT_EXCEEDED', 'mutation transaction is too large');
   }
@@ -742,19 +746,20 @@ async function applyV2Group(
       if (guardianWrite && (!expectedAuthority || expectedAuthority.minorId !== current.ownerSub)) {
         throw new ApiError('NOT_FOUND');
       }
+      const privacyGuards = consent ? cloudConsentConditions(ctx.deps, consent) : [];
       const baseItems: TransactItem[] = [
         markerPut(ctx.deps.table, current),
         ...current.group.records.map((entry) =>
           recordPut(ctx.deps.table, current.ownerSub, entry, current.syncedAt, consent),
         ),
         ...proposal.items,
-        ...(consent ? cloudConsentConditions(ctx.deps, consent) : []),
+        ...privacyGuards,
       ];
       const items =
         guardianWrite && expectedAuthority
           ? withForestWriteAuthority(ctx, expectedAuthority, baseItems)
           : baseItems;
-      assertMutationTransaction(items, guardianWrite);
+      assertMutationTransaction(items, guardianWrite, privacyGuards.length);
       try {
         await ctx.deps.ddb.send(
           new TransactWriteCommand({
