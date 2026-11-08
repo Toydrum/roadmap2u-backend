@@ -268,6 +268,7 @@ const COMMERCIAL_ACCESS_SAFE_ATTRIBUTES = [
   'status',
   'accountType',
   'majorityAt',
+  'privacyMode',
   'state',
   'activeTrees',
   'ownerSub',
@@ -1392,6 +1393,21 @@ export class RoadmapStack extends Stack {
           'ForAllValues:StringEquals': {
             'dynamodb:Attributes': [...COMMERCIAL_ACCESS_SAFE_ATTRIBUTES],
           },
+        },
+      }),
+    );
+    accessReaderRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadAccessPolicyFlags',
+        actions: ['dynamodb:GetItem'],
+        resources: [table.tableArn],
+        conditions: {
+          'ForAllValues:StringEquals': {
+            'dynamodb:LeadingKeys': ['COMMERCIAL#CONFIG'],
+            'dynamodb:Attributes': [...COMMERCIAL_FLAGS_ATTRIBUTES],
+          },
+          Null: { 'dynamodb:Attributes': 'false' },
+          StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
         },
       }),
     );

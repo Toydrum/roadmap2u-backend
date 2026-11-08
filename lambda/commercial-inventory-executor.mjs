@@ -58,7 +58,8 @@ function parseRequest(event, stage) {
     return null;
   }
   if (
-    !hasExactKeys(body, ['command', 'stage']) ||
+    (!hasExactKeys(body, ['command', 'stage']) &&
+      !(hasExactKeys(body, ['command', 'stage', 'quotaPolicy']) && body.quotaPolicy === 2)) ||
     body.command !== 'commercial-inventory' ||
     body.stage !== stage
   ) {
@@ -99,7 +100,8 @@ export function createCommercialInventoryExecutor({
     const authorization = actorStatus(event, accountId, roleName);
     if (authorization === 401) return respond(401, { error: 'UNAUTHENTICATED' });
     if (authorization === 403) return respond(403, { error: 'FORBIDDEN' });
-    if (!parseRequest(event, stage)) {
+    const request = parseRequest(event, stage);
+    if (!request) {
       return respond(400, { error: 'INVALID_REQUEST' });
     }
     if (typeof context?.getRemainingTimeInMillis !== 'function') {
@@ -109,6 +111,7 @@ export function createCommercialInventoryExecutor({
       stage,
       tableName,
       ddb,
+      quotaPolicy: request.quotaPolicy ?? 1,
       beforePage: async () => {
         if (context.getRemainingTimeInMillis() <= DEADLINE_MARGIN_MILLISECONDS) {
           throw new Error('commercial inventory single-invocation deadline exceeded');
@@ -117,7 +120,7 @@ export function createCommercialInventoryExecutor({
     });
     return respond(
       200,
-      validateCommercialInventoryManifest(manifest, stage, tableName),
+      validateCommercialInventoryManifest(manifest, stage, tableName, request.quotaPolicy ?? 1),
     );
   };
 }

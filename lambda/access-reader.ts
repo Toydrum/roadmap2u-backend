@@ -9,11 +9,13 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
-import { ApiError, type AccessSummary } from '@app/api/contracts';
+import { ApiError, FREE_LIMITS, type AccessSummary } from '@app/api/contracts';
 import { accountClosureKey } from './account-closure';
 import { WRITABLE_PROFILE_CONDITION } from './authz';
 import { K, type DynamoKey, type ProfileItem } from './db';
 import { errorResponse, type HttpResponse } from './http';
+import { isOrdinaryForestAccount } from './commercial/catalog';
+import { COMMERCIAL_FLAGS_ATTRIBUTES, CommercialFlagsResolver, type CommercialConfigResult } from './commercial/flags';
 import {
   AccessResolver,
   type AccessPutProposal,
@@ -49,6 +51,7 @@ export interface OwnerCommercialSnapshot {
 export interface AccessReaderDeps {
   readonly readOwnerSnapshot: (ownerSub: string) => Promise<OwnerCommercialSnapshot>;
   readonly resolveAccess: (ownerSub: string) => Promise<AccessItem>;
+  readonly resolvePolicy?: () => Promise<CommercialConfigResult>;
 }
 
 export interface DynamoAccessReaderOptions {
@@ -78,7 +81,8 @@ function projection(attributes: readonly string[]): {
   };
 }
 
-const PROFILE_PROJECTION = projection(['pk', 'sk', 'userId', 'status', 'accountType', 'majorityAt']);
+const PROFILE_PROJECTION = projection(['pk', 'sk', 'userId', 'status', 'accountType', 'majorityAt', 'privacyMode']);
+const FLAGS_PROJECTION = projection(COMMERCIAL_FLAGS_ATTRIBUTES);
 const CLOSURE_PROJECTION = projection(['pk', 'sk']);
 const USAGE_PROJECTION = projection(['pk', 'sk', 'state', 'activeTrees']);
 const ACCESS_PROJECTION = projection([
@@ -203,15 +207,27 @@ export function createAccessReader(
       assertReadableOwner(before, ownerSub);
 
       const access = await deps.resolveAccess(ownerSub);
+      const policyV2 = event.queryStringParameters?.['policy'] === '2';
+      const config = policyV2 ? await deps.resolvePolicy?.() : undefined;
 
       // Lifecycle is checked again after a possible ACCESS materialization so
       // a concurrent closure never receives an entitlement response.
       const after = await deps.readOwnerSnapshot(ownerSub);
       assertReadableOwner(after, ownerSub);
+      const ordinary = after.profile !== undefined && isOrdinaryForestAccount(after.profile);
+      const flags = config?.status === 'available' ? config.flags : undefined;
+      const summary = accessSummary(access, after.usage);
+      if (ordinary && flags?.freeQuotaV2Enabled === true && access.effectivePlanKey === 'free') {
+        summary.limits = { ...FREE_LIMITS };
+      }
+      if (policyV2) {
+        summary.cloudAutoStartEnabled = ordinary && !access.simulationOnly && config?.status === 'available' &&
+          config.freshness === 'fresh' && flags?.cloudAutoStartEnabled === true;
+      }
       return noStore({
         statusCode: 200,
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(accessSummary(access, after.usage)),
+        body: JSON.stringify(summary),
       });
     } catch (error) {
       return noStore(errorResponse(error));
@@ -468,9 +484,20 @@ export function createDynamoAccessResolver(options: DynamoAccessReaderOptions): 
 
 export function createDynamoAccessReaderDeps(options: DynamoAccessReaderOptions): AccessReaderDeps {
   const resolver = createDynamoAccessResolver(options);
+  const policy = new CommercialFlagsResolver({
+    now: options.now,
+    readItem: async () => (await options.ddb.send(new GetCommand({
+      TableName: options.tableName,
+      Key: { pk: 'COMMERCIAL#CONFIG', sk: 'FLAGS' },
+      ConsistentRead: true,
+      ...FLAGS_PROJECTION,
+    }))).Item,
+    emitMetric: () => undefined,
+  });
   return {
     readOwnerSnapshot: (ownerSub) => readOwnerSnapshot(options.ddb, options.tableName, ownerSub),
     resolveAccess: async (ownerSub) => (await resolver.resolveFresh(ownerSub)).access,
+    resolvePolicy: () => policy.resolveFresh(),
   };
 }
 

@@ -111,6 +111,19 @@ function json(response: { body: string }): unknown {
 
 describe('explicit individual billing configuration CAS', () => {
   beforeEach(() => ddbMock.reset());
+  it('changes only the rollout controls under CAS even while individual payments are enabled', async () => {
+    ddbMock.on(TransactWriteCommand).resolves({});
+    const changes = { freeQuotaV2Enabled: true, cloudAutoStartEnabled: false };
+    const response = await createBroker()(event({ ...setBody, changes }, FLAG_ACTOR));
+
+    expect(response.statusCode).toBe(200);
+    const update = ddbMock.commandCalls(TransactWriteCommand)[0]!.args[0].input.TransactItems![0]!.Update!;
+    expect(update.ConditionExpression).toBe('attribute_exists(pk) AND attribute_exists(sk) AND #revision = :expectedRevision');
+    expect(update.UpdateExpression).toContain('#freeQuotaV2Enabled = :freeQuotaV2Enabled');
+    expect(update.UpdateExpression).toContain(' REMOVE #cloudAutoStartEnabled');
+    expect(update.ExpressionAttributeNames).not.toHaveProperty('#premiumPaymentsEnabled');
+  });
+
   const changes = { schemaVersion: 2, paymentScope: 'individual', premiumPaymentsEnabled: true, individualCheckoutEnabled: true, checkoutEnabled: false, familyCatalogEnabled: false, subscriptionChangesEnabled: false };
   it('upgrades only through an explicit versioned actor-authorized CAS transaction with audit', async () => {
     ddbMock.on(TransactWriteCommand).resolves({});

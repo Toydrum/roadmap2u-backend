@@ -136,6 +136,17 @@ describe('GET /v1/plans catalog Lambda', () => {
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
   });
 
+  it('serves the tightened free limits only to policy=2 clients when quota v2 is enabled', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { ...rawFlags, freeQuotaV2Enabled: true } });
+    const catalog = createDynamoCatalogHandler({ ddb: DynamoDBDocumentClient.from(new DynamoDBClient({})), tableName: 'roadmap-dev', now: () => NOW });
+    const oldResponse = await catalog();
+    const newResponse = await catalog({ queryStringParameters: { policy: '2' } });
+
+    expect(json(oldResponse)).toMatchObject({ plans: { free: { limits: { maxActiveTrees: 2, maxVisibleBranchesPerTree: 10 } } } });
+    expect(json(newResponse)).toMatchObject({ plans: { free: { limits: { maxActiveTrees: 1, maxVisibleBranchesPerTree: 5 } } } });
+    expect(newResponse.headers['cache-control']).toBe('no-store');
+  });
+
   it.each([undefined, null, { ...rawFlags, familyCatalogEnabled: 'yes' }])('keeps legacy offers on missing or malformed config %j', async (Item) => {
     ddbMock.on(GetCommand).callsFake(() => ({ Item }));
     const catalog = createDynamoCatalogHandler({ ddb: DynamoDBDocumentClient.from(new DynamoDBClient({})), tableName: 'roadmap-dev', now: () => NOW });
@@ -180,6 +191,26 @@ describe('GET /v1/access handler boundary', () => {
   }
 
   beforeEach(() => ddbMock.reset());
+
+  it.each([
+    ['legacy client', undefined, {}, 'fresh', 2, undefined],
+    ['current common account', '2', {}, 'fresh', 1, true],
+    ['historical private account', '2', { accountType: 'minor', privacyMode: 'adolescent_private' }, 'fresh', 2, false],
+    ['unavailable fresh read', '2', {}, 'stale', 1, false],
+  ] as const)('projects separate quota and automatic cloud controls for %s', async (_label, policy, fields, freshness, maxActiveTrees, cloudAutoStartEnabled) => {
+    const response = await createAccessReader({
+      readOwnerSnapshot: async () => ({ profile: profile(fields), usage: { activeTrees: 0, visibleBranchesByTree: {} } }),
+      resolveAccess: async () => access(),
+      resolvePolicy: async () => ({
+        status: 'available', freshness, loadedAt: NOW,
+        flags: { ...FAMILY_BILLING_FLAG_DEFAULTS, revision: 1, quotaMode: 'enforce', capabilityMode: 'enforce', accessCodeIssuanceEnabled: false, accessCodeRedemptionEnabled: false, premiumPaymentsEnabled: false, updatedAt: NOW, updatedBy: 'operator', reason: 'rollout', freeQuotaV2Enabled: true, cloudAutoStartEnabled: true },
+      }),
+    })({ ...event(), queryStringParameters: policy ? { policy } : undefined });
+
+    expect(json(response)).toMatchObject({ limits: { maxActiveTrees, maxVisibleBranchesPerTree: maxActiveTrees === 1 ? 5 : 10 } });
+    if (cloudAutoStartEnabled === undefined) expect(json(response)).not.toHaveProperty('cloudAutoStartEnabled');
+    else expect(json(response)).toHaveProperty('cloudAutoStartEnabled', cloudAutoStartEnabled);
+  });
 
   it.each([undefined, '', 42])(
     'rejects an untrusted JWT sub %j before touching storage',

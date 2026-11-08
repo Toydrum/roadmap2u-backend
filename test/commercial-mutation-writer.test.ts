@@ -404,6 +404,61 @@ describe('CommercialMutationWriter', () => {
     });
   });
 
+  it('enforces the tighter quota on ordinary Free writes without mutating the stored ACCESS', async () => {
+    const h = harness([snapshot({
+      flags: flags({ quotaMode: 'enforce', freeQuotaV2Enabled: true }),
+      usage: { pk: K.user(OWNER), sk: 'USAGE', state: 'active', activeGeneration: GENERATION, activeTrees: 1 },
+      usageByTree: {},
+      deltas: [treeGrowth()],
+    })]);
+
+    await expect(h.writer.write({ ownerSub: OWNER, mutationId: 'second-tree' })).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' });
+    expect(h.commits).toHaveLength(0);
+  });
+
+  it('requires a canonical counter before ordinary Free quota growth during v2 enforcement', async () => {
+    const h = harness([snapshot({
+      flags: flags({ quotaMode: 'enforce', freeQuotaV2Enabled: true }),
+      usage: { pk: K.user(OWNER), sk: 'USAGE', state: 'active', activeTrees: 1 },
+      deltas: [treeGrowth()],
+    })]);
+
+    await expect(h.writer.write({ ownerSub: OWNER, mutationId: 'unmigrated-second-tree' })).rejects.toMatchObject({ code: 'USAGE_MIGRATION_IN_PROGRESS' });
+    expect(h.commits).toHaveLength(0);
+  });
+
+  it('keeps the historical private Free quota while v2 is enabled', async () => {
+    const h = harness([snapshot({
+      profile: profile({ accountType: 'minor', privacyMode: 'adolescent_private' }),
+      flags: flags({ quotaMode: 'enforce', freeQuotaV2Enabled: true }),
+      deltas: [branchGrowth()],
+    })]);
+
+    await expect(h.writer.write({ ownerSub: OWNER, mutationId: 'historical-tenth-branch' })).resolves.toMatchObject({ outcome: 'committed' });
+  });
+
+  it('fences the paid source on cloud growth and retries against a concurrent subscription end', async () => {
+    const subscription = {
+      pk: K.user(OWNER), sk: 'SUBSCRIPTION#INDIVIDUAL', entityType: 'SubscriptionSource',
+      ownerSub: OWNER, sourceId: 'individual-paid', state: 'active', paidThrough: NOW + 60_000,
+      graceUntil: null, revision: 1, updatedAt: NOW - 1,
+    } as const;
+    const paid = deriveAccessItem(OWNER, NOW, undefined, [], { subscription });
+    const free = deriveAccessItem(OWNER, NOW, paid, []);
+    const controls = flags({ capabilityMode: 'enforce', cloudAutoStartEnabled: true });
+    const h = harness([
+      snapshot({ access: paid, flags: controls, subscription }),
+      snapshot({ access: free, flags: controls, subscription: { ...subscription, state: 'ended', revision: 2 } }),
+    ], { resolvedAccess: [paid, free], commitOutcomes: ['conflict'] });
+
+    await expect(h.writer.write({ ownerSub: OWNER, mutationId: 'paid-source-ended' })).rejects.toMatchObject({ code: 'CAPABILITY_REQUIRED' });
+    expect(h.commits).toHaveLength(1);
+    expect(h.commits[0].items).toContainEqual({ ConditionCheck: expect.objectContaining({
+      Key: { pk: K.user(OWNER), sk: 'SUBSCRIPTION#INDIVIDUAL' },
+      ExpressionAttributeValues: expect.objectContaining({ ':revision': 1, ':state': 'active' }),
+    }) });
+  });
+
   it('rejects the eleventh visible branch under Free when quota mode enforces', async () => {
     const h = harness([
       snapshot({

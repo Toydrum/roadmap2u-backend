@@ -18,8 +18,10 @@ const STORES = new Set([
   'harvests',
   'preserves',
 ]);
-const ACTIVE_TREE_LIMIT = 2;
-const VISIBLE_BRANCH_LIMIT = 10;
+const QUOTA_POLICIES = new Map([
+  [1, { activeTreeLimit: 2, visibleBranchLimit: 10 }],
+  [2, { activeTreeLimit: 1, visibleBranchLimit: 5 }],
+]);
 const ACCOUNT_ID = '765932874577';
 const REGION = 'us-east-1';
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
@@ -448,7 +450,8 @@ function validateCheckpoint(checkpoint, stage, tableName) {
   };
 }
 
-function buildManifest(stage, tableName, state) {
+function buildManifest(stage, tableName, state, quotaPolicy) {
+  const { activeTreeLimit, visibleBranchLimit } = QUOTA_POLICIES.get(quotaPolicy);
   const ownerUsage = Object.fromEntries(
     Object.keys(state.owners).map((owner) => [
       owner,
@@ -477,7 +480,7 @@ function buildManifest(stage, tableName, state) {
       tree.visibleNodes - (validHeart && tree.heartVisible ? 1 : 0),
     );
     usage.visibleBranches += treeBranches;
-    if (treeBranches > VISIBLE_BRANCH_LIMIT) {
+    if (treeBranches > visibleBranchLimit) {
       treesOverVisibleBranchLimit += 1;
       usage.branchLimitExceeded = true;
     }
@@ -494,7 +497,7 @@ function buildManifest(stage, tableName, state) {
   for (const usage of Object.values(ownerUsage)) {
     activeTrees += usage.activeTrees;
     visibleBranches += usage.visibleBranches;
-    const treesOver = usage.activeTrees > ACTIVE_TREE_LIMIT;
+    const treesOver = usage.activeTrees > activeTreeLimit;
     const branchesOver = usage.branchLimitExceeded;
     if (treesOver) ownersOverActiveTreeLimit += 1;
     if (branchesOver) ownersOverBranchLimit += 1;
@@ -506,7 +509,7 @@ function buildManifest(stage, tableName, state) {
   }
 
   return withStableInventoryManifestHash({
-    schemaVersion: 1,
+    schemaVersion: quotaPolicy,
     operation: 'commercial-inventory',
     mode: 'dry-run',
     stage,
@@ -529,8 +532,8 @@ function buildManifest(stage, tableName, state) {
         profiles: state.profileWithoutCreationTimestamp,
       },
       overQuota: {
-        activeTreeLimit: ACTIVE_TREE_LIMIT,
-        visibleBranchLimit: VISIBLE_BRANCH_LIMIT,
+        activeTreeLimit,
+        visibleBranchLimit,
         owners: overOwners,
         ownersOverActiveTreeLimit,
         ownersOverBranchLimit,
@@ -552,6 +555,7 @@ export async function runCommercialInventory(options = {}) {
     stage,
     tableName,
     ddb,
+    quotaPolicy = 1,
     loadCheckpoint = async () => null,
     saveCheckpoint = async () => undefined,
     beforePage = async () => undefined,
@@ -560,6 +564,7 @@ export async function runCommercialInventory(options = {}) {
     throw new Error('commercial inventory is always read-only');
   }
   if (!STAGES.has(stage)) throw new Error('stage must be dev, test, or prod');
+  if (!QUOTA_POLICIES.has(quotaPolicy)) throw new Error('quota policy must be 1 or 2');
   if (tableName !== `roadmap-${stage}`) {
     throw new Error('primary table must exactly match the selected stage');
   }
@@ -577,7 +582,7 @@ export async function runCommercialInventory(options = {}) {
   const state = checkpoint?.state ?? emptyState();
   let cursor = checkpoint?.cursor;
 
-  if (phase === 'complete') return buildManifest(stage, tableName, state);
+  if (phase === 'complete') return buildManifest(stage, tableName, state, quotaPolicy);
 
   if (phase === 'structure') {
     do {
@@ -617,13 +622,14 @@ export async function runCommercialInventory(options = {}) {
   } while (cursor);
 
   await saveCheckpoint(checkpointFor(stage, tableName, 'complete', state));
-  return buildManifest(stage, tableName, state);
+  return buildManifest(stage, tableName, state, quotaPolicy);
 }
 
 const CLI_OPTIONS = new Set([
   'stage',
   'profile',
   'url',
+  'quota-policy',
 ]);
 
 function parseCliOptions(argv) {
@@ -653,6 +659,9 @@ function parseCliOptions(argv) {
   };
   const stage = required('stage');
   if (!STAGES.has(stage)) throw new Error('stage must be dev, test, or prod');
+  const rawQuotaPolicy = values.get('quota-policy') ?? '1';
+  if (rawQuotaPolicy !== '1' && rawQuotaPolicy !== '2') throw new Error('quota policy must be 1 or 2');
+  const quotaPolicy = Number(rawQuotaPolicy);
   const profile = values.get('profile');
   if (profile !== undefined && !/^[A-Za-z0-9_.-]{1,128}$/.test(profile)) {
     throw new Error('profile has an invalid format');
@@ -676,7 +685,7 @@ function parseCliOptions(argv) {
   ) {
     throw new Error('URL must be an AWS Lambda Function URL in us-east-1');
   }
-  return { stage, profile, url: url.href };
+  return { stage, profile, url: url.href, quotaPolicy };
 }
 
 function validateInventoryIdentity(identity, stage) {
@@ -695,8 +704,10 @@ function validateInventoryIdentity(identity, stage) {
   }
 }
 
-export function validateCommercialInventoryManifest(manifest, stage, tableName) {
+export function validateCommercialInventoryManifest(manifest, stage, tableName, quotaPolicy = manifest?.schemaVersion) {
+  const limits = QUOTA_POLICIES.get(quotaPolicy);
   if (
+    !limits ||
     !hasExactKeys(
       manifest,
       new Set([
@@ -711,7 +722,7 @@ export function validateCommercialInventoryManifest(manifest, stage, tableName) 
         'manifestHash',
       ]),
     ) ||
-    manifest.schemaVersion !== 1 ||
+    manifest.schemaVersion !== quotaPolicy ||
     manifest.operation !== 'commercial-inventory' ||
     manifest.mode !== 'dry-run' ||
     manifest.stage !== stage ||
@@ -775,8 +786,8 @@ export function validateCommercialInventoryManifest(manifest, stage, tableName) 
       ]),
     ) ||
     !Object.values(manifest.classifications.overQuota).every(isCounter) ||
-    manifest.classifications.overQuota.activeTreeLimit !== ACTIVE_TREE_LIMIT ||
-    manifest.classifications.overQuota.visibleBranchLimit !== VISIBLE_BRANCH_LIMIT ||
+    manifest.classifications.overQuota.activeTreeLimit !== limits.activeTreeLimit ||
+    manifest.classifications.overQuota.visibleBranchLimit !== limits.visibleBranchLimit ||
     !HASH_PATTERN.test(manifest.manifestHash)
   ) {
     throw new Error('inventory returned an invalid sanitized manifest');
@@ -924,6 +935,7 @@ export async function runCommercialInventoryCli({
   const body = JSON.stringify({
     command: 'commercial-inventory',
     stage: options.stage,
+    ...(options.quotaPolicy === 2 ? { quotaPolicy: 2 } : {}),
   });
   const credentials = await getCredentials(options.profile);
   const headers = signFunctionUrlRequest({
@@ -952,6 +964,7 @@ export async function runCommercialInventoryCli({
     payload,
     options.stage,
     `roadmap-${options.stage}`,
+    options.quotaPolicy,
   );
   await writeManifestEvidence({
     evidenceRoot: resolvedEvidenceRoot,
@@ -965,6 +978,7 @@ export async function runCommercialInventoryCli({
     `executionLimit=single-invocation-no-checkpoint timeoutSeconds=${COMMERCIAL_INVENTORY_EXECUTION_LIMIT.timeoutSeconds}`,
   );
   write(`manifestHash=${manifest.manifestHash}`);
+  if (options.quotaPolicy === 2) write('quotaPolicy=2 population=all-inventoried-owners');
   write(
     [
       'totals',

@@ -25,7 +25,11 @@ export const FAMILY_BILLING_FLAG_NAMES = Object.freeze(
   Object.keys(FAMILY_BILLING_FLAG_DEFAULTS) as (keyof FamilyBillingFlags)[],
 );
 
-export interface CommercialFlags extends FamilyBillingFlags {
+export const ROLLOUT_FLAG_NAMES = ['freeQuotaV2Enabled', 'cloudAutoStartEnabled'] as const;
+export type RolloutFlagName = (typeof ROLLOUT_FLAG_NAMES)[number];
+export type RolloutFlags = Partial<Readonly<Record<RolloutFlagName, boolean>>>;
+
+export interface CommercialFlags extends FamilyBillingFlags, RolloutFlags {
   readonly revision: number;
   readonly quotaMode: CommercialMode;
   readonly capabilityMode: CommercialMode;
@@ -107,10 +111,12 @@ const FAMILY_ITEM_ATTRIBUTES = [
   ...FAMILY_BILLING_FLAG_NAMES,
 ] as const;
 export const INDIVIDUAL_BILLING_FLAG_NAMES = ['schemaVersion', 'paymentScope', 'individualCheckoutEnabled'] as const;
-export const COMMERCIAL_FLAGS_ATTRIBUTES = [...FAMILY_ITEM_ATTRIBUTES, ...INDIVIDUAL_BILLING_FLAG_NAMES] as const;
+const VERSIONED_ITEM_ATTRIBUTES = [...FAMILY_ITEM_ATTRIBUTES, ...INDIVIDUAL_BILLING_FLAG_NAMES] as const;
+export const COMMERCIAL_FLAGS_ATTRIBUTES = [...VERSIONED_ITEM_ATTRIBUTES, ...ROLLOUT_FLAG_NAMES] as const;
 const LEGACY_ITEM_KEYS = new Set<string>(LEGACY_ITEM_ATTRIBUTES);
 const FAMILY_ITEM_KEYS = new Set<string>(FAMILY_ITEM_ATTRIBUTES);
-const ITEM_KEYS = new Set<string>(COMMERCIAL_FLAGS_ATTRIBUTES);
+const ITEM_KEYS = new Set<string>(VERSIONED_ITEM_ATTRIBUTES);
+const ROLLOUT_KEYS = new Set<string>(ROLLOUT_FLAG_NAMES);
 const SAFE_SOCIAL_ACTIONS = new Set<Extract<CommercialOperation, { kind: 'social' }>['action']>([
   'decline',
   'cancel',
@@ -125,7 +131,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function hasExactKeys(value: Record<string, unknown>): boolean {
-  const keys = Object.keys(value);
+  const keys = Object.keys(value).filter((key) => !ROLLOUT_KEYS.has(key));
   // Existing deployments keep their exact legacy shape until the next CAS write.
   return (
     (keys.length === ITEM_KEYS.size && keys.every((key) => ITEM_KEYS.has(key))) ||
@@ -160,6 +166,13 @@ function parseFlagsItem(value: unknown): ParsedFlags | null {
   if (typeof value['premiumPaymentsEnabled'] !== 'boolean') return null;
   if (!isTimestamp(value['updatedAt'])) return null;
   if (!isNonBlank(value['updatedBy']) || !isNonBlank(value['reason'])) return null;
+  const rollout: Partial<Record<RolloutFlagName, boolean>> = {};
+  for (const field of ROLLOUT_FLAG_NAMES) {
+    if (!Object.hasOwn(value, field)) continue;
+    const enabled = value[field];
+    if (typeof enabled !== 'boolean') return null;
+    rollout[field] = enabled;
+  }
   const versioned = Object.hasOwn(value, 'schemaVersion');
   if (versioned && (value['schemaVersion'] !== 2 ||
     !['none', 'individual'].includes(String(value['paymentScope'])) ||
@@ -186,6 +199,7 @@ function parseFlagsItem(value: unknown): ParsedFlags | null {
   return {
     flags: Object.freeze({
       ...family,
+      ...rollout,
       revision: value['revision'],
       quotaMode: value['quotaMode'],
       capabilityMode: value['capabilityMode'],
@@ -211,6 +225,7 @@ function sameFlags(left: CommercialFlags, right: CommercialFlags): boolean {
     left.premiumPaymentsEnabled === right.premiumPaymentsEnabled &&
     INDIVIDUAL_BILLING_FLAG_NAMES.every((field) => left[field] === right[field]) &&
     FAMILY_BILLING_FLAG_NAMES.every((field) => left[field] === right[field]) &&
+    ROLLOUT_FLAG_NAMES.every((field) => left[field] === right[field]) &&
     left.updatedAt === right.updatedAt &&
     left.updatedBy === right.updatedBy &&
     left.reason === right.reason
@@ -237,6 +252,11 @@ export class CommercialFlagsResolver {
     }
 
     return this.refresh(now);
+  }
+
+  /** Starting a new device link must observe a recent server decision. */
+  async resolveFresh(): Promise<CommercialConfigResult> {
+    return this.refresh(this.deps.now());
   }
 
   private resolveCached(now: number): CommercialConfigResult {

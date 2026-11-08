@@ -4,6 +4,16 @@
  * no "deberías". Invitations over instructions. Growth metaphor everywhere.
  */
 export const ES = {
+  premiumCloud: {
+    title: 'Sincronización del bosque',
+    useAuthorization: 'Quiero conectar este dispositivo con mi autorización de nube vigente.',
+    device: 'El bosque guardado en este dispositivo me pertenece y autorizo sincronizarlo con {account}.',
+    local: 'La autorización no se pudo confirmar. Puedes continuar y conservar tu bosque en este dispositivo.',
+    waiting: 'Confirmando Premium para iniciar la sincronización…',
+    syncing: 'Sincronizando tu bosque…',
+    current: 'Tu bosque está al día.',
+    attention: 'Tu bosque sigue en este dispositivo. Puedes revisar la conexión en Ajustes.',
+  },
   privacy: {
     accountTitle: "Tu cuenta empieza aquí",
     accountBody: "Puedo usar Free o elegir Premium individual. Acepto los términos de cuenta; mi autorización de nube se elige después, por separado.",
@@ -138,7 +148,7 @@ export const ES = {
       body: 'RoadMap2U es una app para organizar metas y tareas en árboles visuales. Cada meta es un árbol; sus ramas muestran los pasos y las alternativas para avanzar a tu ritmo.',
       primary: 'Crear mi bosque gratis',
       secondary: 'Ver cómo funciona',
-      microcopy: 'Sin tarjeta · empieza con 2 árboles y 10 ramas por árbol',
+      microcopy: 'Sin tarjeta · empieza con {trees} y {branches} ramas por árbol',
     },
     steps: {
       eyebrow: 'Del deseo al camino',
@@ -192,9 +202,10 @@ export const ES = {
         price: '$0 MXN',
         cadence: 'para empezar',
         summary: 'Conoce la app con un bosque propio y funcional.',
+        activeTrees: { one: '1 árbol activo', many: '{count} árboles activos' },
         features: [
-          '2 árboles activos',
-          '10 ramas visibles por árbol',
+          '{trees}',
+          '{branches} ramas visibles por árbol',
           'Check-in, enfoque, almanaque y cosecha',
           'Uso local-first, exportación y accesibilidad',
         ],
@@ -220,7 +231,7 @@ export const ES = {
         {
           question: '¿Qué puedo hacer con Free?',
           answer:
-            'Puedes usar el ciclo personal completo con 2 árboles activos y hasta 10 ramas visibles por árbol: check-in, enfoque, fechas amables, rituales, almanaque, cosecha, respaldo y accesibilidad.',
+            'Puedes usar el ciclo personal completo con {trees} y hasta {branches} ramas visibles por árbol. Incluye check-in, enfoque, fechas amables, rituales, almanaque, cosecha, respaldo y accesibilidad.',
         },
         {
           question: '¿Dónde consulto Premium y su disponibilidad?',
@@ -247,7 +258,7 @@ export const ES = {
     final: {
       eyebrow: 'Tu camino no necesita verse como el de nadie más',
       title: 'Planta la primera versión de tu bosque.',
-      body: 'Dos árboles y diez ramas por árbol son suficientes para sentir cómo piensa RoadMap2U.',
+      body: 'Empieza con {trees} y {branches} ramas por árbol para probar RoadMap2U.',
       cta: 'Comenzar gratis',
     },
     footer: {
@@ -806,6 +817,7 @@ export const ES = {
         'No pudimos comprobar tu acceso todavía. Revisa tu conexión e inténtalo de nuevo.',
       activeTreeLimit:
         'Tu plan permite hasta {limit} árboles activos. Archiva uno para plantar otro.',
+      activeTreeLimitOne: 'Tu plan permite 1 árbol activo. Archívalo para plantar otro.',
       visibleBranchLimit:
         'Ese árbol permite hasta {limit} ramas visibles. Archiva una antes de plantar más.',
       starterBranches:
@@ -1117,6 +1129,7 @@ export const ES = {
     planLimit: {
       title: 'Llegaste al límite de tu plan Free',
       activeTrees: 'Tu bosque puede tener hasta {limit} árboles activos en Free.',
+      activeTree: 'Tu bosque puede tener 1 árbol activo en Free.',
       visibleBranches: 'Tu árbol puede tener hasta {limit} ramas visibles en Free.',
       usage: '{current}/{limit}',
       plansCta: 'Ver planes',

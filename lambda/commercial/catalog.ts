@@ -11,6 +11,11 @@ import {
  */
 export const PREPAYMENT_CATALOG: PlanCatalog = PREPAYMENT_PLAN_CATALOG;
 
+/** Historical private/supervised accounts keep their existing terms during this rollout. */
+export function isOrdinaryForestAccount(profile: { accountType: string; privacyMode?: string }): boolean {
+  return profile.accountType === 'adult' && profile.privacyMode === undefined;
+}
+
 /** Exact pre-family public shape; switching catalogs never grants account access. */
 export const LEGACY_PREPAYMENT_CATALOG = Object.freeze({
   version: '2026-08-prepayment-v1',
