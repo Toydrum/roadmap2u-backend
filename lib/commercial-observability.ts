@@ -14,6 +14,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
+import { SYNC_ROUTE_METRICS } from '../lambda/observability';
 import type { DeploymentStage } from './roadmap-stack';
 
 const ALARM_PERIOD = Duration.minutes(5);
@@ -111,6 +112,9 @@ export function createCommercialObservability(
     alarmName: string,
     alarmMetric: cloudwatch.IMetric,
     threshold = 1,
+    policy: Partial<Pick<cloudwatch.AlarmProps,
+      'evaluationPeriods' | 'datapointsToAlarm' | 'alarmDescription' | 'evaluateLowSampleCountPercentile'
+    >> = {},
   ): cloudwatch.Alarm => {
     const alarm = new cloudwatch.Alarm(scope, `${id}${alarmId}`, {
       alarmName: `roadmap-commercial-${props.stage}-${alarmName}`,
@@ -120,6 +124,7 @@ export function createCommercialObservability(
       datapointsToAlarm: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      ...policy,
     });
     alarm.addAlarmAction(topicAction);
     alarms.push(alarm);
@@ -176,6 +181,29 @@ export function createCommercialObservability(
       'configuration-unavailable',
       metric('RoadMap2U', 'CommercialConfigurationUnavailable', { stage: props.stage }),
     );
+    const { namespace, latency, serverErrors } = SYNC_ROUTE_METRICS;
+    const sustained = { evaluationPeriods: 3, datapointsToAlarm: 2 };
+    for (const [route, latencyThreshold] of [['changes', 1_500], ['push', 2_500]] as const) {
+      const dimensions = { stage: props.stage, route };
+      createAlarm(
+        `Sync${route}Latency`,
+        `sync-${route}-p95`,
+        metric(namespace, latency, dimensions, 'p95'),
+        latencyThreshold,
+        {
+          ...sustained,
+          alarmDescription: `Sync ${route} router p95 latency reached ${latencyThreshold} ms in 2 of 3 five-minute periods.`,
+          evaluateLowSampleCountPercentile: 'evaluate',
+        },
+      );
+      createAlarm(
+        `Sync${route}ServerErrors`,
+        `sync-${route}-5xx`,
+        metric(namespace, serverErrors, dimensions),
+        3,
+        { ...sustained, alarmDescription: `Sync ${route} returned at least 3 HTTP 5xx responses in 2 of 3 five-minute periods.` },
+      );
+    }
   }
   const syntheticAlarm = createAlarm(
     'Synthetic',
@@ -186,7 +214,7 @@ export function createCommercialObservability(
   const expectedAlarmCount: Record<DeploymentStage, number> = {
     dev: 2,
     test: 1,
-    prod: 8,
+    prod: 12,
   };
   if (alarms.length !== expectedAlarmCount[props.stage]) {
     throw new Error('commercial alarm inventory exceeds or misses its stage budget');

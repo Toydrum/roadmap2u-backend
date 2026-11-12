@@ -61,6 +61,12 @@ export type CommercialEmfMetricName =
   | 'AccessCodeRateLimited'
   | 'AccessCodeConflict';
 export type CommercialMetricStage = 'dev' | 'test' | 'prod';
+export type SyncMetricRoute = 'changes' | 'push';
+export const SYNC_ROUTE_METRICS = {
+  namespace: 'RoadMap2U/Sync',
+  latency: 'Latency',
+  serverErrors: 'ServerErrors',
+} as const;
 
 function isSensitiveKey(key: string): boolean {
   const normalized = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
@@ -187,6 +193,35 @@ export function emitCommercialBrokerAvailabilityMetric(
   if (statusCode === 503) {
     emitCommercialMetric('CommercialConfigurationUnavailable', stage);
   }
+}
+
+/** Sync metrics contain only fixed route/stage dimensions and numeric measurements. */
+export function emitSyncRouteMetrics(
+  route: SyncMetricRoute,
+  stage: string | undefined,
+  elapsedMs: number,
+  statusCode: number,
+): void {
+  if (!stage || !COMMERCIAL_STAGES.has(stage) || (route !== 'changes' && route !== 'push')) return;
+  const { namespace, latency, serverErrors } = SYNC_ROUTE_METRICS;
+  // Write raw EMF so Lambda's console formatting cannot wrap the metric event.
+  process.stdout.write(JSON.stringify({
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [{
+        Namespace: namespace,
+        Dimensions: [['stage', 'route']],
+        Metrics: [
+          { Name: latency, Unit: 'Milliseconds' },
+          { Name: serverErrors, Unit: 'Count' },
+        ],
+      }],
+    },
+    stage,
+    route,
+    [latency]: elapsedMs,
+    [serverErrors]: statusCode >= 500 && statusCode < 600 ? 1 : 0,
+  }) + '\n');
 }
 
 export function instrumentHandler<TEvent, TArgs extends unknown[], TResult>(

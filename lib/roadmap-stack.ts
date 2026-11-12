@@ -1177,6 +1177,7 @@ export class RoadmapStack extends Stack {
         USER_POOL_ID: pool.userPoolId,
         AUDIT_TABLE_NAME: accessAuditTable.tableName,
         ACCOUNT_CLOSURE_QUEUE_URL: accountClosureQueue.queueUrl,
+        COMMERCIAL_STAGE: stage,
       },
       bundling: {
         format: OutputFormat.ESM,

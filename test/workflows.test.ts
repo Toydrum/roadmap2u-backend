@@ -265,10 +265,13 @@ describe('backend GitHub Actions', () => {
     expect(runbook).toContain('roadmap-commercial-${stage}-synthetic');
     expect(runbook).toContain('| `dev` | 2 | API 5xx y la alarma sintética |');
     expect(runbook).toContain('| `test` | 1 |');
-    expect(runbook).toContain('| `prod` | 8 |');
+    expect(runbook).toContain('| `prod` | 12 |');
     expect(runbook).toContain('`pre-signup` y `post-confirmation`');
     expect(runbook).toContain('ConfigurationDrift');
     expect(runbook).toContain('emitCommercialMetric');
+    expect(runbook).toContain('cuatro alarmas de sincronización');
+    expect(runbook).toContain('`RoadMap2U/Sync` en los tres ambientes con dimensiones fijas `stage` y `route`');
+    expect(runbook).toContain('dos de los últimos tres periodos de cinco minutos');
     expect(runbook).toContain('No se crean alarmas `Duration`');
     expect(runbook).toContain('No se crean alarmas matemáticas de DynamoDB');
     expect(runbook).toContain('`ThrottledRequests` y `SystemErrors`');

@@ -3,7 +3,7 @@ import type {
   APIGatewayProxyEventV2WithJWTAuthorizer,
   Context,
 } from 'aws-lambda';
-import { ApiError } from '@app/api/contracts';
+import { API_PATHS, ApiError } from '@app/api/contracts';
 import { Ctx, resolveCaller } from './authz';
 import { Deps, realDeps } from './db';
 import { HttpResponse, errorResponse, ok, parseJsonBody } from './http';
@@ -15,7 +15,7 @@ import * as friends from './handlers/friends';
 import * as social from './handlers/social';
 import * as forests from './handlers/forests';
 import * as sync from './handlers/sync';
-import { instrumentHandler } from './observability';
+import { emitSyncRouteMetrics, instrumentHandler, type SyncMetricRoute } from './observability';
 import { requireFamilyRollout } from './commercial/family-rollout';
 import * as privacy from './privacy/consent';
 import * as privateAdolescents from './privacy/adolescents';
@@ -351,6 +351,9 @@ export function emailVerifiedFromClaims(claims: Record<string, unknown>): boolea
 }
 
 export async function handleEvent(event: RouterEvent, injected?: Deps): Promise<HttpResponse> {
+  const startedAt = performance.now();
+  let syncRoute: SyncMetricRoute | undefined;
+  let statusCode = 500;
   try {
     const method = event.requestContext.http.method.toUpperCase();
     if (method === 'OPTIONS') return { statusCode: 204, headers: {}, body: '' };
@@ -364,6 +367,8 @@ export async function handleEvent(event: RouterEvent, injected?: Deps): Promise<
     const rawPath = event.rawPath.replace(/^\/v1(?=\/|$)/, '') || '/';
     const found = matchRoute(method, rawPath);
     if (!found) throw new ApiError('NOT_FOUND');
+    if (found.route.pattern === API_PATHS.syncChanges) syncRoute = 'changes';
+    if (found.route.pattern === API_PATHS.syncPush) syncRoute = 'push';
 
     const ctx = await resolveCaller(
       d,
@@ -390,9 +395,16 @@ export async function handleEvent(event: RouterEvent, injected?: Deps): Promise<
       string
     >;
     const result = await found.route.handler(ctx, params, parseJsonBody(event.body));
-    return ok(result, found.route.status ?? 200);
+    statusCode = found.route.status ?? 200;
+    return ok(result, statusCode);
   } catch (error) {
-    return errorResponse(error);
+    const response = errorResponse(error);
+    statusCode = response.statusCode;
+    return response;
+  } finally {
+    if (syncRoute) {
+      emitSyncRouteMetrics(syncRoute, process.env['COMMERCIAL_STAGE'], performance.now() - startedAt, statusCode);
+    }
   }
 }
 
