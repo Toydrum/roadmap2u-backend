@@ -12,7 +12,7 @@ Cada stage crea el topic `roadmap-commercial-alerts-${stage}` con transporte TLS
 | --- | ---: | --- |
 | `dev` | 2 | API 5xx y la alarma sintética |
 | `test` | 1 | alarma sintética |
-| `prod` | 8 | Lambda `Errors` de `pre-signup` y `post-confirmation`; API 5xx; edad de la cola de cierre; mensajes visibles en la DLQ; `ConfigurationDrift`; `CommercialConfigurationUnavailable`; y la alarma sintética |
+| `prod` | 12 | Lambda `Errors` de `pre-signup` y `post-confirmation`; API 5xx; edad de la cola de cierre; mensajes visibles en la DLQ; `ConfigurationDrift`; `CommercialConfigurationUnavailable`; cuatro alarmas de sincronización; y la alarma sintética |
 
 Todas las alarmas usan periodos de cinco minutos, datos faltantes como `notBreaching` y el mismo topic como acción. La alarma sintética existe en los tres ambientes para que el workflow pueda comprobar el canal después de cada deploy; `test` no mantiene alertas de carga porque no recibe tráfico persistente.
 
@@ -34,6 +34,12 @@ El workflow y sus roles IAM no reciben `sns:Publish` ni `cloudwatch:PutMetricDat
 ## Métricas EMF
 
 `emitCommercialMetric` acepta únicamente métricas comerciales y stages allowlisted y no recibe request IDs, usuarios, correos, cuerpos ni códigos. El `CommercialConfigBroker` emite `CommercialConfigurationUnavailable` ante una respuesta 503.
+
+### Sincronización
+
+El router emite `RoadMap2U/Sync` en los tres ambientes con dimensiones fijas `stage` y `route`. La ruta vale `changes` para `GET /v1/sync/changes` o `push` para `POST /v1/sync/push`. El evento solo incluye la latencia en milisegundos y un contador de respuestas 5xx. Excluye cuerpos, identificadores, parámetros, credenciales y contenido del bosque.
+
+En PROD, el canal existente alerta por p95 de al menos 1.500 ms en `changes` o 2.500 ms en `push`, y por tres o más respuestas 5xx en cualquiera de las dos rutas. Cada alarma exige que su umbral se cumpla en dos de los últimos tres periodos de cinco minutos. Son umbrales iniciales para revisar con datos reales. La latencia mide el procesamiento en el router. La alarma general de API 5xx conserva cobertura de fallos de API Gateway, incluidos los que impiden que el router termine. Los conflictos 4xx siguen fuera del contador.
 
 `instrumentHandler` conserva los eventos estructurados `invocation.started`, `invocation.succeeded` e `invocation.failed`, pero no emite las series personalizadas `InvocationSucceeded` ni `InvocationFailed`: Lambda ya publica `Invocations` y `Errors` de forma nativa. Esto evita una serie por servicio y resultado en cada stage sin perder el rastro correlacionado en logs.
 

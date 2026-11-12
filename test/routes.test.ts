@@ -8,8 +8,8 @@ import {
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
-import { beforeEach, describe, expect, it } from 'vitest';
-import { API_PATHS } from '@app/api/contracts';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { API_PATHS, ApiError } from '@app/api/contracts';
 import { ROUTES, authTimeMillisFromClaims, handleEvent, matchRoute } from '../lambda/router';
 import { K, type Deps, type ProfileItem } from '../lambda/db';
 import { FAMILY_BILLING_FLAG_DEFAULTS } from '../lambda/commercial/flags';
@@ -215,6 +215,53 @@ describe('family and social HTTP authorization boundary', () => {
     ddbMock.on(GetCommand, { Key: K.profile('caller') }).resolves({ Item: profile('caller') });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
   });
+
+  it.each([
+    ['GET', API_PATHS.syncChanges, 'changes', 'COMMERCIAL_CONFIGURATION_UNAVAILABLE', 503, 1],
+    ['POST', API_PATHS.syncPush, 'push', 'ACCESS_REVISION_CONFLICT', 409, 0],
+  ] as const)(
+    'emits bounded sync metrics for %s %s without exposing any request data',
+    async (method, path, route, error, status, serverErrors) => {
+      vi.stubEnv('COMMERCIAL_STAGE', 'test');
+      const writeMetric = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      try {
+        ddbMock.on(GetCommand, { Key: K.profile('caller') }).rejects(new ApiError(error));
+        const event = {
+          ...authenticatedEvent(method, path),
+          queryStringParameters: { cursor: 'synthetic-private-cursor' },
+          headers: { authorization: 'Bearer synthetic-private-token' },
+          body: '{"note":"synthetic-private-note"}',
+        };
+        expect((await handleEvent(event, deps())).statusCode).toBe(status);
+        expect(
+          (await handleEvent(authenticatedEvent('OPTIONS', path), deps())).statusCode,
+        ).toBe(204);
+        expect(writeMetric).toHaveBeenCalledOnce();
+        const published = JSON.parse(String(writeMetric.mock.calls[0]?.[0]));
+        expect(published).toEqual({
+          _aws: {
+            Timestamp: expect.any(Number),
+            CloudWatchMetrics: [{
+              Namespace: 'RoadMap2U/Sync',
+              Dimensions: [['stage', 'route']],
+              Metrics: [
+                { Name: 'Latency', Unit: 'Milliseconds' },
+                { Name: 'ServerErrors', Unit: 'Count' },
+              ],
+            }],
+          },
+          stage: 'test',
+          route,
+          Latency: expect.any(Number),
+          ServerErrors: serverErrors,
+        });
+        expect(published.Latency).toBeGreaterThanOrEqual(0);
+      } finally {
+        writeMetric.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('rejects every authenticated route before any database access when the JWT subject is absent', async () => {
     for (const call of CLIENT_CALLS) {

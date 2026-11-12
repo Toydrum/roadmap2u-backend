@@ -51,7 +51,7 @@ describe('commercial alarms', () => {
     ['test', 1, ['synthetic']],
     [
       'prod',
-      8,
+      12,
       [
         'lambda-pre-signup-errors',
         'lambda-post-confirmation-errors',
@@ -60,6 +60,10 @@ describe('commercial alarms', () => {
         'account-closure-dlq-visible',
         'configuration-drift',
         'configuration-unavailable',
+        'sync-changes-p95',
+        'sync-changes-5xx',
+        'sync-push-p95',
+        'sync-push-5xx',
         'synthetic',
       ],
     ],
@@ -77,9 +81,59 @@ describe('commercial alarms', () => {
       ).toEqual(
         [...expectedAlarmNames, ...BILLING_ALARMS].map((name) => `roadmap-commercial-${stage}-${name}`).sort(),
       );
+      const router = Object.values(template.Resources).find(
+        (resource: any) => resource.Type === 'AWS::Lambda::Function' &&
+          resource.Properties.FunctionName === `roadmap-router-${stage}`,
+      ) as any;
+      expect(router?.Properties.Environment.Variables.COMMERCIAL_STAGE).toBe(stage);
     },
     60_000,
   );
+
+  it.each([
+    ['changes', 1_500],
+    ['push', 2_500],
+  ] as const)('alarms on sustained latency and repeated server errors for sync %s', (route, latencyThreshold) => {
+    const resources = renderedBackend('prod').Resources;
+    const [topicId] = Object.entries(resources).find(
+      ([, resource]: [string, any]) => resource.Type === 'AWS::SNS::Topic',
+    ) as [string, any];
+    const alarms = Object.values(resources).filter(
+      (resource: any) => resource.Type === 'AWS::CloudWatch::Alarm',
+    ) as any[];
+    const policy = {
+      Namespace: 'RoadMap2U/Sync',
+      Dimensions: expect.arrayContaining([
+        { Name: 'stage', Value: 'prod' },
+        { Name: 'route', Value: route },
+      ]),
+      EvaluationPeriods: 3,
+      DatapointsToAlarm: 2,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      Period: 300,
+      TreatMissingData: 'notBreaching',
+      AlarmActions: [{ Ref: topicId }],
+    };
+    const latency = alarms.find(({ Properties }) =>
+      Properties.AlarmName === `roadmap-commercial-prod-sync-${route}-p95`);
+    const errors = alarms.find(({ Properties }) =>
+      Properties.AlarmName === `roadmap-commercial-prod-sync-${route}-5xx`);
+    expect(latency?.Properties).toMatchObject({
+      ...policy,
+      MetricName: 'Latency',
+      ExtendedStatistic: 'p95',
+      EvaluateLowSampleCountPercentile: 'evaluate',
+      Threshold: latencyThreshold,
+    });
+    expect(errors?.Properties).toMatchObject({
+      ...policy,
+      MetricName: 'ServerErrors',
+      Statistic: 'Sum',
+      Threshold: 3,
+    });
+    expect(latency?.Properties.Dimensions).toHaveLength(2);
+    expect(errors?.Properties.Dimensions).toHaveLength(2);
+  }, 60_000);
 
   it('creates one HTTPS-only topic and disables the conditional subscription by default', () => {
     const template = renderedBackend();
@@ -256,7 +310,7 @@ describe('commercial alarms', () => {
     expect(topics).toHaveLength(1);
     expect(topics[0].DeletionPolicy).toBe('Retain');
     expect(topics[0].UpdateReplacePolicy).toBe('Retain');
-    expect(alarms).toHaveLength(8 + BILLING_ALARMS.length);
+    expect(alarms).toHaveLength(12 + BILLING_ALARMS.length);
     for (const alarm of alarms) {
       expect(alarm.DeletionPolicy).not.toBe('Retain');
       expect(alarm.UpdateReplacePolicy).not.toBe('Retain');
