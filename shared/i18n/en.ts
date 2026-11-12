@@ -147,6 +147,7 @@ export const EN: Dict = {
       primary: 'Create my forest for free',
       secondary: 'See how it works',
       microcopy: 'No card required · start with {trees} and {branches} branches per tree',
+      accessNote: 'You need a connection to create your account and confirm your email. Then you can work on your forest offline.',
     },
     steps: {
       eyebrow: 'From intention to path',
@@ -184,6 +185,17 @@ export const EN: Dict = {
           'Tree for the goal Learn French with four tasks on its branches: I practice vocabulary, I listen to audio, I speak French and I read a short text.',
       },
       treeLabel: 'Learn French: one goal with four concrete tasks.',
+      demo: {
+        branches: 'Open an example branch',
+        choose: 'Choose as next step',
+        chosen: 'Next step chosen',
+        steps: {
+          vocabulary: 'Review five words I want to remember.',
+          listening: 'Listen to one minute of audio and repeat a phrase.',
+          speaking: 'Practice a greeting out loud.',
+          reading: 'Read one paragraph and underline a new word.',
+        },
+      },
       notes: [
         'One next step at a time',
         'Gentle dates, never alarms',
@@ -1083,6 +1095,9 @@ export const EN: Dict = {
     data: 'Your data',
     dataHint:
       'Your forest lives on this device. Accounts use remote services; syncing the forest requires your separate cloud authorization.',
+    syncLocal: 'Saved on this device.',
+    syncPending: 'Changes waiting to sync.',
+    syncAttention: 'Sync needs attention. Your forest is still on this device.',
     export: 'Export my copy',
     import: 'Import a copy',
     importWarning: 'This replaces what is here now. We download an automatic backup first.',
@@ -1121,6 +1136,10 @@ export const EN: Dict = {
       'You will be signed out and the demo family starts over from scratch. Your local trees are untouched.',
     mockResetConfirmGo: 'Yes, reset',
     aboutText: 'Made with care for minds that grow in spirals, not straight lines.',
+    installTitle: 'Install RoadMap2U',
+    installAction: 'Install',
+    installAppleHint: 'In Safari, open Share and choose Add to Home Screen.',
+    installBrowserHint: 'In your browser menu, look for Install app or Add to Home screen.',
     updatesTitle: 'Updates',
     checkNow: 'Check for updates now',
     checking: 'Checking…',

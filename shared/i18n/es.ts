@@ -149,6 +149,7 @@ export const ES = {
       primary: 'Crear mi bosque gratis',
       secondary: 'Ver cómo funciona',
       microcopy: 'Sin tarjeta · empieza con {trees} y {branches} ramas por árbol',
+      accessNote: 'Crear tu cuenta y confirmar tu correo requiere conexión. Después puedes trabajar en tu bosque sin conexión.',
     },
     steps: {
       eyebrow: 'Del deseo al camino',
@@ -186,6 +187,17 @@ export const ES = {
           'Árbol de la meta Aprender francés con cuatro tareas en sus ramas: Practico vocabulario, Escucho un audio, Converso en francés y Leo un texto corto.',
       },
       treeLabel: 'Aprender francés: una meta con cuatro tareas concretas.',
+      demo: {
+        branches: 'Abrir una rama del ejemplo',
+        choose: 'Elegir como siguiente paso',
+        chosen: 'Siguiente paso elegido',
+        steps: {
+          vocabulary: 'Repasar cinco palabras que quiero recordar.',
+          listening: 'Escuchar un minuto de audio y repetir una frase.',
+          speaking: 'Practicar un saludo en voz alta.',
+          reading: 'Leer un párrafo y subrayar una palabra nueva.',
+        },
+      },
       notes: [
         'Un siguiente paso a la vez',
         'Fechas amables, nunca alarmas',
@@ -1087,6 +1099,9 @@ export const ES = {
     data: 'Tus datos',
     dataHint:
       'Tu bosque vive en este dispositivo. La cuenta utiliza servicios remotos; sincronizar el bosque requiere tu autorización de nube por separado.',
+    syncLocal: 'Guardado en este dispositivo.',
+    syncPending: 'Cambios pendientes de sincronizar.',
+    syncAttention: 'La sincronización necesita revisión. Tu bosque sigue en este dispositivo.',
     export: 'Exportar mi copia',
     import: 'Importar una copia',
     importWarning: 'Esto reemplaza lo que hay ahora. Antes descargamos un respaldo automático.',
@@ -1126,6 +1141,11 @@ export const ES = {
       'Se cierra tu sesión y la familia demo vuelve a empezar de cero. Tus árboles locales no se tocan.',
     mockResetConfirmGo: 'Sí, reiniciar',
     aboutText: 'Hecho con cariño para mentes que crecen en espiral, no en línea recta.',
+    installTitle: 'Instalar RoadMap2U',
+    installAction: 'Instalar',
+    installAppleHint: 'En Safari, abre Compartir y elige Agregar a pantalla de inicio.',
+    installBrowserHint:
+      'En el menú del navegador, busca Instalar aplicación o Agregar a pantalla de inicio.',
     updatesTitle: 'Actualizaciones',
     checkNow: 'Buscar actualización ahora',
     checking: 'Buscando…',
