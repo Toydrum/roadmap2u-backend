@@ -31,6 +31,7 @@ export class FakeBillingProvider implements BillingProvider {
   }
   async findCustomers(ownerSub: string) { this.ensure(); return structuredClone([...this.customers.values()].filter((c) => c.ownerSub === ownerSub)); }
   async retrieveCustomer(customerId: string) { this.ensure(); const c = this.customers.get(customerId); if (!c) throw new Error('customer missing'); return structuredClone(c); }
+  async retrieveUnmappedEventCustomer(customerId: string) { return this.retrieveCustomer(customerId); }
   async createCheckout(params: CheckoutParams, key: string) {
     this.checkoutCreateCalls++;
     const s = this.once(key, params, () => {

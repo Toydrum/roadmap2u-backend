@@ -19,7 +19,9 @@ export class BillingEventWorker {
       if (!customerId) return r.finishEvent(eventId, 'ignored', now());
       let ownerSub = await r.mappedOwner('customer', customerId);
       if (!ownerSub) {
-        const customer = await p.retrieveCustomer(customerId); ownerSub = customer.ownerSub;
+        const customer = await p.retrieveUnmappedEventCustomer(customerId);
+        if (!customer) return await r.finishEvent(eventId, 'ignored', now());
+        ownerSub = customer.ownerSub;
         const s = await r.load(ownerSub);
         // Response-loss race: the durable reserved command, not metadata alone, authorizes binding.
         const command = s.activeCommandId ? await r.command(ownerSub, s.activeCommandId) : null;

@@ -4,6 +4,7 @@ import { collectStripeHistory, type StripeHistoryOptions } from './history';
 
 function id(value: string | { id: string } | null | undefined): string { return typeof value === 'string' ? value : value?.id ?? ''; }
 function reject(): never { throw new BillingError('BILLING_PAYMENT_REVIEW'); }
+const despensaListaHouseholdId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 async function pages<T extends { id: string }>(fetch: (starting_after?: string) => Promise<{ data: T[]; has_more: boolean }>, maximum = Infinity): Promise<T[]> {
   const result: T[] = []; let cursor: string | undefined;
   do { const page = await fetch(cursor); result.push(...page.data); if (result.length > maximum || (page.has_more && !page.data.length)) reject(); cursor = page.has_more ? page.data.at(-1)?.id : undefined; } while (cursor);
@@ -50,6 +51,17 @@ export class StripeBillingProvider implements BillingProvider {
     return result.data.map((c) => this.customer(c));
   }
   async retrieveCustomer(customerId: string) { return this.customer(await this.stripe.customers.retrieve(customerId)); }
+  async retrieveUnmappedEventCustomer(customerId: string): Promise<ProviderCustomer | null> {
+    const customer = await this.stripe.customers.retrieve(customerId);
+    if (customer.deleted || customer.id !== customerId) reject();
+    const metadata = customer.metadata;
+    if (
+      this.config.stage === 'prod' && this.config.liveMode && customer.livemode &&
+      metadata['integration'] === 'despensalista' && metadata['stage'] === 'prod' &&
+      despensaListaHouseholdId.test(metadata['despensalistaHouseholdId'] ?? '')
+    ) return null;
+    return this.customer(customer);
+  }
   async createCheckout(p: CheckoutParams, key: string) {
     const metadata = this.metadata(p.ownerSub, p.operationId);
     return this.checkout(await this.stripe.checkout.sessions.create({ mode: 'subscription', customer: p.customerId, client_reference_id: p.ownerSub, metadata, line_items: [{ price: p.priceId, quantity: 1 }], allowed_payment_method_types: ['card'], allow_promotion_codes: false, automatic_tax: { enabled: false }, billing_address_collection: 'required', customer_update: { address: 'auto', name: 'auto' }, tax_id_collection: { enabled: false }, subscription_data: { metadata, default_tax_rates: [p.taxRateId], billing_mode: { type: 'flexible' } }, expires_at: Math.floor(p.expiresAt / 1000), success_url: p.successUrl, cancel_url: p.cancelUrl }, { idempotencyKey: key }));
