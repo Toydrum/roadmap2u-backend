@@ -137,6 +137,8 @@ export interface BillingProvider {
   createCustomer(params: BillingCommand['customerParams'], key: string): Promise<ProviderCustomer>;
   findCustomers(ownerSub: string): Promise<ProviderCustomer[]>;
   retrieveCustomer(customerId: string): Promise<ProviderCustomer>;
+  /** Returns null only for a verified live customer belonging to DespensaLista. */
+  retrieveUnmappedEventCustomer(customerId: string): Promise<ProviderCustomer | null>;
   createCheckout(params: CheckoutParams, key: string): Promise<ProviderCheckout>;
   findCheckouts(customerId: string, operationId?: string): Promise<ProviderCheckout[]>;
   retrieveCheckout(id: string): Promise<ProviderCheckout>;
