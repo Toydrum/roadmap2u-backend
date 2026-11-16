@@ -122,6 +122,20 @@ describe('step suggestions pilot', () => {
     expect(JSON.stringify(vi.mocked(console.info).mock.calls)).not.toContain(owner);
   });
 
+  it('asks the model to advance the active branch using the tree and existing step as context', async () => {
+    const context = { ...request, treeTitle: 'Preparar un viaje', branchTitle: 'Reservar alojamiento',
+      ancestorTitles: ['Organizar el fin de semana'], existingStepTitles: ['Elegir fechas'] };
+
+    expect((await handleEvent(event(JSON.stringify(context)), deps())).statusCode).toBe(200);
+
+    expect(converse).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      input: expect.objectContaining({
+        system: [{ text: expect.stringMatching(/branchTitle is the task[\s\S]+treeTitle and ancestorTitles[\s\S]+Build on existingStepTitles[\s\S]+Start with .*directly advances/i) }],
+        messages: [{ role: 'user', content: [{ text: JSON.stringify(context) }] }],
+      }),
+    }), expect.anything());
+  });
+
   it('exposes eligibility through /me only to a selected account in dev', async () => {
     const request = event('', owner, '/v1/me', 'GET');
     expect(JSON.parse((await handleEvent(request, deps())).body).stepSuggestionsPilot).toBe(true);
