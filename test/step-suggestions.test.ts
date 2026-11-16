@@ -262,6 +262,19 @@ describe('step suggestions pilot', () => {
     expect(JSON.parse(response.body)).toEqual({ suggestions: ['Comparar 1/2 y 3/4 y anotar una diferencia'] });
   });
 
+  it('does not accept a replacement that changes the mathematical notation', async () => {
+    converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify({
+      kind: 'compare', subject: '22', reference: '3',
+    }) }] } } });
+    const response = await handleEvent(event(JSON.stringify({
+      ...knightRequest, treeTitle: 'Aprender matemáticas', branchTitle: 'Aprender matemáticas',
+      existingStepTitles: [], focus: 'Comparar 2² y 3',
+    })), deps());
+
+    expect(response.statusCode).toBe(503);
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ['es', 'Estoy de pie en agua baja. Sin sumergirme.', 'Sumergir la cabeza un momento'],
     ['es', 'Sin sumergirme y sin soltar el borde.', 'Respira sin prisa y sumérgete'],

@@ -15,12 +15,12 @@ export const EXERCISE_PROMPT = [
   'Respect focus limits and do not repeat an existing step. Choose only an exercise that can be started from the supplied context and completed in minutes. If none is suitable or the task would cause harm, return {"kind":"unavailable"}. Return only JSON.',
 ].join(' ');
 
-function normalized(text: string): string {
-  return text.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase();
+function normalized(text: string, form: 'NFC' | 'NFKC' = 'NFC'): string {
+  return text.normalize(form).trim().replace(/\s+/gu, ' ').toLowerCase();
 }
 
 export function isLearningTitle(title: string): boolean {
-  return LEARNING_TITLE.test(normalized(title));
+  return LEARNING_TITLE.test(normalized(title, 'NFKC'));
 }
 
 export function usesPracticeExercise(request: StepSuggestionsRequest): boolean {
@@ -28,7 +28,7 @@ export function usesPracticeExercise(request: StepSuggestionsRequest): boolean {
 }
 
 export function needsPracticeFocus(request: StepSuggestionsRequest): boolean {
-  return usesPracticeExercise(request) && normalized(request.treeTitle) === normalized(request.branchTitle) &&
+  return usesPracticeExercise(request) && normalized(request.treeTitle, 'NFKC') === normalized(request.branchTitle, 'NFKC') &&
     request.ancestorTitles.length === 0 && request.existingStepTitles.length === 0 && !request.focus;
 }
 
