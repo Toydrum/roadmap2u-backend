@@ -122,18 +122,20 @@ describe('step suggestions pilot', () => {
     expect(JSON.stringify(vi.mocked(console.info).mock.calls)).not.toContain(owner);
   });
 
-  it('asks the model to advance the active branch using the tree and existing step as context', async () => {
-    const context = { ...request, treeTitle: 'Preparar un viaje', branchTitle: 'Reservar alojamiento',
-      ancestorTitles: ['Organizar el fin de semana'], existingStepTitles: ['Elegir fechas'] };
+  it('passes only the selected focus and asks for distinct results within the branch', async () => {
+    const context = { ...request, treeTitle: 'Aprender a dibujar', branchTitle: 'Aprender a dibujar',
+      ancestorTitles: [], existingStepTitles: [], focus: 'Dibujar formas de objetos de casa' };
 
-    expect((await handleEvent(event(JSON.stringify(context)), deps())).statusCode).toBe(200);
+    const body = JSON.stringify({ ...context, focus: ` ${context.focus} ` });
+    expect((await handleEvent(event(body), deps())).statusCode).toBe(200);
 
     expect(converse).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       input: expect.objectContaining({
-        system: [{ text: expect.stringMatching(/branchTitle is the task[\s\S]+treeTitle and ancestorTitles[\s\S]+Build on existingStepTitles[\s\S]+Start with .*directly advances/i) }],
+        system: [{ text: expect.stringContaining('different observable result') }],
         messages: [{ role: 'user', content: [{ text: JSON.stringify(context) }] }],
       }),
     }), expect.anything());
+    expect(JSON.stringify(vi.mocked(console.info).mock.calls)).not.toContain(context.focus);
   });
 
   it('exposes eligibility through /me only to a selected account in dev', async () => {
@@ -194,6 +196,11 @@ describe('step suggestions pilot', () => {
 
   it.each([
     JSON.stringify({ ...request, notes: 'private' }),
+    JSON.stringify({ ...request, focus: 'Pick one small part', notes: 'private' }),
+    JSON.stringify({ ...request, focus: '  ' }),
+    JSON.stringify({ ...request, focus: 'first line\nsecond line' }),
+    JSON.stringify({ ...request, focus: 'f'.repeat(81) }),
+    JSON.stringify({ ...request, focus: 1 }),
     JSON.stringify({ ...request, language: 'fr' }),
     JSON.stringify({ ...request, ancestorTitles: ['1', '2', '3', '4'] }),
     JSON.stringify({ ...request, treeTitle: 'a'.repeat(81) }),

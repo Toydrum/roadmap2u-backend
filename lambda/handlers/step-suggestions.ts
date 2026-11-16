@@ -42,12 +42,14 @@ function isTitleList(value: unknown, limit: number): value is string[] {
 }
 
 function suggestionContext(body: unknown): StepSuggestionsRequest {
-  if (!body || typeof body !== 'object' || Object.keys(body).length !== 5) {
+  if (!body || typeof body !== 'object') {
     throw new ApiError('VALIDATION', 'invalid step suggestion request');
   }
-  const { language, treeTitle, branchTitle, ancestorTitles, existingStepTitles } = body as Record<string, unknown>;
-  if ((language !== 'es' && language !== 'en') || !isStepTitle(treeTitle) || !isStepTitle(branchTitle) ||
-      !isTitleList(ancestorTitles, 3) || !isTitleList(existingStepTitles, 1)) {
+  const { language, treeTitle, branchTitle, ancestorTitles, existingStepTitles, focus } = body as Record<string, unknown>;
+  if (Object.keys(body).length !== (focus === undefined ? 5 : 6) ||
+      (language !== 'es' && language !== 'en') || !isStepTitle(treeTitle) || !isStepTitle(branchTitle) ||
+      !isTitleList(ancestorTitles, 3) || !isTitleList(existingStepTitles, 1) ||
+      (focus !== undefined && !isStepTitle(focus))) {
     throw new ApiError('VALIDATION', 'invalid step suggestion request');
   }
   return {
@@ -56,6 +58,7 @@ function suggestionContext(body: unknown): StepSuggestionsRequest {
     branchTitle: branchTitle.trim(),
     ancestorTitles: ancestorTitles.map((title) => title.trim()),
     existingStepTitles: existingStepTitles.map((title) => title.trim()),
+    ...(focus === undefined ? {} : { focus: focus.trim() }),
   };
 }
 

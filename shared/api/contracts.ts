@@ -878,6 +878,7 @@ export interface StepSuggestionsRequest {
   branchTitle: string;
   ancestorTitles: string[];
   existingStepTitles: string[];
+  focus?: string;
 }
 
 export interface StepSuggestionsResponse {
