@@ -1536,6 +1536,7 @@ export const EN: Dict = {
       CODE_EXPIRED: 'That code has expired — ask for a new one.',
       LIMIT_EXCEEDED: 'The link limit has been reached for now.',
       RATE_LIMITED: 'Too many tries in a row. Wait a little while.',
+      STEP_SUGGESTIONS_UNAVAILABLE: 'Suggestions are temporarily unavailable.',
       SYNC_TOO_OLD: 'The app needs an update to continue.',
       QUOTA_EXCEEDED:
         'Your forest is still here. To plant another branch, free some space or activate Premium.',

@@ -541,6 +541,15 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
     path: `/roadmap2u/${stage}/`,
     description: `Maximum runtime permissions for RoadMap2U ${stage} Lambda roles`,
     statements: [
+      ...(stage === 'dev'
+        ? [
+            new iam.PolicyStatement({
+              sid: 'InvokeOnlyNovaMicroPilot',
+              actions: ['bedrock:InvokeModel'],
+              resources: [novaMicroPilotModelArn(stack)],
+            }),
+          ]
+        : []),
       new iam.PolicyStatement({
         sid: 'WriteOnlyOwnFunctionLogs',
         actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
@@ -642,6 +651,12 @@ function createRuntimeBoundary(stack: Stack, stage: PolicyStage): iam.ManagedPol
         conditions: stageTagConditions(stage),
       }),
     ],
+  });
+}
+
+export function novaMicroPilotModelArn(stack: Stack): string {
+  return resourceArn(stack, 'bedrock', 'foundation-model', 'amazon.nova-micro-v1:0', {
+    account: '',
   });
 }
 

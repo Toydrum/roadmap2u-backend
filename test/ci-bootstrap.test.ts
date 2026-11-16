@@ -29,6 +29,26 @@ function bootstrapTemplate(): Template {
 }
 
 describe('GitHub OIDC bootstrap', () => {
+  it('allows only Nova Micro in the dev runtime boundary', () => {
+    const policies = Object.values(bootstrapTemplate().toJSON().Resources).filter(
+      (resource: any) => resource.Type === 'AWS::IAM::ManagedPolicy',
+    ) as any[];
+    const modelPolicies = policies.filter((policy) =>
+      JSON.stringify(policy.Properties.PolicyDocument).includes('bedrock:'),
+    );
+    expect(modelPolicies.map((policy) => policy.Properties.ManagedPolicyName)).toEqual([
+      'roadmap2u-dev-runtime-boundary',
+    ]);
+    const statements = modelPolicies[0].Properties.PolicyDocument.Statement.filter(
+      (statement: any) => JSON.stringify(statement.Action).includes('bedrock:'),
+    );
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toMatchObject({ Action: 'bedrock:InvokeModel', Effect: 'Allow' });
+    expect(JSON.stringify(statements[0].Resource)).toContain(
+      ':bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0',
+    );
+  });
+
   it('reuses the existing GitHub provider and trusts immutable repo identities', () => {
     const template = bootstrapTemplate();
     template.resourceCountIs('AWS::IAM::OIDCProvider', 0);

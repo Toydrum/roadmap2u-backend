@@ -10,6 +10,7 @@ import {
   toPublic,
 } from '../authz';
 import { K, ProfileItem, TransactWriteCommand } from '../db';
+import { canUseStepSuggestions } from './step-suggestions';
 
 export function profileView(item: ProfileItem): UserProfile {
   return {
@@ -26,9 +27,10 @@ export function profileView(item: ProfileItem): UserProfile {
 export async function getMe(ctx: Ctx): Promise<MeResponse> {
   if (ctx.caller.privacyMode)
     return { profile: profileView(ctx.caller), family: { guardians: [], minors: [] } };
-  const [guardianLinks, minorLinks] = await Promise.all([
+  const [guardianLinks, minorLinks, stepSuggestionsPilot] = await Promise.all([
     guardiansOf(ctx.deps, ctx.callerId),
     minorsOf(ctx.deps, ctx.callerId),
+    canUseStepSuggestions(ctx),
   ]);
 
   const guardians: FamilyLinkView[] = [];
@@ -55,7 +57,11 @@ export async function getMe(ctx: Ctx): Promise<MeResponse> {
       createdAt: link.createdAt,
     });
   }
-  return { profile: profileView(ctx.caller), family: { guardians, minors } };
+  return {
+    profile: profileView(ctx.caller),
+    family: { guardians, minors },
+    ...(stepSuggestionsPilot ? { stepSuggestionsPilot: true } : {}),
+  };
 }
 
 export async function patchMe(ctx: Ctx, body: { displayName?: string }): Promise<UserProfile> {

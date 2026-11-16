@@ -15,6 +15,7 @@ import * as friends from './handlers/friends';
 import * as social from './handlers/social';
 import * as forests from './handlers/forests';
 import * as sync from './handlers/sync';
+import { parseStepSuggestionsBody, suggestSteps } from './handlers/step-suggestions';
 import { emitSyncRouteMetrics, instrumentHandler, type SyncMetricRoute } from './observability';
 import { requireFamilyRollout } from './commercial/family-rollout';
 import * as privacy from './privacy/consent';
@@ -37,6 +38,11 @@ interface Route {
 }
 
 export const ROUTES: Route[] = [
+  {
+    method: 'POST',
+    pattern: API_PATHS.stepSuggestions,
+    handler: (ctx, _params, body) => suggestSteps(ctx, body),
+  },
   {
     method: 'GET',
     pattern: '/privacy/status',
@@ -381,7 +387,8 @@ export async function handleEvent(event: RouterEvent, injected?: Deps): Promise<
       /^\/(?:family|social|friends)(?:\/|$)/.test(found.route.pattern)
     )
       throw new ApiError('FORBIDDEN');
-    if (!found.route.pattern.startsWith('/privacy/') && found.route.pattern !== '/me') {
+    const stepSuggestions = found.route.pattern === API_PATHS.stepSuggestions;
+    if (!stepSuggestions && !found.route.pattern.startsWith('/privacy/') && found.route.pattern !== '/me') {
       if (found.route.pattern.startsWith('/sync/') ||
           (found.route.pattern === '/users/:id/forest' && found.params['id'] === ctx.callerId)) {
         await privacy.requireOwnAccountAdmission(ctx);
@@ -394,7 +401,10 @@ export async function handleEvent(event: RouterEvent, injected?: Deps): Promise<
       string,
       string
     >;
-    const result = await found.route.handler(ctx, params, parseJsonBody(event.body));
+    const body = stepSuggestions
+      ? parseStepSuggestionsBody(ctx, event.body, event.isBase64Encoded)
+      : parseJsonBody(event.body);
+    const result = await found.route.handler(ctx, params, body);
     statusCode = found.route.status ?? 200;
     return ok(result, statusCode);
   } catch (error) {

@@ -26,6 +26,56 @@ function backendTemplate(stage: 'dev' | 'test' | 'prod'): Template {
 }
 
 describe('stage backend infrastructure', () => {
+  it.each(['dev', 'test', 'prod'] as const)(
+    'scopes the suggestion route and its model access to dev in %s',
+    (stage) => {
+      const template = backendTemplate(stage).toJSON();
+      const resources = Object.entries(template.Resources) as [string, any][];
+      const route = resources.find(([, resource]) =>
+        resource.Properties?.RouteKey === 'POST /v1/ai/step-suggestions',
+      );
+      const router = resources.find(([, resource]) =>
+        resource.Properties?.FunctionName === `roadmap-router-${stage}`,
+      )?.[1];
+      const routerVars = router.Properties.Environment.Variables;
+      const parameters = template.Parameters;
+      const modelPolicies = resources.filter(([_, resource]) =>
+        resource.Type === 'AWS::IAM::Policy' &&
+        JSON.stringify(resource.Properties.PolicyDocument).includes('bedrock:InvokeModel'),
+      );
+      const apiStage = resources.find(([, resource]) =>
+        resource.Type === 'AWS::ApiGatewayV2::Stage',
+      )?.[1];
+
+      if (stage !== 'dev') {
+        expect(route).toBeUndefined();
+        expect(parameters.TaskSuggestionsPilotSubjects).toBeUndefined();
+        expect(routerVars.TASK_SUGGESTIONS_PILOT_SUBS).toBeUndefined();
+        expect(modelPolicies).toHaveLength(0);
+        return;
+      }
+
+      expect(route?.[1].Properties.AuthorizationType).toBe('JWT');
+      expect(apiStage.DependsOn).toContain(route?.[0]);
+      expect(apiStage.Properties.RouteSettings['POST /v1/ai/step-suggestions']).toEqual({
+        ThrottlingBurstLimit: 5,
+        ThrottlingRateLimit: 2,
+      });
+      expect(parameters.TaskSuggestionsPilotSubjects).toMatchObject({ Default: '', NoEcho: true });
+      expect(routerVars.TASK_SUGGESTIONS_PILOT_SUBS).toEqual({ Ref: 'TaskSuggestionsPilotSubjects' });
+      expect(modelPolicies).toHaveLength(1);
+      const policy = modelPolicies[0][1].Properties;
+      expect(policy.Roles).toEqual([{ Ref: router.Properties.Role['Fn::GetAtt'][0] }]);
+      const statement = policy.PolicyDocument.Statement.find(
+        (item: any) => item.Action === 'bedrock:InvokeModel',
+      );
+      expect(JSON.stringify(statement.Resource)).toContain(
+        ':bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0',
+      );
+    },
+    60_000,
+  );
+
   it('keeps CORS preflight unauthenticated while application routes require JWT', () => {
     const template = backendTemplate('dev').toJSON();
     const routes = Object.values(template.Resources).filter(

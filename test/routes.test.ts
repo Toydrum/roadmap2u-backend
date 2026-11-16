@@ -21,6 +21,7 @@ import { installFamilyV2Reads } from './support/family-v2-reads';
  * via API_PATHS) must land on exactly one route with the same method.
  */
 const CLIENT_CALLS: { method: string; path: string }[] = [
+  { method: 'POST', path: API_PATHS.stepSuggestions },
   { method: 'GET', path: API_PATHS.privacyStatus },
   { method: 'POST', path: API_PATHS.privacyConsents },
   { method: 'GET', path: API_PATHS.privacyExport },
