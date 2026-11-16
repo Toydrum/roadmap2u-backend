@@ -45,11 +45,12 @@ function suggestionContext(body: unknown): StepSuggestionsRequest {
   if (!body || typeof body !== 'object') {
     throw new ApiError('VALIDATION', 'invalid step suggestion request');
   }
-  const { language, treeTitle, branchTitle, ancestorTitles, existingStepTitles, focus } = body as Record<string, unknown>;
-  if (Object.keys(body).length !== (focus === undefined ? 5 : 6) ||
+  const { language, treeTitle, branchTitle, ancestorTitles, existingStepTitles, focus, maxSuggestions } = body as Record<string, unknown>;
+  const expectedKeys = 5 + Number(focus !== undefined) + Number(maxSuggestions !== undefined);
+  if (Object.keys(body).length !== expectedKeys ||
       (language !== 'es' && language !== 'en') || !isStepTitle(treeTitle) || !isStepTitle(branchTitle) ||
       !isTitleList(ancestorTitles, 3) || !isTitleList(existingStepTitles, 1) ||
-      (focus !== undefined && !isStepTitle(focus))) {
+      (focus !== undefined && !isStepTitle(focus)) || (maxSuggestions !== undefined && maxSuggestions !== 1)) {
     throw new ApiError('VALIDATION', 'invalid step suggestion request');
   }
   return {
@@ -59,6 +60,7 @@ function suggestionContext(body: unknown): StepSuggestionsRequest {
     ancestorTitles: ancestorTitles.map((title) => title.trim()),
     existingStepTitles: existingStepTitles.map((title) => title.trim()),
     ...(focus === undefined ? {} : { focus: focus.trim() }),
+    ...(maxSuggestions === undefined ? {} : { maxSuggestions }),
   };
 }
 
