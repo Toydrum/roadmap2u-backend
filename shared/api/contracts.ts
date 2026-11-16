@@ -863,12 +863,25 @@ export interface FamilyLinkView {
 /** One call paints the whole account section. */
 export interface MeResponse {
   profile: UserProfile;
+  stepSuggestionsPilot?: true;
   family: {
     /** People who guard me. */
     guardians: FamilyLinkView[];
     /** People I guard. */
     minors: FamilyLinkView[];
   };
+}
+
+export interface StepSuggestionsRequest {
+  language: 'es' | 'en';
+  treeTitle: string;
+  branchTitle: string;
+  ancestorTitles: string[];
+  existingStepTitles: string[];
+}
+
+export interface StepSuggestionsResponse {
+  suggestions: [string, string, string];
 }
 
 export interface CreateChildRequest {
@@ -1048,6 +1061,7 @@ export const SERVER_API_ERROR_CODES = Object.freeze([
   'CODE_EXPIRED',
   'LIMIT_EXCEEDED',
   'RATE_LIMITED',
+  'STEP_SUGGESTIONS_UNAVAILABLE',
   'SYNC_TOO_OLD', // client schemaVersion newer than the server understands
   'QUOTA_EXCEEDED',
   'CAPABILITY_REQUIRED',
@@ -1149,6 +1163,7 @@ export interface RoadmapApi {
 
   // me
   getMe(): Promise<MeResponse>;
+  suggestSteps(request: StepSuggestionsRequest): Promise<StepSuggestionsResponse>;
   patchMe(patch: { displayName?: string }): Promise<UserProfile>;
   deleteMe(): Promise<AccountClosureReceipt>;
 
@@ -1261,6 +1276,7 @@ export const API_PATHS = Object.freeze({
   access: '/access',
   accessCodesRedeem: '/access-codes/redeem',
   me: '/me',
+  stepSuggestions: '/ai/step-suggestions',
   familyChildren: '/family/children',
   familyChild: (id: string) => `/family/children/${id}`,
   familyChildResetPassword: (id: string) => `/family/children/${id}/reset-password`,

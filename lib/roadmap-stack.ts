@@ -43,6 +43,7 @@ import { PASSWORD_POLICY } from '@app/auth/auth-types';
 import {
   createStageManagedPolicies,
   hasAccessCodeHmacSecret,
+  novaMicroPilotModelArn,
   usesAccessCodeSsm,
 } from './stage-policies';
 import { createCommercialObservability } from './commercial-observability';
@@ -1179,12 +1180,30 @@ export class RoadmapStack extends Stack {
         ACCOUNT_CLOSURE_QUEUE_URL: accountClosureQueue.queueUrl,
         COMMERCIAL_STAGE: stage,
       },
-      bundling: {
-        format: OutputFormat.ESM,
-        tsconfig: join(here, '../tsconfig.json'),
-        target: 'node22',
-      },
+      bundling: stage === 'dev'
+        ? bundledAwsSdkEsm(join(here, '../tsconfig.json'))
+        : {
+            format: OutputFormat.ESM,
+            tsconfig: join(here, '../tsconfig.json'),
+            target: 'node22',
+          },
     });
+    if (stage === 'dev') {
+      const pilotSubjects = new CfnParameter(this, 'TaskSuggestionsPilotSubjects', {
+        type: 'String',
+        default: '',
+        noEcho: true,
+        description: 'Cognito subjects admitted to the task suggestions pilot.',
+      });
+      router.addEnvironment('TASK_SUGGESTIONS_PILOT_SUBS', pilotSubjects.valueAsString);
+      routerRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'InvokeOnlyNovaMicroPilot',
+          actions: ['bedrock:InvokeModel'],
+          resources: [novaMicroPilotModelArn(this)],
+        }),
+      );
+    }
     routerRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'RouterPrimaryDataAccess',
@@ -1701,6 +1720,14 @@ export class RoadmapStack extends Stack {
     accountClosureRequest.addEnvironment('ADULT_PRIVACY_MODE', adultPrivacyMode.valueAsString);
     grantPrivacy(accountClosureRequestRole, []);
     const routerIntegration = new HttpLambdaIntegration('RouterIntegration', router);
+    const [stepSuggestionsRoute] = stage === 'dev'
+      ? api.addRoutes({
+          path: '/v1/ai/step-suggestions',
+          methods: [apigatewayv2.HttpMethod.POST],
+          integration: routerIntegration,
+          authorizer,
+        })
+      : [];
     for (const [path, method] of [
       ['/v1/privacy/status', apigatewayv2.HttpMethod.GET],
       ['/v1/privacy/consents', apigatewayv2.HttpMethod.POST],
@@ -1777,7 +1804,15 @@ export class RoadmapStack extends Stack {
       },
       'POST /v1/billing/individual/checkout': { ThrottlingBurstLimit: 5, ThrottlingRateLimit: 2 },
       'POST /v1/billing/individual/portal': { ThrottlingBurstLimit: 5, ThrottlingRateLimit: 2 },
+      ...(stepSuggestionsRoute
+        ? {
+            'POST /v1/ai/step-suggestions': { ThrottlingBurstLimit: 5, ThrottlingRateLimit: 2 },
+          }
+        : {}),
     };
+    if (stepSuggestionsRoute) {
+      cfnDefaultStage.addDependency(stepSuggestionsRoute.node.defaultChild as apigatewayv2.CfnRoute);
+    }
 
     const apiAlias = route53.RecordTarget.fromAlias(
       new ApiGatewayv2DomainProperties(

@@ -165,6 +165,10 @@ export const K = {
   }),
   chg: (syncedAt: number, id: string) => `CHG#${String(syncedAt).padStart(14, '0')}#${id}`,
   rate: (userId: string, bucket: number) => ({ pk: `USER#${userId}`, sk: `RATE#codes#${bucket}` }),
+  stepSuggestionsRate: (userId: string, utcDay: string) => ({
+    pk: `USER#${userId}`,
+    sk: `RATE#STEP_SUGGESTIONS#${utcDay}`,
+  }),
 };
 
 /** Opaque-to-the-client composite ids — parseable server-side for addressing. */

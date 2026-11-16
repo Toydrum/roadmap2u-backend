@@ -537,11 +537,19 @@ jobs:
       - name: Deploy selected stage
         env:
           ALARM_NOTIFICATION_EMAIL: ${{ secrets.ALARM_NOTIFICATION_EMAIL }}
+          TASK_SUGGESTIONS_PILOT_SUBS: ${{ secrets.TASK_SUGGESTIONS_PILOT_SUBS }}
         run: |
           set -euo pipefail
           mapfile -t PRIVACY_ARGS < <(jq -r '.parameters[]' privacy-deployment.json)
+          PILOT_ARGS=()
+          if [[ "$STAGE" == dev ]]; then
+            SUPPORTS_PILOT="$(jq -r '(.Parameters // {}) | has("TaskSuggestionsPilotSubjects")' "cdk.out/Roadmap-${STAGE}-Backend.template.json")"
+            if [[ "$SUPPORTS_PILOT" == true ]]; then
+              PILOT_ARGS=(--parameters "Roadmap-${STAGE}-Backend:TaskSuggestionsPilotSubjects=${TASK_SUGGESTIONS_PILOT_SUBS}")
+            fi
+          fi
           FORCE_ARGS=()
-          if [[ ${#PRIVACY_ARGS[@]} -gt 0 ]]; then FORCE_ARGS=(--force); fi
+          if [[ ${#PRIVACY_ARGS[@]} -gt 0 || ${#PILOT_ARGS[@]} -gt 0 ]]; then FORCE_ARGS=(--force); fi
           npx --no-install cdk deploy \
             "Roadmap-${STAGE}-Backend" "Roadmap-${STAGE}-Hosting" \
             --require-approval never \
@@ -550,7 +558,7 @@ jobs:
             -c AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}" \
             -c HOSTED_ZONE_ID="${HOSTED_ZONE_ID}" \
             --parameters "Roadmap-${STAGE}-Backend:AlarmNotificationEmail=${ALARM_NOTIFICATION_EMAIL}" \
-            "${PRIVACY_ARGS[@]}" "${FORCE_ARGS[@]}"
+            "${PRIVACY_ARGS[@]}" "${PILOT_ARGS[@]}" "${FORCE_ARGS[@]}"
 
       - name: Verify deployed privacy modes
         run: |
