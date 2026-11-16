@@ -879,10 +879,11 @@ export interface StepSuggestionsRequest {
   ancestorTitles: string[];
   existingStepTitles: string[];
   focus?: string;
+  maxSuggestions?: 1;
 }
 
 export interface StepSuggestionsResponse {
-  suggestions: [string, string, string];
+  suggestions: [string] | [string, string, string];
 }
 
 export interface CreateChildRequest {

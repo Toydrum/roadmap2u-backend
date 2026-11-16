@@ -138,6 +138,61 @@ describe('step suggestions pilot', () => {
     expect(JSON.stringify(vi.mocked(console.info).mock.calls)).not.toContain(context.focus);
   });
 
+  it('asks for and returns exactly one actionable title when the client requests one', async () => {
+    const context = { ...request, treeTitle: 'Escritura', branchTitle: 'Escritura',
+      ancestorTitles: [], existingStepTitles: ['Abrir el programa'] };
+    const suggestion = 'Escribir la primera oración del borrador';
+    converse.mockResolvedValue(modelResponse([suggestion]));
+
+    const response = await handleEvent(event(JSON.stringify({ ...context, maxSuggestions: 1 })), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: [suggestion] });
+    expect(converse).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      input: expect.objectContaining({
+        system: [{ text: expect.stringContaining('single best next action') }],
+        messages: [{ role: 'user', content: [{ text: JSON.stringify(context) }] }],
+      }),
+    }), expect.anything());
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
+  it('rejects three titles from the model in single-step mode without retrying', async () => {
+    const response = await handleEvent(event(JSON.stringify({ ...request, maxSuggestions: 1 })), deps());
+    expect(response.statusCode).toBe(503);
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['es', 'Estoy de pie en agua baja. Sin sumergirme.', 'Sumergir la cabeza un momento'],
+    ['es', 'Estoy de pie en agua baja. Sin sumergirme.', 'Respira sin prisa y luego sumérgete'],
+    ['es', 'Mover solo los iconos. No borrar aplicaciones.', 'Borrar una aplicación que no uso'],
+    ['es', 'Mover solo los iconos. Sin borrar nada.', 'Mover un icono y borrar otro'],
+    ['en', 'Move the icons without deleting any apps.', 'Delete an unused app'],
+    ['en', 'Rearrange the desk. Do not move the laptop.', 'Move the laptop to the shelf'],
+  ])('withholds a title that contains an explicit prohibited action (%s)', async (language, focus, suggestion) => {
+    converse.mockResolvedValue(modelResponse([suggestion]));
+    const body = JSON.stringify({ ...request, language, focus, maxSuggestions: 1 });
+    const response = await handleEvent(event(body), deps());
+
+    expect(response.statusCode).toBe(503);
+    expect(response.body).not.toContain(suggestion);
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['es', 'Estoy de pie en agua baja. Sin sumergirme.', 'Practicar mi equilibrio sin sumergirme'],
+    ['es', 'No mover el escritorio.', 'Mover un cuaderno al cajón'],
+    ['en', 'Move the icons. Do not delete apps.', 'Move one icon without deleting an app'],
+  ])('allows an action in a different scope or one that keeps the constraint (%s)', async (language, focus, suggestion) => {
+    converse.mockResolvedValue(modelResponse([suggestion]));
+    const body = JSON.stringify({ ...request, language, focus, maxSuggestions: 1 });
+    const response = await handleEvent(event(body), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: [suggestion] });
+  });
+
   it('exposes eligibility through /me only to a selected account in dev', async () => {
     const request = event('', owner, '/v1/me', 'GET');
     expect(JSON.parse((await handleEvent(request, deps())).body).stepSuggestionsPilot).toBe(true);
@@ -201,6 +256,10 @@ describe('step suggestions pilot', () => {
     JSON.stringify({ ...request, focus: 'first line\nsecond line' }),
     JSON.stringify({ ...request, focus: 'f'.repeat(81) }),
     JSON.stringify({ ...request, focus: 1 }),
+    JSON.stringify({ ...request, maxSuggestions: 3 }),
+    JSON.stringify({ ...request, maxSuggestions: '1' }),
+    JSON.stringify({ ...request, maxSuggestions: null }),
+    JSON.stringify({ ...request, maxSuggestions: 1, notes: 'private' }),
     JSON.stringify({ ...request, language: 'fr' }),
     JSON.stringify({ ...request, ancestorTitles: ['1', '2', '3', '4'] }),
     JSON.stringify({ ...request, treeTitle: 'a'.repeat(81) }),
