@@ -1,6 +1,7 @@
 import type { BedrockRuntimeClient, ConverseCommandOutput } from '@aws-sdk/client-bedrock-runtime';
 import { ApiError, type StepSuggestionsRequest, type StepSuggestionsResponse } from '@app/api/contracts';
 import { contradictsFocus } from './focus-constraints';
+import { EXERCISE_PROMPT, practiceExerciseFromContext, renderPracticeExercise, usesPracticeExercise } from './practice-exercises';
 
 const MODEL_ID = 'amazon.nova-micro-v1:0';
 const STEP_TITLE_LIMIT = 80;
@@ -43,7 +44,10 @@ function parseSuggestions(text: string, request: StepSuggestionsRequest): StepSu
   if (!response || typeof response !== 'object' || Object.keys(response).length !== 1 || !('suggestions' in response)) {
     throw new Error('unexpected suggestion response shape');
   }
-  const suggestions = response.suggestions;
+  return validateSuggestions(response.suggestions, request);
+}
+
+function validateSuggestions(suggestions: unknown, request: StepSuggestionsRequest): StepSuggestionsResponse {
   const expectedCount = request.maxSuggestions ?? 3;
   if (!Array.isArray(suggestions) || suggestions.length !== expectedCount) {
     throw new Error('unexpected suggestion count');
@@ -68,12 +72,19 @@ export async function generateStepSuggestions(request: StepSuggestionsRequest): 
   let usage: ConverseCommandOutput['usage'];
   let status = 'unavailable';
   const { maxSuggestions, ...context } = request;
+  const practice = usesPracticeExercise(request);
   try {
+    const fromContext = practice ? practiceExerciseFromContext(request) : null;
+    if (fromContext) {
+      const result = validateSuggestions([fromContext], request);
+      status = 'ok';
+      return result;
+    }
     const { BedrockRuntimeClient, ConverseCommand } = await import('@aws-sdk/client-bedrock-runtime');
     client ??= new BedrockRuntimeClient({ region: 'us-east-1', maxAttempts: 1 });
     const output = await client.send(new ConverseCommand({
       modelId: MODEL_ID,
-      system: [{ text: maxSuggestions === 1 ? SINGLE_STEP_PROMPT : SYSTEM_PROMPT }],
+      system: [{ text: practice ? EXERCISE_PROMPT : maxSuggestions === 1 ? SINGLE_STEP_PROMPT : SYSTEM_PROMPT }],
       messages: [{ role: 'user', content: [{ text: JSON.stringify(context) }] }],
       inferenceConfig: { maxTokens: 120, temperature: 0.2 },
     }), { abortSignal: AbortSignal.timeout(5_000) });
@@ -83,7 +94,8 @@ export async function generateStepSuggestions(request: StepSuggestionsRequest): 
     if (output.stopReason !== 'end_turn' || content?.length !== 1 || !content[0]?.text) {
       throw new Error('incomplete suggestion response');
     }
-    const result = parseSuggestions(content[0].text, request);
+    const result = practice ? validateSuggestions([renderPracticeExercise(content[0].text, request)], request) :
+      parseSuggestions(content[0].text, request);
     status = 'ok';
     return result;
   } catch {

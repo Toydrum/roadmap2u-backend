@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ApiError, type StepSuggestionsRequest, type StepSuggestionsResponse } from '@app/api/contracts';
 import { generateStepSuggestions, isStepTitle } from '../ai/nova-step-suggestions';
+import { needsPracticeFocus } from '../ai/practice-exercises';
 import { type Ctx, closureAbsenceConditionCheck, writableProfileConditionCheck } from '../authz';
 import { K, TransactWriteCommand } from '../db';
 import { parseJsonBody } from '../http';
@@ -108,6 +109,7 @@ async function reserveDailyAttempt(ctx: Ctx): Promise<void> {
 
 export async function suggestSteps(ctx: Ctx, body: unknown): Promise<StepSuggestionsResponse> {
   const context = suggestionContext(body);
+  if (needsPracticeFocus(context)) throw new ApiError('VALIDATION', 'practice focus required');
   try {
     await requireOwnAccountAdmission(ctx);
   } catch (error) {
