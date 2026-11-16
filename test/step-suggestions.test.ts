@@ -165,11 +165,13 @@ describe('step suggestions pilot', () => {
 
   it.each([
     ['es', 'Estoy de pie en agua baja. Sin sumergirme.', 'Sumergir la cabeza un momento'],
-    ['es', 'Estoy de pie en agua baja. Sin sumergirme.', 'Respira sin prisa y luego sumérgete'],
+    ['es', 'Sin sumergirme y sin soltar el borde.', 'Respira sin prisa y sumérgete'],
     ['es', 'Mover solo los iconos. No borrar aplicaciones.', 'Borrar una aplicación que no uso'],
     ['es', 'Mover solo los iconos. Sin borrar nada.', 'Mover un icono y borrar otro'],
+    ['es', 'No borres fotos.', 'Borrar una foto antigua'],
     ['en', 'Move the icons without deleting any apps.', 'Delete an unused app'],
     ['en', 'Rearrange the desk. Do not move the laptop.', 'Move the laptop to the shelf'],
+    ['en', 'Do not delete photos and do not open settings.', 'Delete a photo'],
   ])('withholds a title that contains an explicit prohibited action (%s)', async (language, focus, suggestion) => {
     converse.mockResolvedValue(modelResponse([suggestion]));
     const body = JSON.stringify({ ...request, language, focus, maxSuggestions: 1 });
