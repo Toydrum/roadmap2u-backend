@@ -15,12 +15,12 @@ export const EXERCISE_PROMPT = [
   'Respect focus limits and do not repeat an existing step. Choose only an exercise that can be started from the supplied context and completed in minutes. If none is suitable or the task would cause harm, return {"kind":"unavailable"}. Return only JSON.',
 ].join(' ');
 
-function normalized(text: string): string {
-  return text.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase();
+function normalized(text: string, form: 'NFC' | 'NFKC' = 'NFC'): string {
+  return text.normalize(form).trim().replace(/\s+/gu, ' ').toLowerCase();
 }
 
 export function isLearningTitle(title: string): boolean {
-  return LEARNING_TITLE.test(normalized(title));
+  return LEARNING_TITLE.test(normalized(title, 'NFKC'));
 }
 
 export function usesPracticeExercise(request: StepSuggestionsRequest): boolean {
@@ -28,7 +28,7 @@ export function usesPracticeExercise(request: StepSuggestionsRequest): boolean {
 }
 
 export function needsPracticeFocus(request: StepSuggestionsRequest): boolean {
-  return usesPracticeExercise(request) && normalized(request.treeTitle) === normalized(request.branchTitle) &&
+  return usesPracticeExercise(request) && normalized(request.treeTitle, 'NFKC') === normalized(request.branchTitle, 'NFKC') &&
     request.ancestorTitles.length === 0 && request.existingStepTitles.length === 0 && !request.focus;
 }
 
@@ -53,13 +53,22 @@ function readAnchor(value: unknown, sources: string[]): string {
 }
 
 function namedStartingPoint(request: StepSuggestionsRequest): readonly [string, string] | null {
-  if (!MOVEMENT_GOAL.test(`${request.branchTitle} ${request.focus ?? ''}`)) return null;
+  const goals = [request.branchTitle, request.focus ?? '']
+    .flatMap((source) => source.split(/[.!?]/u)).filter((goal) => MOVEMENT_GOAL.test(goal));
+  if (!goals.length) return null;
   const statements = [request.focus ?? '', ...request.existingStepTitles].flatMap((source) => source.split(/[.!?]/u));
+  let start: readonly [string, string] | null = null;
   for (const statement of statements) {
     const match = NAMED_START.exec(statement.trim());
-    if (match) return [match[1]!, match[2]!];
+    if (!match) continue;
+    const subject = match[1]!;
+    const reference = match[2]!;
+    const object = subject.replace(/^(?:un|una|el|la|a|an|the)\s+/iu, '');
+    if (!goals.some((goal) => containsFragment(goal, object))) continue;
+    if (start && (normalized(start[0]) !== normalized(subject) || normalized(start[1]) !== normalized(reference))) return null;
+    start = [subject, reference];
   }
-  return null;
+  return start;
 }
 
 function withDestinations(subject: string, reference: string, es: boolean): string {
@@ -97,8 +106,8 @@ export function renderPracticeExercise(text: string, request: StepSuggestionsReq
     const prepositions = es ? ['en', 'desde'] : ['at', 'on', 'from', 'in'];
     const positions = [request.focus ?? '', ...request.existingStepTitles];
     if (!/^\p{L}+(?: \p{L}+){0,4}$/u.test(target) || !/^[a-z0-9]{1,8}$/iu.test(other) || !/[0-9]/u.test(other) ||
-        !positions.some((source) => containsFragment(source, target) &&
-          prepositions.some((word) => containsFragment(source, `${word} ${other}`)))) {
+        !positions.some((source) =>
+          prepositions.some((word) => containsFragment(source, `${target} ${word} ${other}`)))) {
       throw new Error('starting point missing from supplied context');
     }
   }

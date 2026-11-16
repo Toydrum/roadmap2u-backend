@@ -195,6 +195,17 @@ describe('step suggestions pilot', () => {
     expect(converse).not.toHaveBeenCalled();
   });
 
+  it('uses the object named in the movement goal when several starting points are supplied', async () => {
+    const response = await handleEvent(event(JSON.stringify({
+      ...knightRequest, branchTitle: 'Practicar el movimiento de la torre', existingStepTitles: [],
+      focus: 'Un caballo en d4. Una torre en f6.',
+    })), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Marcar dos destinos para una torre desde f6'] });
+    expect(converse).not.toHaveBeenCalled();
+  });
+
   it('renders a movement exercise from model-selected anchors in the existing step', async () => {
     converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify({
       kind: 'destinations', subject: 'un caballo', reference: 'd4',
@@ -226,6 +237,18 @@ describe('step suggestions pilot', () => {
     expect(converse).toHaveBeenCalledOnce();
   });
 
+  it('rejects an exercise that pairs one object with the position of another', async () => {
+    converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify({
+      kind: 'destinations', subject: 'un caballo', reference: 'f6',
+    }) }] } } });
+    const response = await handleEvent(event(JSON.stringify({
+      ...knightRequest, existingStepTitles: [], focus: 'Practicar movimiento: un caballo en d4 y una torre en f6.',
+    })), deps());
+
+    expect(response.statusCode).toBe(503);
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
   it('poses a math exercise using the operands provided by the user', async () => {
     converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify({
       kind: 'compare', subject: '1/2', reference: '3/4',
@@ -237,6 +260,19 @@ describe('step suggestions pilot', () => {
 
     expect(response.statusCode).toBe(200);
     expect(JSON.parse(response.body)).toEqual({ suggestions: ['Comparar 1/2 y 3/4 y anotar una diferencia'] });
+  });
+
+  it('does not accept a replacement that changes the mathematical notation', async () => {
+    converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify({
+      kind: 'compare', subject: '22', reference: '3',
+    }) }] } } });
+    const response = await handleEvent(event(JSON.stringify({
+      ...knightRequest, treeTitle: 'Aprender matemáticas', branchTitle: 'Aprender matemáticas',
+      existingStepTitles: [], focus: 'Comparar 2² y 3',
+    })), deps());
+
+    expect(response.statusCode).toBe(503);
+    expect(converse).toHaveBeenCalledOnce();
   });
 
   it.each([
