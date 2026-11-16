@@ -25,6 +25,10 @@ const request = {
   ancestorTitles: ['Elegir objetos'],
   existingStepTitles: ['Preparar una servilleta'],
 };
+const knightRequest = {
+  language: 'es', treeTitle: 'Aprender ajedrez', branchTitle: 'Practicar el movimiento del caballo',
+  ancestorTitles: [], existingStepTitles: ['Poner un caballo en d4'], maxSuggestions: 1,
+};
 const titles = ['Sacar una bolsa', 'Colocar los platos', 'Agregar un vaso'];
 const ddb = mockClient(DynamoDBDocumentClient);
 
@@ -161,6 +165,78 @@ describe('step suggestions pilot', () => {
     const response = await handleEvent(event(JSON.stringify({ ...request, maxSuggestions: 1 })), deps());
     expect(response.statusCode).toBe(503);
     expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it('requests focus for an empty learning root before spending quota', async () => {
+    const response = await handleEvent(event(JSON.stringify({
+      ...knightRequest, branchTitle: 'Aprender ajedrez', existingStepTitles: [],
+    })), deps());
+
+    expect(response.statusCode).toBe(400);
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    expect(converse).not.toHaveBeenCalled();
+  });
+
+  it('keeps the legacy three-title request compatible on a learning root', async () => {
+    const { maxSuggestions: _maxSuggestions, ...legacy } = knightRequest;
+    const response = await handleEvent(event(JSON.stringify({
+      ...legacy, branchTitle: 'Aprender ajedrez', existingStepTitles: [],
+    })), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: titles });
+  });
+
+  it('renders a movement exercise from a stated starting point without calling the model', async () => {
+    const response = await handleEvent(event(JSON.stringify(knightRequest)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Marcar dos destinos para un caballo desde d4'] });
+    expect(converse).not.toHaveBeenCalled();
+  });
+
+  it('renders a movement exercise from model-selected anchors in the existing step', async () => {
+    converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify({
+      kind: 'destinations', subject: 'un caballo', reference: 'd4',
+    }) }] } } });
+
+    const response = await handleEvent(event(JSON.stringify({
+      ...knightRequest, existingStepTitles: ['Ya hay un caballo en d4'],
+    })), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Marcar dos destinos para un caballo desde d4'] });
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { suggestions: ['Mover el caballo a f6'] },
+    { kind: 'destinations', subject: 'un caballo', reference: 'f6' },
+    { kind: 'destinations', subject: 'un caballo', reference: 'd4', answer: 'f6' },
+    { kind: 'find', subject: 'caballo en d4 o f6' },
+    { kind: 'compare', subject: 'd4', reference: 'd4' },
+  ])('withholds an ungrounded or non-exercise model payload (%j)', async (payload) => {
+    converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify(payload) }] } } });
+    const response = await handleEvent(event(JSON.stringify({
+      ...knightRequest, existingStepTitles: ['Ya hay un caballo en d4'],
+    })), deps());
+
+    expect(response.statusCode).toBe(503);
+    expect(response.body).not.toContain('f6');
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it('poses a math exercise using the operands provided by the user', async () => {
+    converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify({
+      kind: 'compare', subject: '1/2', reference: '3/4',
+    }) }] } } });
+    const response = await handleEvent(event(JSON.stringify({
+      ...knightRequest, treeTitle: 'Aprender matemáticas', branchTitle: 'Aprender matemáticas',
+      existingStepTitles: [], focus: 'Comparar 1/2 y 3/4 sin usar decimales',
+    })), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Comparar 1/2 y 3/4 y anotar una diferencia'] });
   });
 
   it.each([
