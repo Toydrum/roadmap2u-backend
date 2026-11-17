@@ -8,12 +8,19 @@ type ObjectContext = { relations: Relation[]; absent: string[]; action?: Action;
 const PREPOSITIONS = 'dentro de|dentro del|junto a|al lado de|debajo de|encima de|next to|inside|under|beside|into|onto|sobre|en|a|al|in|on|to|at';
 const LOCATION = new RegExp(`^(.+?) (?:está|están|is|are) (${PREPOSITIONS}) (.+)$`, 'iu');
 const DESTINATION = new RegExp(`^(.+?) (?:va|van|goes|go|belongs?) (${PREPOSITIONS}) (.+)$`, 'iu');
-const ACTION = /^(?:(ahora|now)\s+)?(?:(?:quiero|necesito|i want to|i need to)\s+)?(put away|set aside|put|place|move|transfer|store|remove|take|write|draft|fold|copy|record|log|note|list|guardar|poner|colocar|mover|trasladar|retirar|sacar|llevar|escribir|redactar|doblar|copiar|anotar|registrar|apuntar)\s+(.+)$/iu;
+const ACTION = /^(?:(ahora|now)\s+)?(?:(?:quiero|necesito|i want to|i need to)\s+)?(put away|set aside|put|place|move|transfer|store|remove|take|write|draft|fold|copy|record|log|note|list|add|append|crop|glue|guardar|poner|colocar|mover|trasladar|retirar|sacar|llevar|escribir|redactar|doblar|copiar|anotar|registrar|apuntar|añadir|agregar|recortar|pegar)\s+(.+)$/iu;
 const TRANSFER = /^(?:guardar|poner|colocar|mover|trasladar|llevar|put away|put|place|move|transfer|store)$/iu;
 const REMOVE = /^(?:retirar|sacar|remove|take)$/iu;
 const WRITE = /^(?:escribir|redactar|write|draft)$/iu;
 const RECORD = /^(?:anotar|registrar|apuntar|record|log|note|list)$/iu;
 const COPY = /^(?:copiar|copy)$/iu;
+const APPEND = /^(?:añadir|agregar|add|append)$/iu;
+const CROP = /^(?:recortar|crop)$/iu;
+const GLUE = /^(?:pegar|glue)$/iu;
+const IMAGE = /^(?:(?:la|una|el|un|the|a|an)\s+)?(?:foto|fotografía|imagen|retrato|photo|photograph|image|portrait)$/iu;
+const PAPER_OBJECT = /\b(?:de papel|paper)\b/iu;
+const NAMED_TEXT = /^(?:(?:el|un|the|a)\s+)?(?:nombre|name)\s+\p{L}/iu;
+const WRITTEN_ARTIFACT = /^(?:(?:la|una|el|un|the|a|an)\s+)?(introducción|invitación|conclusión|nota|carta|introduction|invitation|conclusion|note|letter)$/iu;
 const FILE_OBJECT = /\b(?:archivo|documento|file|document)\b|\.[a-z][a-z0-9]{0,9}(?:\b|$)/iu;
 const OBJECT_TARGET = new RegExp(`^(.+?) (${PREPOSITIONS}) (.+)$`, 'iu');
 const SOURCE = /^(?:de(?:l)?|desde|from|off|out of) (.+)$/iu;
@@ -23,6 +30,7 @@ const COMPOUND = /\s+(?:y|y después|y luego|and|and then|then)\s+(?:\p{L}+(?:ar
 const LARGE_UNIT = /\b(?:todo|toda|todos|todas|completo|completa|completos|completas|all|entire|whole|complete)\b/iu;
 const ARRANGE = /^(?:ordenar|recoger|acomodar|despejar|organizar|guardar|poner|colocar|mover|tidy|organize|organise|clear|declutter|put|place|store|move)\b/iu;
 const PRESERVE = /^(?:conservar|mantener|keep|leave)\s+(.+)$/iu;
+const RESTRICTION = /(?:^|[, ]+)((?:sin|without)\s+.+|(?:solo|solamente|only)\s+(?:con|en|por|with|in|on|using)\s+.+|no\s+\p{L}+(?:ar|er|ir)\s+.+|(?:do not|don't|don’t)\s+.+)$/iu;
 // A bare "use X" is normally a tool/medium. Only explicit destination wording or
 // an ordinary storage place/surface can resolve it as the target of a move.
 const STORAGE_PLACE = /^(?:(?:el|la|un|una|the|a|an|my|mi)\s+)?(?:caja|cajón|repisa|estante|estantería|armario|cesto|bolsa|mesa|escritorio|estuche|mochila|maleta|box|drawer|shelf|closet|cabinet|basket|bag|table|desk|case|backpack|suitcase)\b/iu;
@@ -71,6 +79,10 @@ function lowerArticle(text: string): string {
 }
 
 function splitAction(verb: string, remainder: string, current: boolean): Action {
+  const purpose = CROP.test(verb) ? /^(.+?)\s+((?:para (?:quitar|retirar|eliminar)|to remove)\s+.+)$/iu.exec(remainder) : null;
+  if (purpose) return { verb, object: purpose[1]!, target: purpose[2]!, current };
+  const writing = WRITE.test(verb) ? /^(.+?)\s+((?:about|for)\s+.+)$/iu.exec(remainder) : null;
+  if (writing) return { verb, object: writing[1]!, target: writing[2]!, current };
   const removal = /^(move|take|remove)$/iu.test(verb) ? /^(.+?)\s+(off|out of|from)\s+(.+)$/iu.exec(remainder) : null;
   if (removal && (verb.toLowerCase() !== 'move' || removal[2]!.toLowerCase() !== 'from')) {
     return { verb: 'Remove', object: removal[1]!, target: `from ${removal[3]}`, current: true };
@@ -112,11 +124,36 @@ function uniqueObjects(relations: Relation[]): string[] {
   return [...new Map(relations.map((relation) => [key(relation.object), relation.object])).values()];
 }
 
+/** A single sentence is a bounded unit of an explicitly requested written artifact. */
+export function ordinaryWritingUnit(object: string, language: 'es' | 'en'): string | undefined {
+  const artifact = WRITTEN_ARTIFACT.exec(object)?.[1];
+  if (!artifact) return undefined;
+  return language === 'es' ? `una frase de la ${artifact}` : `one sentence of the ${artifact}`;
+}
+
+function continuedStatements(text: string): string[] {
+  const parts: string[] = [];
+  for (const part of relationStatements(text)) {
+    if (/^(?:después|luego|then)\s+/iu.test(part) && parts.length && parsedAction(parts.at(-1)!)) {
+      parts[parts.length - 1] += ` ${part}`;
+    } else parts.push(part);
+  }
+  return parts;
+}
+
+function localDetailsUnderstood(request: StepSuggestionsRequest): boolean {
+  return continuedStatements(request.focus ?? '').every((clause) => Boolean(
+    parsedAction(clause) || PRESERVE.test(clause) || RESTRICTION.test(clause) || LOCATION.test(clause) || DESTINATION.test(clause) ||
+    /^(?:usar|use)\s+/iu.test(clause) ||
+    /^(?:no (?:hay|tengo|tenemos)|there (?:is|are) no|i (?:do not|don't|don’t) have)\s+/iu.test(clause)
+  ));
+}
+
 /** Resolve only explicit ordinary-language relations; unknown clauses remain model context. */
 function objectContext(request: StepSuggestionsRequest): ObjectContext {
   const result: ObjectContext = { relations: [], absent: [], limited: false };
-  const clauses = [...request.ancestorTitles.flatMap(relationStatements), ...relationStatements(request.branchTitle),
-    ...relationStatements(request.focus ?? '')];
+  const clauses = [...request.ancestorTitles.flatMap(continuedStatements), ...continuedStatements(request.branchTitle),
+    ...continuedStatements(request.focus ?? '')];
   const actions: Action[] = [];
   let pronoun: { verb: string; target: string } | undefined;
   for (const clause of clauses) {
@@ -124,6 +161,12 @@ function objectContext(request: StepSuggestionsRequest): ObjectContext {
     const unavailable = /^(.+?)\s+(?:no (?:está|están) disponible[s]?|is not available|is unavailable|are unavailable)$/iu.exec(clause);
     if (missing || unavailable) {
       result.absent.push((missing ?? unavailable)![1]!);
+      continue;
+    }
+    const impliedDestination = new RegExp(`^(?:va|van|goes|go|belongs?) (${PREPOSITIONS}) (.+)$`, 'iu').exec(clause);
+    const subjects = uniqueObjects(result.relations);
+    if (impliedDestination && subjects.length === 1) {
+      result.relations.push({ object: subjects[0]!, preposition: impliedDestination[1]!, place: impliedDestination[2]!, role: 'destination' });
       continue;
     }
     const location = LOCATION.exec(clause);
@@ -140,10 +183,14 @@ function objectContext(request: StepSuggestionsRequest): ObjectContext {
       else result.limited = true;
       continue;
     }
-    const referent = /^(gu[aá]rdal[oa]|ponl[oa]|col[oó]cal[oa]|put it|place it|store it)\s+(.+)$/iu.exec(clause);
+    const referent = /^(gu[aá]rdal[oa]|guardarl[oa]|ponl[oa]|ponerl[oa]|col[oó]cal[oa]|colocarl[oa]|put it|place it|store it)\s+(.+)$/iu.exec(clause);
     if (referent) {
       pronoun = { verb: /^(?:gu|store)/iu.test(referent[1]!) ? (request.language === 'es' ? 'Guardar' : 'Store') :
         request.language === 'es' ? 'Poner' : 'Put', target: referent[2]! };
+      if (subjects.length === 1) {
+        actions.push({ ...pronoun, object: subjects[0]!, current: true });
+        pronoun = undefined;
+      }
       continue;
     }
     const sequence = nextSequenceAction(clause, request);
@@ -163,6 +210,12 @@ function objectContext(request: StepSuggestionsRequest): ObjectContext {
   if (!result.action && pronoun && objects.length === 1) result.action = { ...pronoun, object: objects[0]!, current: true };
   if (!result.action && result.chosenPlace && objects.length === 1 && ARRANGE.test(request.branchTitle)) {
     result.action = { verb: request.language === 'es' ? 'Poner' : 'Put', object: objects[0]!, current: true };
+  }
+  const assigned = result.relations.filter((relation) => relation.role === 'destination');
+  if (!result.action && assigned.length === 1 && ARRANGE.test(request.branchTitle)) {
+    const toward = /^(?:a|al|to)$/iu.test(assigned[0]!.preposition);
+    result.action = { verb: request.language === 'es' ? toward ? 'Llevar' : 'Poner' : toward ? 'Move' : 'Put',
+      object: assigned[0]!.object, current: true };
   }
   return result;
 }
@@ -195,20 +248,25 @@ export function relatedObjectiveFromContext(request: StepSuggestionsRequest): st
   const context = objectContext(request);
   const action = context.action;
   const preserveByCopy = action && TRANSFER.test(action.verb) && originalFileMustRemain(action.object, request);
-  if (!action || /^(?:it|this|that)$/iu.test(action.object) || (context.limited && !preserveByCopy) || COMPOUND.test(action.object) || LARGE_UNIT.test(action.object)) return null;
+  const writtenUnit = action && WRITE.test(action.verb) ? ordinaryWritingUnit(action.object, request.language) : undefined;
+  const crop = action && CROP.test(action.verb) && IMAGE.test(action.object) && action.target && /^(?:para (?:quitar|retirar|eliminar)|to remove)\s+/iu.test(action.target);
+  const glue = action && GLUE.test(action.verb) && PAPER_OBJECT.test(action.object) && action.target && /\b(?:con (?:pegamento|cinta)|(?:with|using) (?:glue|tape))\b/iu.test(action.target);
+  if ((writtenUnit || crop || glue) && !localDetailsUnderstood(request)) return null;
+  if (!action || /^(?:it|this|that)$/iu.test(action.object) || (context.limited && !preserveByCopy && !writtenUnit && !crop && !glue) || COMPOUND.test(action.object) || LARGE_UNIT.test(action.object)) return null;
   const verb = preserveByCopy ? (request.language === 'es' ? 'Copiar' : 'Copy') : action.verb;
   let target = action.target;
   if (TRANSFER.test(verb) || COPY.test(verb)) {
     target = explicitTarget(context, request.language);
     if (!target) return null;
-  } else if (!(REMOVE.test(verb) && target && SOURCE.test(target)) &&
+  } else if (!writtenUnit && !crop && !glue && !(APPEND.test(verb) && action.current && NAMED_TEXT.test(action.object)) && !(REMOVE.test(verb) && target && SOURCE.test(target)) &&
       (!action.current || !(RECORD.test(verb) || (WRITE.test(verb) && SMALL_WRITING.test(action.object))))) {
     return null;
   }
-  const title = `${verb[0]!.toUpperCase()}${verb.slice(1)} ${lowerArticle(action.object)}${target ? ` ${target}` : ''}`;
+  const object = writtenUnit ?? action.object;
+  const title = `${verb[0]!.toUpperCase()}${verb.slice(1)} ${lowerArticle(object)}${target ? ` ${target}` : ''}`;
   if (title.length > 80) return null;
   try {
-    validateObjectRelations(verb, action.object, target, request);
+    validateObjectRelations(verb, object, target, request);
     return preserveOrdinaryConstraints(title, request);
   } catch {
     return null;
@@ -217,6 +275,19 @@ export function relatedObjectiveFromContext(request: StepSuggestionsRequest): st
 
 function unavailable(entity: string, context: ObjectContext): boolean {
   return context.absent.some((missing) => sameEntity(missing, entity));
+}
+
+function writingTargetRetained(expected: string, object: string, target: string | undefined): boolean {
+  // The structured fields may put a complete topic in the noun phrase, e.g.
+  // "one line about the address" + "in the update". Keep the whole supplied phrase.
+  if (` ${key(`${object} ${target ?? ''}`)} `.includes(` ${key(expected)} `)) return true;
+  const recipient = /^(?:for|para)\s+(.+)$/iu.exec(expected)?.[1];
+  const container = /^(?:in|en)\s+(.+)$/iu.exec(target ?? '')?.[1];
+  // A sentence for a note can be written in that same note. "About" remains a
+  // topic relation, and a person or arbitrary object is not a writing container.
+  return Boolean(recipient && container &&
+    /\b(?:nota|carta|borrador|introducción|invitación|conclusión|note|letter|draft|introduction|invitation|conclusion)\b/iu.test(recipient) &&
+    sameEntity(recipient, container));
 }
 
 /** Validate relation roles in addition to the caller's literal grounding checks. */
@@ -231,12 +302,24 @@ export function validateObjectRelations(action: string, object: string, target: 
   }
   const explicitAction = current && (current.current || relationStatements(request.focus ?? '').some((clause) => ACTION.test(clause)));
   const compatibleCopy = preserveOriginal && current && TRANSFER.test(current.verb) && COPY.test(action);
+  const writtenUnit = current && WRITE.test(action) && ordinaryWritingUnit(current.object, request.language);
   if (explicitAction && ordinaryActionKey(current.verb) !== ordinaryActionKey(action) && !compatibleCopy) {
     throw new Error('objective changed the current operation');
   }
-  if (current && !sameEntity(current.object, object) &&
+  if (current && !sameEntity(current.object, object) && !(writtenUnit && sameEntity(writtenUnit, object)) &&
       (TRANSFER.test(current.verb) || current.current)) {
     throw new Error('objective changed the current object');
+  }
+  if (current?.target && (WRITE.test(current.verb) || CROP.test(current.verb) || GLUE.test(current.verb))) {
+    // A tool may be appended by the constraint renderer; the named topic/purpose/place must remain.
+    const withoutMedium = (value: string) => GLUE.test(current.verb) ? value.replace(/\s+(?:con|with|using)\s+.+$/iu, '') : value;
+    const retained = WRITE.test(current.verb) ? writingTargetRetained(current.target, object, target) :
+      target && sameEntity(withoutMedium(current.target), withoutMedium(target));
+    if (!retained) {
+      throw new Error('objective changed the supplied topic or purpose');
+    }
+    const medium = GLUE.test(current.verb) ? /\s+(?:con|with|using)\s+(.+)$/iu.exec(current.target)?.[1] : undefined;
+    if (medium && unavailable(medium, context)) throw new Error('objective adhesive is absent');
   }
   if (!target) {
     if ((TRANSFER.test(action) || COPY.test(action)) && context.relations.some((relation) => sameEntity(relation.object, object))) {
@@ -275,16 +358,23 @@ export function ordinaryActionKey(action: string): string {
   if (WRITE.test(action)) return 'write';
   if (RECORD.test(action)) return 'record';
   if (REMOVE.test(action)) return 'remove';
+  if (APPEND.test(action)) return 'append';
   return action.toLowerCase();
 }
 
 /** Keep stated prohibitions/medium constraints with the saved title, even if the model omitted them. */
 export function preserveOrdinaryConstraints(title: string, request: StepSuggestionsRequest): string {
   const sources = [...request.ancestorTitles, request.branchTitle, request.focus ?? ''];
+  const active = objectContext(request).action;
   if (sources.some((source) => contradictsFocus(title, source, request.language))) {
     throw new Error('objective contradicts a supplied restriction');
   }
   const restrictions = sources.flatMap(relationStatements).flatMap((clause) => {
+    const stated = parsedAction(clause);
+    const medium = stated && active && GLUE.test(stated.verb) && GLUE.test(active.verb) &&
+      sameEntity(stated.object, active.object) && stated.target === active.target
+      ? /\s+((?:con|with|using)\s+.+)$/iu.exec(stated.target ?? '')?.[1] : undefined;
+    if (medium) return [medium];
     const resource = /^(?:usar|use)\s+(.+)$/iu.exec(clause)?.[1];
     if (resource && !chosenDestination(resource)) {
       return [`${request.language === 'es' ? 'usando' : 'using'} ${resource}`];
@@ -297,7 +387,7 @@ export function preserveOrdinaryConstraints(title: string, request: StepSuggesti
       }
       return [lowerArticle(clause)];
     }
-    const match = /(?:^|[, ]+)((?:sin|without)\s+.+|(?:solo|solamente|only)\s+(?:con|en|por|with|in|on|using)\s+.+|no\s+\p{L}+(?:ar|er|ir)\s+.+|(?:do not|don't|don’t)\s+.+)$/iu.exec(clause);
+    const match = RESTRICTION.exec(clause);
     return match ? [lowerArticle(match[1]!)] : [];
   });
   const unique = [...new Map(restrictions.map((restriction) => [key(restriction), restriction])).values()];

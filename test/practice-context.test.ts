@@ -64,6 +64,24 @@ describe('practice context fidelity', () => {
     expect(needsPracticeDetail(request('Quiero mejorar un poco'))).toBe(true);
   });
 
+  it.each([
+    'I keep forgetting what I wanted to practice.',
+    'I cannot remember what I want to practice.',
+    'I forgot what I was going to review.',
+    'No recuerdo qué quería practicar.',
+    'Se me olvida qué iba a repasar.',
+  ])('requests clarification for recall of an unspecified practice intention: %s', (focus) => {
+    expect(needsPracticeDetail(request(focus))).toBe(true);
+  });
+
+  it.each([
+    'I keep forgetting the C major chord.',
+    'No recuerdo el acorde de Sol mayor.',
+    'I keep forgetting what C major sounds like.',
+  ])('retains a named practice subject when interpreting memory difficulty: %s', (focus) => {
+    expect(needsPracticeDetail(request(focus))).toBe(false);
+  });
+
   it('rejects speaking a grammar label when the stated activity is writing', () => {
     expect(() => renderPracticeExercise(JSON.stringify({ kind: 'say', subject: 'pasado simple' }),
       request('Me cuesta escribir frases en pasado simple'))).toThrow();
@@ -202,5 +220,81 @@ describe('practice context fidelity', () => {
     expect(practiceExerciseFromContext(context)).toBe('Decir ship y sheep en voz alta');
     expect(renderPracticeExercise(JSON.stringify({ kind: 'say', subject: 'ship y sheep' }), context))
       .toBe('Decir ship y sheep en voz alta');
+  });
+
+  it.each([
+    ['Ubicar Perú en el mapa de Sudamérica que tengo abierto.', 'Ubicar Perú en el mapa de Sudamérica que tengo abierto', 'Perú'],
+    ['Localizar el río Amazonas en el mapa del atlas.', 'Localizar el río Amazonas en el mapa del atlas', 'el río Amazonas'],
+  ])('locates one named item in its supplied visual reference: %s', (focus, title, subject) => {
+    const context = request(focus, { treeTitle: 'Aprender geografía', branchTitle: 'Aprender geografía' });
+    expect(practiceExerciseFromContext(context)).toBe(title);
+    expect(renderPracticeExercise(JSON.stringify({ kind: 'find', subject }), context))
+      .toContain(title.slice(title.indexOf(' en ')));
+  });
+
+  it('retains the supplied diagram when locating a named part in English', () => {
+    const context = request('Locate the stem in the diagram on this page.', {
+      language: 'en', treeTitle: 'Learn botany', branchTitle: 'Learn botany',
+    });
+    expect(practiceExerciseFromContext(context)).toBe('Locate the stem in the diagram on this page');
+    expect(renderPracticeExercise(JSON.stringify({ kind: 'find', subject: 'the stem' }), context))
+      .toBe('Identify the stem in the diagram on this page');
+  });
+
+  it.each([{ existingStepTitles: [] }, { existingStepTitles: ['Locate Peru in the map'] }])('uses the current lookup reference after earlier work: %j', ({ existingStepTitles }) => {
+    const context = request('Locate Peru in the map. Now locate Kenya in the diagram.', {
+      language: 'en', treeTitle: 'Learn geography', existingStepTitles,
+    });
+    expect(practiceExerciseFromContext(context)).toBe('Locate Kenya in the diagram');
+    expect(renderPracticeExercise(JSON.stringify({ kind: 'find', subject: 'Kenya' }), context))
+      .toBe('Identify Kenya in the diagram');
+  });
+
+  it('recognizes equivalent locating verbs as the same represented work', () => {
+    const context = request('Ubicar Perú en el mapa.', { treeTitle: 'Aprender geografía',
+      existingStepTitles: ['Identificar Perú en el mapa'],
+    });
+    expect(practiceExerciseFromContext(context)).toBeNull();
+    expect(() => renderPracticeExercise(JSON.stringify({ kind: 'find', subject: 'Perú' }), context)).toThrow();
+  });
+
+  it.each(['Ubicar todos los países en el mapa', 'Encontrar las ciudades en el mapa', 'Ubicar el cuchillo en el cajón'])
+    ('does not treat a collection or placement as one locating exercise: %s', (focus) => {
+      expect(practiceExerciseFromContext(request(focus))).toBeNull();
+    });
+
+  it('does not promote an English collection to a single reference lookup', () => {
+    expect(practiceExerciseFromContext(request('Find the cities in the map.', {
+      language: 'en', treeTitle: 'Learn geography',
+    }))).toBeNull();
+    expect(practiceExerciseFromContext(request('Locate 20 countries in the map.', {
+      language: 'en', treeTitle: 'Learn geography',
+    }))).toBeNull();
+  });
+
+  it.each([
+    ['I keep forgetting the C major chord.', 'Play the C major chord once'],
+    ['I cannot remember the F sharp minor chord.', 'Play the F sharp minor chord once'],
+    ['I keep forgetting the A note. Use only my left hand.', 'Play the A note once with my left hand only'],
+  ])('turns difficulty remembering a named musical unit into one repetition: %s', (focus, title) => {
+    const context = request(focus, { language: 'en', treeTitle: 'Learn piano', branchTitle: 'Chords' });
+    expect(practiceExerciseFromContext(context)).toBe(title);
+    expect(() => renderPracticeExercise(JSON.stringify({ kind: 'explain', subject: 'chord' }), context)).toThrow();
+  });
+
+  it('handles the same musical recall intent in Spanish', () => {
+    const context = request('Se me olvida el acorde de Sol mayor.', { treeTitle: 'Aprender guitarra' });
+    expect(practiceExerciseFromContext(context)).toBe('Tocar el acorde de Sol mayor una vez');
+  });
+
+  it.each(['I keep forgetting the note from my teacher.', 'I keep forgetting the chords.', 'I keep forgetting my medicine.'])
+    ('does not infer a playable musical unit from unrelated or incomplete recall: %s', (focus) => {
+      expect(practiceExerciseFromContext(request(focus, { language: 'en', treeTitle: 'Learn piano' }))).toBeNull();
+    });
+
+  it('does not repeat an already represented musical recall exercise', () => {
+    expect(practiceExerciseFromContext(request('I keep forgetting the D minor chord.', {
+      language: 'en', treeTitle: 'Learn piano', existingStepTitles: ['Play the D minor chord once'],
+    }))).toBeNull();
   });
 });

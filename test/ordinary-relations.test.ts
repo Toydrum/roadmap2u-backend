@@ -11,6 +11,171 @@ function render(request: StepSuggestionsRequest, action: string, object: string,
 }
 
 describe('ordinary action relationships', () => {
+  it.each([
+    ['No hay bolsas en la banca. La bufanda está en la banca; va al perchero.', 'Llevar la bufanda al perchero'],
+    ['La gorra está sobre la silla. Va en el gancho.', 'Poner la gorra en el gancho'],
+  ])('resolves an omitted destination subject from one named object (%s)', (focus, title) => {
+    const request = context(focus, { branchTitle: 'Despejar la entrada' });
+    expect(ordinaryContextNeeded(request)).toBeNull();
+    expect(ordinaryObjectiveFromContext(request)).toBe(title);
+    expect(() => render(request, 'Mover', 'la bufanda', 'en la banca')).toThrow();
+  });
+
+  it('does not assign an omitted subject when two objects are in scope', () => {
+    const request = context('La gorra está en la silla. La bufanda está en la banca. Va al perchero.');
+    expect(ordinaryObjectiveFromContext(request)).toBeNull();
+  });
+
+  it.each([
+    ['La libreta está en la mesa. Ponerla en el bolsillo grande de la mochila.', 'Poner la libreta en el bolsillo grande de la mochila'],
+    ['El cuaderno está en la silla. Guardarlo en el estante.', 'Guardar el cuaderno en el estante'],
+  ])('resolves an infinitive object pronoun with its complete destination (%s)', (focus, title) => {
+    const request = context(focus, { branchTitle: 'Preparar mi mochila' });
+    expect(ordinaryContextNeeded(request)).toBeNull();
+    expect(ordinaryObjectiveFromContext(request)).toBe(title);
+  });
+
+  it('rejects a substituted pocket after resolving a pronoun', () => {
+    const request = context('La libreta está en la mesa. Ponerla en el bolsillo grande de la mochila.', {
+      branchTitle: 'Preparar mi mochila', ancestorTitles: ['El bolsillo pequeño de la mochila está vacío'],
+    });
+    expect(() => render(request, 'Poner', 'la libreta', 'en el bolsillo pequeño de la mochila')).toThrow();
+  });
+
+  it.each([
+    ['Recortar la foto para quitar el borde. Conservar la cara completa.', 'Recortar la foto para quitar el borde, conservar la cara completa'],
+    ['Recortar la imagen para quitar el margen. Mantener la firma visible.', 'Recortar la imagen para quitar el margen, mantener la firma visible'],
+  ])('keeps a crop purpose and its preservation requirement (%s)', (focus, title) => {
+    expect(ordinaryObjectiveFromContext(context(focus, { branchTitle: 'Editar el retrato' }))).toBe(title);
+  });
+
+  it.each([
+    ['No tengo cinta. Pegar la estrella de papel en la tarjeta con pegamento.', 'Pegar la estrella de papel en la tarjeta con pegamento'],
+    ['Pegar el círculo de papel sobre la hoja con pegamento.', 'Pegar el círculo de papel sobre la hoja con pegamento'],
+  ])('uses an explicitly supplied adhesive without adding a purchase (%s)', (focus, title) => {
+    expect(ordinaryObjectiveFromContext(context(focus, { branchTitle: 'Montar una tarjeta' }))).toBe(title);
+  });
+
+  it('rejects an unavailable adhesive even when its noun appears in the context', () => {
+    const request = context('No tengo cinta. Pegar la estrella de papel en la tarjeta con pegamento.');
+    expect(() => render(request, 'Pegar', 'la estrella de papel', 'en la tarjeta con cinta')).toThrow();
+    expect(() => render(request, 'Comprar', 'cinta', 'en la tienda')).toThrow();
+  });
+
+  it('keeps the supplied adhesive when a structured model response omits it', () => {
+    const request = context('No tengo cinta. Pegar la estrella de papel en la tarjeta con pegamento.');
+    expect(render(request, 'Pegar', 'la estrella de papel', 'en la tarjeta'))
+      .toBe('Pegar la estrella de papel en la tarjeta, con pegamento');
+  });
+
+  it('uses explicitly supplied tape when glue is unavailable', () => {
+    const request = context('No tengo pegamento. Pegar el círculo de papel en el cartel con cinta.');
+    expect(ordinaryObjectiveFromContext(request)).toBe('Pegar el círculo de papel en el cartel con cinta');
+    expect(render(request, 'Pegar', 'el círculo de papel', 'en el cartel'))
+      .toBe('Pegar el círculo de papel en el cartel, con cinta');
+  });
+
+  it('does not use an explicitly absent adhesive in a local paper action', () => {
+    const request = context('No tengo cinta. Pegar el círculo de papel en el cartel con cinta.');
+    expect(ordinaryObjectiveFromContext(request)).toBeNull();
+  });
+
+  it('rejects a crop response that loses the stated removal purpose', () => {
+    const request = context('Recortar la foto para quitar el borde. Conservar la cara completa.');
+    expect(render(request, 'Recortar', 'la foto', 'para quitar el borde'))
+      .toBe('Recortar la foto para quitar el borde, conservar la cara completa');
+    expect(() => render(request, 'Recortar', 'la foto')).toThrow();
+  });
+
+  it('does not return a local collage action with multiple paper objects', () => {
+    const request = context('Pegar todas las estrellas de papel en la tarjeta con pegamento.');
+    expect(ordinaryObjectiveFromContext(request)).toBeNull();
+  });
+
+  it('does not turn an unrelated physical cutting operation into a crop shortcut', () => {
+    const request = context('Recortar la lámina de metal para quitar el borde. Conservar la pintura.');
+    expect(ordinaryObjectiveFromContext(request)).toBeNull();
+  });
+
+  it.each([
+    'Redactar una introducción sobre el reciclaje. Evitar tecnicismos.',
+    'Recortar la foto para quitar el borde. Evitar el área marcada.',
+    'Pegar la estrella de papel en la tarjeta con pegamento. Evitar la zona húmeda.',
+  ])('defers a new local shortcut when a trailing requirement is not understood (%s)', (focus) => {
+    expect(ordinaryObjectiveFromContext(context(focus))).toBeNull();
+  });
+
+  it('does not carry adhesive from an earlier different task into the current action', () => {
+    const request = context('Pegar el círculo de papel en la hoja con cinta. Ahora pegar la estrella de papel en la tarjeta con pegamento.');
+    expect(ordinaryObjectiveFromContext(request)).toBe('Pegar la estrella de papel en la tarjeta con pegamento');
+    expect(render(request, 'Pegar', 'la estrella de papel', 'en la tarjeta'))
+      .toBe('Pegar la estrella de papel en la tarjeta, con pegamento');
+  });
+
+  it.each([
+    ['Redactar una introducción sobre el reciclaje. Solo por escrito.', 'Redactar una frase de la introducción sobre el reciclaje, solo por escrito'],
+    ['Escribir una invitación al picnic. Sin mencionar la hora todavía.', 'Escribir una frase de la invitación al picnic, sin mencionar la hora todavía'],
+    ['Redactar una conclusión sobre el ahorro de agua.', 'Redactar una frase de la conclusión sobre el ahorro de agua'],
+  ])('reduces a named written artifact without inventing a device (%s)', (focus, title) => {
+    const request = context(focus, { branchTitle: 'Preparar un texto' });
+    expect(ordinaryObjectiveFromContext(request)).toBe(title);
+  });
+
+  it('does not drop a writing topic from the model output', () => {
+    const request = context('Redactar una introducción sobre el reciclaje. Solo por escrito.', { branchTitle: 'Preparar mi presentación' });
+    expect(render(request, 'Redactar', 'una frase de la introducción', 'sobre el reciclaje'))
+      .toBe('Redactar una frase de la introducción sobre el reciclaje, solo por escrito');
+    expect(() => render(request, 'Redactar', 'una frase de la introducción')).toThrow();
+    expect(() => render(request, 'Redactar', 'una frase de la introducción', 'en la computadora')).toThrow();
+  });
+
+  it('does not treat part of a writing topic as an optional glue medium', () => {
+    const request = context('Redactar una introducción sobre el reciclaje con ejemplos cotidianos.');
+    expect(() => render(request, 'Redactar', 'una frase de la introducción', 'sobre el reciclaje')).toThrow();
+  });
+
+  it('accepts a complete writing topic carried in the object instead of the target field', () => {
+    const request = context('Write one line about the new delivery address.', {
+      language: 'en', treeTitle: 'Coordinate a handoff', branchTitle: 'Write an update', existingStepTitles: ['Open the update draft'],
+    });
+    expect(render(request, 'write', 'one line about the new delivery address', 'in the update'))
+      .toBe('Write one line about the new delivery address in the update');
+  });
+
+  it('accepts writing in the same artifact that the sentence is explicitly for', () => {
+    const request = context('It is the meeting note. Write one opening sentence for the meeting note.', {
+      language: 'en', treeTitle: 'Finish it', branchTitle: 'Finish it',
+    });
+    expect(render(request, 'write', 'one opening sentence', 'in the meeting note'))
+      .toBe('Write one opening sentence in the meeting note');
+  });
+
+  it('does not replace a writing topic with a different supplied topic across fields', () => {
+    const request = context('Write one line about the new delivery address.', {
+      language: 'en', treeTitle: 'Coordinate a handoff', branchTitle: 'Write an update', ancestorTitles: ['The old delivery address is incorrect'],
+    });
+    expect(() => render(request, 'write', 'one line about the old delivery address', 'in the update')).toThrow();
+  });
+
+  it('does not treat a writing topic as its storage artifact', () => {
+    const request = context('Write one line about the meeting note.', { language: 'en', branchTitle: 'Write an update' });
+    expect(() => render(request, 'write', 'one line', 'in the meeting note')).toThrow();
+  });
+
+  it('continues a sequence split across sentences after the represented greeting', () => {
+    const request = context('Escribir feliz cumpleaños. Después añadir el nombre Ana.', {
+      branchTitle: 'Preparar una felicitación', existingStepTitles: ['Escribir feliz cumpleaños.'],
+    });
+    expect(ordinaryObjectiveFromContext(request)).toBe('Añadir el nombre Ana');
+    expect(render(request, 'añadir', 'el nombre Ana', 'a la felicitación')).toBe('Añadir el nombre Ana a la felicitación');
+    expect(() => render(request, 'Escribir', 'feliz cumpleaños')).toThrow();
+  });
+
+  it('does not skip the first sentence of a sequence before it is represented', () => {
+    const request = context('Escribir el saludo. Después añadir el nombre Luis.', { branchTitle: 'Preparar una nota' });
+    expect(ordinaryObjectiveFromContext(request)).toBe('Escribir el saludo');
+  });
+
   it('keeps the source and the chosen destination in their roles', () => {
     const request = context('La camiseta está en el suelo. No tengo cesto; usar la repisa.');
     expect(ordinaryObjectiveFromContext(request)).toBe('Poner la camiseta en la repisa');
