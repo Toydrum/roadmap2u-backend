@@ -68,8 +68,8 @@ export async function generateStepSuggestions(request: StepSuggestionsRequest): 
   try {
     const fromContext = practice ? practiceExerciseFromContext(request) :
       maxSuggestions === 1 ? ordinaryObjectiveFromContext(request) : null;
-    if (fromContext && (practice || !request.existingStepTitles.some((title) =>
-      ordinaryObjectiveKey(title, request) === ordinaryObjectiveKey(fromContext, request)))) {
+    const key = practice ? titleKey : (title: string) => ordinaryObjectiveKey(title, request);
+    if (fromContext && !request.existingStepTitles.some((title) => key(title) === key(fromContext))) {
       const result = validateSuggestions([fromContext], request);
       status = 'ok';
       return result;
