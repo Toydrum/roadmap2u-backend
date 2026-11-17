@@ -371,6 +371,134 @@ describe('step suggestions pilot', () => {
     expect(converse).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['Practicar la pronunciación de ship y sheep en voz alta.', [], 'Decir ship y sheep en voz alta'],
+    ['Pedir un café en inglés. Ya sé decir hello.', ['Decir hello en voz alta'], 'Decir una frase para pedir un café en inglés'],
+    ['Distinguir I work e I worked y escribir una frase con cada una', [], 'Comparar I work e I worked y anotar una diferencia'],
+    ['Usar el pasado simple para escribir una frase sobre ayer', ['Escribir una frase en presente sobre hoy'],
+      'Escribir una frase sobre ayer en pasado simple'],
+    ['Reconocer las palabras dollar y cents al escuchar un precio', [],
+      'Anotar si oyes dollar o cents al escuchar un precio'],
+  ])('turns a stated learning focus into direct practice (%s)', async (focus, existingStepTitles, title) => {
+    const context = { ...roomRequest, treeTitle: 'Estudiar inglés', branchTitle: 'Estudiar inglés', focus, existingStepTitles };
+
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: [title] });
+    expect(converse).not.toHaveBeenCalled();
+  });
+
+  it('renders a comparison directly from two supplied operands and keeps the restriction', async () => {
+    const context = { ...roomRequest, treeTitle: 'Aprender matemáticas', branchTitle: 'Aprender matemáticas',
+      focus: 'Comparar 1/2 y 3/4 sin usar decimales' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Comparar 1/2 y 3/4 sin usar decimales'] });
+    expect(converse).not.toHaveBeenCalled();
+  });
+
+  it('uses the supplied equation and variable without revealing the answer', async () => {
+    const context = { ...roomRequest, treeTitle: 'Aprender matemáticas', branchTitle: 'Aprender matemáticas',
+      focus: 'Resolver x + 3 = 7. Quiero empezar despejando x.' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Despejar x en x + 3 = 7'] });
+    expect(converse).not.toHaveBeenCalled();
+  });
+
+  it('rehearses a stated speech goal after the user explains the situation', async () => {
+    const context = { ...roomRequest, language: 'en', treeTitle: 'Learn French', branchTitle: 'Learn French',
+      focus: 'At the bakery, I need to ask how much a loaf costs.' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Say one sentence to ask how much a loaf costs'] });
+    expect(converse).not.toHaveBeenCalled();
+  });
+
+  it('asks what to practice when a learning focus still lacks a usable detail', async () => {
+    const context = { ...roomRequest, treeTitle: 'Estudiar inglés', branchTitle: 'Estudiar inglés',
+      focus: 'Quiero practicar lo de siempre' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error).toEqual({ code: 'STEP_SUGGESTIONS_CONTEXT_REQUIRED', message: 'result' });
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    expect(converse).not.toHaveBeenCalled();
+  });
+
+  it('renders one direct oral exercise from the model with a named text', async () => {
+    converse.mockResolvedValue(modelObjective({ kind: 'say', subject: 'oi' }));
+    const context = { ...roomRequest, treeTitle: 'Aprender portugués', branchTitle: 'Los saludos',
+      focus: 'Me cuesta que suene natural la palabra oi.' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Decir oi en voz alta'] });
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it('looks for the next exercise when the locally derived practice is already listed', async () => {
+    converse.mockResolvedValue(modelObjective({ kind: 'compare', subject: 'ship', reference: 'sheep' }));
+    const context = { ...roomRequest, treeTitle: 'Estudiar inglés', branchTitle: 'Estudiar inglés',
+      focus: 'Pronunciar ship y sheep en voz alta.', existingStepTitles: ['Decir ship y sheep en voz alta'] };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Comparar ship y sheep y anotar una diferencia'] });
+    expect(converse).toHaveBeenCalledOnce();
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
+  it.each([
+    ['Aprender dibujo', 'El asa', 'Me cuesta dibujar el asa de la taza.', 'draw', 'el asa', 'Dibujar el asa una vez'],
+    ['Learn piano', 'Chords', 'I keep forgetting the C major chord.', 'play', 'the C major chord', 'Play the C major chord once'],
+  ])('can turn a named part of a non-language skill into one repetition (%s)', async (treeTitle, branchTitle, focus, kind, subject, title) => {
+    converse.mockResolvedValue(modelObjective({ kind, subject }));
+    const language = kind === 'draw' ? 'es' : 'en';
+    const context = { ...roomRequest, language, treeTitle, branchTitle, focus };
+
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: [title] });
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the grounded chord when the model repeats the action in the subject', async () => {
+    converse.mockResolvedValue(modelObjective({ kind: 'rehearse', subject: 'play C major chord' }));
+    const context = { ...roomRequest, language: 'en', treeTitle: 'Learn piano', branchTitle: 'Chords',
+      focus: 'I keep forgetting the C major chord.' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Play C major chord once'] });
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it('asks for the missing result when the model can identify that specific gap', async () => {
+    converse.mockResolvedValue(modelObjective({ clarify: 'result' }));
+    const context = { ...roomRequest, treeTitle: 'Aprender piano', branchTitle: 'Las notas', focus: 'Me queda una duda' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error).toEqual({ code: 'STEP_SUGGESTIONS_CONTEXT_REQUIRED', message: 'result' });
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it('withholds a model exercise that changes what the user can safely do in water', async () => {
+    converse.mockResolvedValue(modelObjective({ kind: 'perform', subject: 'sumergirme' }));
+    const context = { ...roomRequest, treeTitle: 'Aprender a nadar', branchTitle: 'Mantener el equilibrio',
+      focus: 'Estoy de pie en agua baja, sin sumergirme.' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(503);
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
   it('uses the object named in the movement goal when several starting points are supplied', async () => {
     const response = await handleEvent(event(JSON.stringify({
       ...knightRequest, branchTitle: 'Practicar el movimiento de la torre', existingStepTitles: [],
@@ -431,7 +559,7 @@ describe('step suggestions pilot', () => {
     }) }] } } });
     const response = await handleEvent(event(JSON.stringify({
       ...knightRequest, treeTitle: 'Aprender matemáticas', branchTitle: 'Aprender matemáticas',
-      existingStepTitles: [], focus: 'Comparar 1/2 y 3/4 sin usar decimales',
+      existingStepTitles: [], focus: 'La tarea usa los números 1/2 y 3/4. No usar decimales.',
     })), deps());
 
     expect(response.statusCode).toBe(200);
@@ -444,7 +572,7 @@ describe('step suggestions pilot', () => {
     }) }] } } });
     const response = await handleEvent(event(JSON.stringify({
       ...knightRequest, treeTitle: 'Aprender matemáticas', branchTitle: 'Aprender matemáticas',
-      existingStepTitles: [], focus: 'Comparar 2² y 3',
+      existingStepTitles: [], focus: 'La tarea usa los números 2² y 3',
     })), deps());
 
     expect(response.statusCode).toBe(503);
