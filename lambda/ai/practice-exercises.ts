@@ -44,10 +44,10 @@ function containsFragment(source: string, fragment: string): boolean {
   return false;
 }
 
-function readAnchor(value: unknown, sources: string[]): string {
+export function readAnchor(value: unknown, sources: string[]): string {
   if (typeof value !== 'string' || value.length > 60 || !value.trim() || /[!?;:\p{Cc}\p{Zl}\p{Zp}]|\.(?:\s|$)/u.test(value) ||
       !sources.some((source) => containsFragment(source, value))) {
-    throw new Error('exercise anchor missing from supplied context');
+    throw new Error('anchor missing from supplied context');
   }
   return value.trim();
 }

@@ -29,6 +29,10 @@ const knightRequest = {
   language: 'es', treeTitle: 'Aprender ajedrez', branchTitle: 'Practicar el movimiento del caballo',
   ancestorTitles: [], existingStepTitles: ['Poner un caballo en d4'], maxSuggestions: 1,
 };
+const roomRequest = {
+  language: 'es', treeTitle: 'Recoger mi cuarto', branchTitle: 'Recoger mi cuarto',
+  ancestorTitles: [], existingStepTitles: [], maxSuggestions: 1,
+};
 const titles = ['Sacar una bolsa', 'Colocar los platos', 'Agregar un vaso'];
 const ddb = mockClient(DynamoDBDocumentClient);
 
@@ -142,23 +146,78 @@ describe('step suggestions pilot', () => {
     expect(JSON.stringify(vi.mocked(console.info).mock.calls)).not.toContain(context.focus);
   });
 
-  it('asks for and returns exactly one actionable title when the client requests one', async () => {
-    const context = { ...request, treeTitle: 'Escritura', branchTitle: 'Escritura',
-      ancestorTitles: [], existingStepTitles: ['Abrir el programa'] };
-    const suggestion = 'Escribir la primera oración del borrador';
-    converse.mockResolvedValue(modelResponse([suggestion]));
+  it('renders exactly one concrete objective from one model call when context needs interpretation', async () => {
+    const context = { ...roomRequest, treeTitle: 'Preparar mi mochila', branchTitle: 'Preparar mi mochila',
+      focus: 'Solo ropa. La mochila está en la cama.' };
+    const { maxSuggestions: _count, ...modelContext } = context;
+    converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify({
+      title: 'Poner una prenda en la mochila', evidence: 'mochila',
+    }) }] } } });
 
-    const response = await handleEvent(event(JSON.stringify({ ...context, maxSuggestions: 1 })), deps());
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
 
     expect(response.statusCode).toBe(200);
-    expect(JSON.parse(response.body)).toEqual({ suggestions: [suggestion] });
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Poner una prenda en la mochila'] });
     expect(converse).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       input: expect.objectContaining({
-        system: [{ text: expect.stringContaining('single best next action') }],
-        messages: [{ role: 'user', content: [{ text: JSON.stringify(context) }] }],
+        system: [{ text: expect.stringContaining('one completed result') }],
+        messages: [{ role: 'user', content: [{ text: JSON.stringify(modelContext) }] }],
       }),
     }), expect.anything());
     expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
+  it.each([
+    [{}, 'Guardar un objeto que esté fuera de lugar'],
+    [{ focus: 'Ropa en el suelo. El cesto está junto a la puerta.' }, 'Poner una prenda del suelo en el cesto'],
+    [{ treeTitle: 'Ordenar el escritorio', branchTitle: 'Ordenar el escritorio' }, 'Guardar un objeto que esté fuera de lugar'],
+    [{ treeTitle: 'Ponerme al día con el correo', branchTitle: 'Responder el correo de confirmación',
+      existingStepTitles: ['Leer la pregunta'] }, 'Escribir la primera frase de la respuesta'],
+    [{ treeTitle: 'Preparar mi mochila', branchTitle: 'Preparar mi mochila',
+      focus: 'La mochila ya está abierta. Solo ropa para una noche.' }, 'Poner una prenda en la mochila'],
+    [{ treeTitle: 'Organizar la semana', branchTitle: 'Organizar la semana',
+      focus: 'Dejar libre la tarde del jueves. Ya tengo el calendario abierto.' }, 'Marcar la tarde del jueves como libre en el calendario'],
+    [{ language: 'en', treeTitle: 'Get ready for tomorrow', branchTitle: 'Set out my clothes',
+      existingStepTitles: ['Choose a clean shirt'] }, 'Set out the clean shirt'],
+    [{ treeTitle: 'Coordinar la reunión del equipo', branchTitle: 'Elegir un horario',
+      focus: 'Me ofrecieron martes a las 10 y jueves a las 15. Aún no he confirmado.' }, 'Anotar cuál de los dos horarios prefiero'],
+  ])('uses a small finished action when the ordinary context provides enough information (%j)', async (context, suggestion) => {
+    const response = await handleEvent(event(JSON.stringify({ ...roomRequest, ...context })), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: [suggestion] });
+    expect(converse).not.toHaveBeenCalled();
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
+  it.each([
+    { suggestions: ['Ordenar una esquina'] },
+    { title: 'Ordenar una esquina', evidence: 'ordenar' },
+    { title: 'Poner una prenda en el cesto', evidence: 'el cesto' },
+    { title: 'Poner una prenda en el cesto', evidence: 'mesa' },
+    { title: 'Retirar cinco objetos de la mesa', evidence: 'mesa' },
+    { title: 'Hacer el siguiente paso para la mesa', evidence: 'mesa' },
+    { title: 'Recoger mi cuarto.', evidence: 'cuarto' },
+  ])('withholds vague titles and ungrounded details for an ordinary branch (%j)', async (payload) => {
+    converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify(payload) }] } } });
+    const response = await handleEvent(event(JSON.stringify({ ...roomRequest, focus: 'Despejar la mesa' })), deps());
+
+    expect(response.statusCode).toBe(503);
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { branchTitle: 'Recoger a mi hijo de la sala' },
+    { branchTitle: 'No recoger el cuarto' },
+    { focus: 'Ropa en el suelo. El cesto está roto.' },
+    { focus: 'Separar solo fotos claras, excluir fotos borrosas' },
+    { focus: 'Ropa en el suelo. El cesto está junto a la puerta.',
+      existingStepTitles: ['Poner una prenda del suelo en el cesto'] },
+    { branchTitle: 'Responder el correo', existingStepTitles: ['Redactar la respuesta completa'] },
+  ])('does not use a context shortcut outside its stated conditions (%j)', async (context) => {
+    await handleEvent(event(JSON.stringify({ ...roomRequest, ...context })), deps());
+
+    expect(converse).toHaveBeenCalledOnce();
   });
 
   it('rejects three titles from the model in single-step mode without retrying', async () => {
@@ -285,8 +344,8 @@ describe('step suggestions pilot', () => {
     ['en', 'Rearrange the desk. Do not move the laptop.', 'Move the laptop to the shelf'],
     ['en', 'Do not delete photos and do not open settings.', 'Delete a photo'],
   ])('withholds a title that contains an explicit prohibited action (%s)', async (language, focus, suggestion) => {
-    converse.mockResolvedValue(modelResponse([suggestion]));
-    const body = JSON.stringify({ ...request, language, focus, maxSuggestions: 1 });
+    converse.mockResolvedValue(modelResponse([suggestion, ...titles.slice(0, 2)]));
+    const body = JSON.stringify({ ...request, language, focus });
     const response = await handleEvent(event(body), deps());
 
     expect(response.statusCode).toBe(503);
@@ -299,12 +358,13 @@ describe('step suggestions pilot', () => {
     ['es', 'No mover el escritorio.', 'Mover un cuaderno al cajón'],
     ['en', 'Move the icons. Do not delete apps.', 'Move one icon without deleting an app'],
   ])('allows an action in a different scope or one that keeps the constraint (%s)', async (language, focus, suggestion) => {
-    converse.mockResolvedValue(modelResponse([suggestion]));
-    const body = JSON.stringify({ ...request, language, focus, maxSuggestions: 1 });
+    const proposed = [suggestion, ...titles.slice(0, 2)];
+    converse.mockResolvedValue(modelResponse(proposed));
+    const body = JSON.stringify({ ...request, language, focus });
     const response = await handleEvent(event(body), deps());
 
     expect(response.statusCode).toBe(200);
-    expect(JSON.parse(response.body)).toEqual({ suggestions: [suggestion] });
+    expect(JSON.parse(response.body)).toEqual({ suggestions: proposed });
   });
 
   it('exposes eligibility through /me only to a selected account in dev', async () => {
