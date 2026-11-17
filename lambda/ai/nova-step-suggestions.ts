@@ -2,7 +2,8 @@ import type { BedrockRuntimeClient, ConverseCommandOutput } from '@aws-sdk/clien
 import { ApiError, type StepSuggestionsRequest, type StepSuggestionsResponse } from '@app/api/contracts';
 import { contradictsFocus } from './focus-constraints';
 import { ORDINARY_OBJECTIVE_PROMPT, ordinaryObjectiveFromContext, ordinaryObjectiveKey, renderOrdinaryObjective } from './ordinary-objectives';
-import { EXERCISE_PROMPT, practiceExerciseFromContext, renderPracticeExercise, usesPracticeExercise } from './practice-exercises';
+import { EXERCISE_PROMPT, practiceExerciseFromContext, renderPracticeExercise, usesPracticeExercise, validatePracticeTitle } from './practice-exercises';
+import { practiceActivityKey, practiceContext } from './practice-context';
 
 const MODEL_ID = 'amazon.nova-micro-v1:0';
 const STEP_TITLE_LIMIT = 80;
@@ -47,11 +48,15 @@ function validateSuggestions(suggestions: unknown, request: StepSuggestionsReque
     throw new Error('invalid suggestion title');
   }
   const titles = suggestions.map((title) => title.trim());
-  const key = expectedCount === 1 && !usesPracticeExercise(request) ? (title: string) => ordinaryObjectiveKey(title, request) : titleKey;
+  const practice = expectedCount === 1 && usesPracticeExercise(request);
+  const key = expectedCount === 1 ? practice ? practiceActivityKey :
+    (title: string) => ordinaryObjectiveKey(title, request) : titleKey;
   const keys = new Set(titles.map(key));
   if (keys.size !== expectedCount || request.existingStepTitles.some((title) => keys.has(key(title)))) {
     throw new Error('duplicate suggestion');
   }
+  if (expectedCount === 1 && keys.has(key(request.branchTitle))) throw new Error('suggestion repeats its branch');
+  if (practice) titles.forEach((title) => validatePracticeTitle(title, request));
   const { focus, language } = request;
   if (focus && titles.some((title) => contradictsFocus(title, focus, language))) {
     throw new Error('contradicts explicit focus restriction');
@@ -68,18 +73,29 @@ export async function generateStepSuggestions(request: StepSuggestionsRequest): 
   try {
     const fromContext = practice ? practiceExerciseFromContext(request) :
       maxSuggestions === 1 ? ordinaryObjectiveFromContext(request) : null;
-    const key = practice ? titleKey : (title: string) => ordinaryObjectiveKey(title, request);
+    const key = practice ? practiceActivityKey : (title: string) => ordinaryObjectiveKey(title, request);
     if (fromContext && !request.existingStepTitles.some((title) => key(title) === key(fromContext))) {
-      const result = validateSuggestions([fromContext], request);
-      status = 'ok';
-      return result;
+      try {
+        const result = validateSuggestions([fromContext], request);
+        status = 'ok';
+        return result;
+      } catch (error) {
+        if (error instanceof ApiError) throw error;
+        // A shortcut that cannot preserve the task yields to the same single model call.
+      }
     }
     const { BedrockRuntimeClient, ConverseCommand } = await import('@aws-sdk/client-bedrock-runtime');
     client ??= new BedrockRuntimeClient({ region: 'us-east-1', maxAttempts: 1 });
+    const parsed = practice ? practiceContext(request) : undefined;
+    const modelContext = parsed ? { ...context, taskContext: {
+      currentGoal: parsed.unresolved ? undefined : parsed.goal,
+      constraints: parsed.constraints,
+      explicitlyCompleted: parsed.completed,
+    } } : context;
     const output = await client.send(new ConverseCommand({
       modelId: MODEL_ID,
       system: [{ text: practice ? EXERCISE_PROMPT : maxSuggestions === 1 ? ORDINARY_OBJECTIVE_PROMPT : SYSTEM_PROMPT }],
-      messages: [{ role: 'user', content: [{ text: JSON.stringify(context) }] }],
+      messages: [{ role: 'user', content: [{ text: JSON.stringify(modelContext) }] }],
       inferenceConfig: { maxTokens: 120, temperature: 0.2 },
     }), { abortSignal: AbortSignal.timeout(5_000) });
 

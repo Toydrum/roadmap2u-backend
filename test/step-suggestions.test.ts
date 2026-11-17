@@ -353,6 +353,38 @@ describe('step suggestions pilot', () => {
     expect(converse).not.toHaveBeenCalled();
   });
 
+  it('does not save a learning branch as its own identical child', async () => {
+    converse.mockResolvedValue(modelObjective({ kind: 'perform', subject: 'Escribir una frase sobre ayer' }));
+    const context = { ...roomRequest, treeTitle: 'Estudiar inglés', branchTitle: 'Escribir una frase sobre ayer' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+    expect(response.statusCode).not.toBe(200);
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(1);
+    expect(converse.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  it('does not copy an ordinary branch through the new local relationship shortcut', async () => {
+    converse.mockResolvedValue(modelObjective({ action: 'Guardar', object: 'el recibo', target: 'en la caja' }));
+    const context = { ...roomRequest, treeTitle: 'Ordenar documentos', branchTitle: 'Guardar el recibo en la caja' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+    expect(response.statusCode).not.toBe(200);
+    expect(converse).toHaveBeenCalledOnce();
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
+  it('does not accept pronouncing a grammar label as writing practice', async () => {
+    converse.mockResolvedValue(modelObjective({ kind: 'say', subject: 'pasado simple' }));
+    const context = { ...roomRequest, treeTitle: 'Estudiar inglés', branchTitle: 'La escritura',
+      focus: 'Me cuesta escribir frases en pasado simple' };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+    expect(response.statusCode).toBe(503);
+    expect(converse).toHaveBeenCalledOnce();
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(1);
+    const input = converse.mock.calls[0]![0].input;
+    const supplied = JSON.parse(input.messages[0].content[0].text);
+    expect(supplied.focus).toBe(context.focus);
+    expect(supplied.taskContext).toEqual(expect.objectContaining({ currentGoal: 'escribir frases en pasado simple' }));
+  });
+
   it('keeps the legacy three-title request compatible on a learning root', async () => {
     const { maxSuggestions: _maxSuggestions, ...legacy } = knightRequest;
     const response = await handleEvent(event(JSON.stringify({
@@ -563,7 +595,7 @@ describe('step suggestions pilot', () => {
     })), deps());
 
     expect(response.statusCode).toBe(200);
-    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Comparar 1/2 y 3/4 y anotar una diferencia'] });
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Comparar 1/2 y 3/4 y anotar una diferencia sin usar decimales'] });
   });
 
   it('does not accept a replacement that changes the mathematical notation', async () => {
