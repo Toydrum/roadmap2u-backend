@@ -23,6 +23,19 @@ does not establish availability. A named tool does not establish a destination.
 Current-object and operation checks prevent selecting another true but irrelevant
 fact from the context. Necessary constraints stay with the saved title.
 
+Explicit ordinary actions can also be reduced without model inference: one
+sentence of a requested written artifact, a stated image crop with its preservation
+condition, or attaching a paper item with the supplied adhesive. A singular object
+reference can connect a stated source to its assigned destination. These paths
+still use the common validation and daily attempt reservation. They must not infer
+a missing destination, invent a device, or discard an unsupported condition.
+
+A named item in a supplied map or diagram can become one identification exercise.
+Difficulty remembering an explicitly named musical note or chord can become one
+repetition, without inventing notes or fingering. Current intentions take priority
+over earlier represented exercises; collections are not single identification
+units. Unknown wording continues to use the bounded model path.
+
 Both model and local responses are checked for equivalence with their branch and
 already represented steps. Known equivalent verbs and terminal punctuation are
 normalized. This is bounded normalization, not universal semantic equivalence.

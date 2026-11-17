@@ -1,6 +1,6 @@
 import type { StepSuggestionsRequest } from '@app/api/contracts';
 
-const ACTION = /^(?:decir|pronunciar|escribir|redactar|copiar|corregir|anotar|dibujar|trazar|sombrear(?:lo|la)?|leer|tocar|comparar|distinguir|resolver|despejar|explicar|describir|pedir|preguntar|responder|saludar|presentarme|contar|reconocer|respirar|cambiar|say|pronounce|write|draft|copy|correct|note|draw|trace|shade|read|play|compare|distinguish|solve|isolate|explain|describe|order|ask|answer|greet|introduce|tell|recognize|breathe|change)(?:\s|$)/iu;
+const ACTION = /^(?:decir|pronunciar|escribir|redactar|copiar|corregir|anotar|dibujar|trazar|sombrear(?:lo|la)?|leer|tocar|comparar|distinguir|resolver|despejar|explicar|describir|pedir|preguntar|responder|saludar|presentarme|contar|reconocer|respirar|cambiar|ubicar|localizar|identificar|encontrar|say|pronounce|write|draft|copy|correct|note|draw|trace|shade|read|play|compare|distinguish|solve|isolate|explain|describe|order|ask|answer|greet|introduce|tell|recognize|breathe|change|locate|identify|find)(?:\s|$)/iu;
 const SEQUENCE = /\s+(?:y\s+(?:después|luego)|and\s+then)\s+|\s+(?:y|and)\s+(?=(?:escribir|corregir|dibujar|sombrear|leer|tocar|write|correct|draw|shade|read|play)\b)/iu;
 const COMPLETED = /^(?:ya\s+(?:lo\s+|la\s+|los\s+|las\s+)?(?:he\s+|sé\s+|se\s+)?|i\s+(?:already|have\s+already)\s+|already\s+)/iu;
 const FACT = /^(?:(?:un|una|el|la|a|an|the)\s+.+\s+(?:en|está|están|at|is|are)\s+|(?:estoy|tengo|hay|i am|i have|there is|there are)\s+)/iu;
@@ -27,6 +27,8 @@ export function practiceActivityKey(title: string): string {
     .replace(/^(?:pronounce|repeat|say)\s+/u, 'say ')
     .replace(/^(?:redactar|copiar|escribir)\s+/u, 'escribir ')
     .replace(/^(?:draft|copy|write)\s+/u, 'write ')
+    .replace(/^(?:ubicar|localizar|identificar|encontrar)\s+/u, 'identificar ')
+    .replace(/^(?:locate|identify|find)\s+/u, 'identify ')
     .replace(/\s+(?:en voz alta|aloud|out loud)$/u, '')
     .replace(/\s+(?:una vez|once)$/u, '')
     .replace(/\b(?:la suma|the sum)\s+/gu, '')
@@ -35,7 +37,10 @@ export function practiceActivityKey(title: string): string {
 
 export function isVaguePractice(text: string): boolean {
   const value = clean(text).replace(/\s+(?:pero no s[ée] qu[ée] practicar|but i don't know what to practice)$/iu, '');
-  return GENERIC.test(value);
+  // Forgetting which task to practise does not name a skill difficulty. Keep
+  // this anchored so a concrete subject such as a named chord remains usable.
+  const unspecifiedRecall = /^(?:i (?:keep forgetting|forgot|(?:can't|cannot|do not|don't) remember) what i (?:(?:want(?:ed)?|need(?:ed)?|intend(?:ed)?) to|was going to) (?:practice|practise|review)|(?:no recuerdo|se me olvida) qu[ée] (?:(?:quiero|quer[ií]a|necesito|necesitaba)|iba a) (?:practicar|repasar))$/iu;
+  return GENERIC.test(value) || unspecifiedRecall.test(value);
 }
 
 function actionText(clause: string): { text: string; current: boolean; direct: boolean } {
@@ -45,6 +50,14 @@ function actionText(clause: string): { text: string; current: boolean; direct: b
     .replace(/^(?:(?:ahora|now|después|luego|then)\s+)?(?:(?:quiero|necesito|i want to|i need to|me cuesta|i struggle to|i find it hard to)\s+)?/iu, '')
     .replace(/^empezar despejando\s/iu, 'despejar ').replace(/^start by isolating\s/iu, 'isolate ');
   return { text, current, direct: !indirect };
+}
+
+/** A named musical unit can be recalled by one repetition, without supplying notes or fingering. */
+function musicalRecallGoal(clause: string): string | null {
+  const en = /^i (?:keep forgetting|(?:can't|cannot|do not|don't) remember) ((?:the )?[a-g](?:[♯♭#]| (?:sharp|flat))?(?: (?:major|minor|diminished|augmented|seventh))? (?:chord|note))$/iu.exec(clause);
+  if (en) return `Play ${en[1]} once`;
+  const es = /^(?:se me olvida|no recuerdo) ((?:el acorde|la nota) (?:de )?(?:do|re|mi|fa|sol|la|si)(?: (?:sostenido|bemol))?(?: (?:mayor|menor))?)$/iu.exec(clause);
+  return es ? `Tocar ${es[1]} una vez` : null;
 }
 
 function asConstraint(clause: string): string | null {
@@ -105,7 +118,8 @@ export function practiceContext(request: StepSuggestionsRequest): PracticeContex
       }
       continue;
     }
-    const action = actionText(clause);
+    const recall = musicalRecallGoal(clause);
+    const action = recall ? { text: recall, current: false, direct: true } : actionText(clause);
     if (ACTION.test(action.text) || (request.language === 'es' && (INFINITIVE.test(action.text) || /^\p{L}+(?:ar|er|ir)(?:lo|la|los|las)$/iu.test(action.text))) || /^(?:practicar la pronunciación de|practicar el saludo|practice the greeting|fold|sew|count|paint)\s/iu.test(action.text) ||
         /^usar .+ para escribir /iu.test(action.text)) {
       goals.push({ ...action, text: resolveReference(action.text, goals.map((goal) => goal.text)) });
@@ -173,7 +187,7 @@ export function practiceActionFamily(text: string): string | undefined {
   if (/^(?:resolver|despejar|solve|isolate)\b/iu.test(value)) return 'solve';
   if (/^(?:explicar|describir|explain|describe)\b/iu.test(value)) return 'explain';
   if (/^(?:comparar|distinguir|compare|distinguish)\b/iu.test(value)) return 'compare';
-  if (/^(?:identificar|encontrar|identify|find)\b/iu.test(value)) return 'find';
+  if (/^(?:ubicar|localizar|identificar|encontrar|locate|identify|find)\b/iu.test(value)) return 'find';
   if (/^(?:leer|read)\b/iu.test(value)) return 'read';
   if (INFINITIVE.test(value)) return `action:${value.split(/\s/u)[0]!.toLowerCase()}`;
   return undefined;

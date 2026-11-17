@@ -462,6 +462,19 @@ describe('step suggestions pilot', () => {
     expect(converse).not.toHaveBeenCalled();
   });
 
+  it('asks for an unspecified forgotten practice goal before reserving an attempt', async () => {
+    converse.mockResolvedValue(modelObjective({ kind: 'find', subject: 'what I wanted to practice' }));
+    const context = { ...roomRequest, language: 'en', treeTitle: 'Learn piano', branchTitle: 'Learn piano',
+      focus: 'I keep forgetting what I wanted to practice.' };
+
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error).toEqual({ code: 'STEP_SUGGESTIONS_CONTEXT_REQUIRED', message: 'result' });
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    expect(converse).not.toHaveBeenCalled();
+  });
+
   it('renders one direct oral exercise from the model with a named text', async () => {
     converse.mockResolvedValue(modelObjective({ kind: 'say', subject: 'oi' }));
     const context = { ...roomRequest, treeTitle: 'Aprender portugués', branchTitle: 'Los saludos',
@@ -486,9 +499,9 @@ describe('step suggestions pilot', () => {
   });
 
   it.each([
-    ['Aprender dibujo', 'El asa', 'Me cuesta dibujar el asa de la taza.', 'draw', 'el asa', 'Dibujar el asa una vez'],
-    ['Learn piano', 'Chords', 'I keep forgetting the C major chord.', 'play', 'the C major chord', 'Play the C major chord once'],
-  ])('can turn a named part of a non-language skill into one repetition (%s)', async (treeTitle, branchTitle, focus, kind, subject, title) => {
+    ['Aprender dibujo', 'El asa', 'Me cuesta dibujar el asa de la taza.', 'draw', 'el asa', 'Dibujar el asa una vez', 1],
+    ['Learn piano', 'Chords', 'I keep forgetting the C major chord.', 'play', 'the C major chord', 'Play the C major chord once', 0],
+  ] as const)('can turn a named part of a non-language skill into one repetition (%s)', async (treeTitle, branchTitle, focus, kind, subject, title, modelCalls) => {
     converse.mockResolvedValue(modelObjective({ kind, subject }));
     const language = kind === 'draw' ? 'es' : 'en';
     const context = { ...roomRequest, language, treeTitle, branchTitle, focus };
@@ -497,13 +510,14 @@ describe('step suggestions pilot', () => {
 
     expect(response.statusCode).toBe(200);
     expect(JSON.parse(response.body)).toEqual({ suggestions: [title] });
-    expect(converse).toHaveBeenCalledOnce();
+    expect(converse).toHaveBeenCalledTimes(modelCalls);
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
   it('keeps the grounded chord when the model repeats the action in the subject', async () => {
     converse.mockResolvedValue(modelObjective({ kind: 'rehearse', subject: 'play C major chord' }));
     const context = { ...roomRequest, language: 'en', treeTitle: 'Learn piano', branchTitle: 'Chords',
-      focus: 'I keep forgetting the C major chord.' };
+      focus: 'I struggle with the C major chord.' };
     const response = await handleEvent(event(JSON.stringify(context)), deps());
 
     expect(response.statusCode).toBe(200);

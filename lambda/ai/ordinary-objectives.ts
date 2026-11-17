@@ -171,6 +171,10 @@ function objectIsGrounded(object: string, clauses: string[][], language: Languag
   }
   const terms = words(object, language);
   if (containsPhrase(clauses, terms, true)) return true;
+  const writtenUnit = language === 'es'
+    ? /^una frase de la (introducción|invitación|conclusión|nota|carta)$/iu.exec(object)
+    : /^one sentence of the (introduction|invitation|conclusion|note|letter)$/iu.exec(object);
+  if (writtenUnit && containsPhrase(clauses, words(writtenUnit[1]!, language))) return true;
   // A named portion may follow the food in context ("queso en rebanadas", "cheese slices").
   const portion = language === 'es'
     ? /^una? (rebanada|rodaja|porción|trozo) de (.+)$/iu.exec(object)
