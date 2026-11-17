@@ -74,6 +74,10 @@ function modelResponse(suggestions = titles, stopReason = 'end_turn') {
   };
 }
 
+function modelObjective(fields: object) {
+  return { ...modelResponse(), output: { message: { content: [{ text: JSON.stringify(fields) }] } } };
+}
+
 function conditionalCancellation(index: number) {
   return Object.assign(new Error('synthetic DynamoDB cancellation'), {
     name: 'TransactionCanceledException',
@@ -150,9 +154,7 @@ describe('step suggestions pilot', () => {
     const context = { ...roomRequest, treeTitle: 'Preparar mi mochila', branchTitle: 'Preparar mi mochila',
       focus: 'Solo ropa. La mochila está en la cama.' };
     const { maxSuggestions: _count, ...modelContext } = context;
-    converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify({
-      title: 'Poner una prenda en la mochila', evidence: 'mochila',
-    }) }] } } });
+    converse.mockResolvedValue(modelObjective({ action: 'Poner', object: 'una prenda', target: 'en la mochila' }));
 
     const response = await handleEvent(event(JSON.stringify(context)), deps());
 
@@ -171,6 +173,9 @@ describe('step suggestions pilot', () => {
     [{}, 'Guardar un objeto que esté fuera de lugar'],
     [{ focus: 'Ropa en el suelo. El cesto está junto a la puerta.' }, 'Poner una prenda del suelo en el cesto'],
     [{ treeTitle: 'Ordenar el escritorio', branchTitle: 'Ordenar el escritorio' }, 'Guardar un objeto que esté fuera de lugar'],
+    [{ branchTitle: 'Despejar el centro del escritorio' }, 'Retirar un objeto del centro del escritorio'],
+    [{ language: 'en', treeTitle: 'Organize my work area', branchTitle: 'Clear the center of the workbench' },
+      'Remove one item from the center of the workbench'],
     [{ treeTitle: 'Ponerme al día con el correo', branchTitle: 'Responder el correo de confirmación',
       existingStepTitles: ['Leer la pregunta'] }, 'Escribir la primera frase de la respuesta'],
     [{ treeTitle: 'Preparar mi mochila', branchTitle: 'Preparar mi mochila',
@@ -193,14 +198,126 @@ describe('step suggestions pilot', () => {
   it.each([
     { suggestions: ['Ordenar una esquina'] },
     { title: 'Ordenar una esquina', evidence: 'ordenar' },
-    { title: 'Poner una prenda en el cesto', evidence: 'el cesto' },
-    { title: 'Poner una prenda en el cesto', evidence: 'mesa' },
-    { title: 'Retirar cinco objetos de la mesa', evidence: 'mesa' },
-    { title: 'Hacer el siguiente paso para la mesa', evidence: 'mesa' },
-    { title: 'Recoger mi cuarto.', evidence: 'cuarto' },
+    { action: 'Poner', object: 'una camiseta sucia', target: 'en el cesto' },
+    { action: 'Poner', object: 'un objeto', target: 'en el armario' },
+    { action: 'Poner', object: 'un objeto del frasco', target: 'en el cesto' },
+    { action: 'Poner una camiseta en', object: 'el cesto' },
+    { action: 'Poner', object: 'un objeto' },
+    { action: 'Retirar', object: 'cinco objetos', target: 'de la mesa' },
+    { action: 'Hacer', object: 'el siguiente paso', target: 'para la mesa' },
+    { action: 'Recoger', object: 'mi cuarto' },
   ])('withholds vague titles and ungrounded details for an ordinary branch (%j)', async (payload) => {
-    converse.mockResolvedValue({ ...modelResponse(), output: { message: { content: [{ text: JSON.stringify(payload) }] } } });
-    const response = await handleEvent(event(JSON.stringify({ ...roomRequest, focus: 'Despejar la mesa' })), deps());
+    converse.mockResolvedValue(modelObjective(payload));
+    const response = await handleEvent(event(JSON.stringify({ ...roomRequest, focus: 'Despejar la mesa. El cesto está a mano.' })), deps());
+
+    expect(response.statusCode).toBe(503);
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['El cesto está junto a la mesa.', 'al cesto', 'Mover un objeto al cesto'],
+    ['La caja está junto a la mesa.', 'a la caja', 'Mover un objeto a la caja'],
+  ])('uses the named destination when the branch stays the same (%s)', async (focus, target, title) => {
+    converse.mockResolvedValue(modelObjective({ action: 'Mover', object: 'un objeto', target }));
+    const response = await handleEvent(event(JSON.stringify({ ...roomRequest, branchTitle: 'Despejar la mesa', focus })), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: [title] });
+  });
+
+  it('allows a single named part with its separately supported destination', async () => {
+    const context = { ...roomRequest, treeTitle: 'Preparar el desayuno', branchTitle: 'Armar un sándwich frío',
+      focus: 'El pan está listo. Tengo queso en rebanadas.' };
+    converse.mockResolvedValue(modelObjective({ action: 'Colocar', object: 'una rebanada de queso', target: 'sobre el pan' }));
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Colocar una rebanada de queso sobre el pan'] });
+  });
+
+  it('rejects a compound object made from unrelated words in one sentence', async () => {
+    const context = { ...roomRequest, branchTitle: 'Despejar la mesa',
+      focus: 'La caja roja está junto a una bolsa azul. El armario está abierto.' };
+    converse.mockResolvedValue(modelObjective({ action: 'Poner', object: 'la caja azul', target: 'en el armario' }));
+
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(503);
+  });
+
+  it.each([
+    ['El cesto está junto a la mesa. No usar el cesto.', 'en el cesto'],
+    ['El cesto está junto a la mesa.', 'del cesto'],
+  ])('rejects an excluded destination or a bare source for a move (%s)', async (focus, target) => {
+    const context = { ...roomRequest, branchTitle: 'Despejar la mesa', focus };
+    converse.mockResolvedValue(modelObjective({ action: 'Mover', object: 'un objeto', target }));
+
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(503);
+  });
+
+  it.each([
+    ['es', 'Dejarlo listo', undefined, []],
+    ['es', 'Dejarlo listo', undefined, ['Empezar']],
+    ['en', 'Get it ready', 'I checked yesterday’s thing. I want to do the next step.', []],
+  ])('asks what the user means before reserving an attempt (%s)', async (language, title, focus, existingStepTitles) => {
+    const context = { ...roomRequest, language, treeTitle: title, branchTitle: title, focus, existingStepTitles };
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error).toEqual({ code: 'STEP_SUGGESTIONS_CONTEXT_REQUIRED', message: 'object' });
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    expect(converse).not.toHaveBeenCalled();
+  });
+
+  it('uses a supplied answer to an ambiguous branch', async () => {
+    const context = { ...roomRequest, treeTitle: 'Dejarlo listo', branchTitle: 'Dejarlo listo',
+      focus: 'Quiero doblar la camiseta. Ya está sobre la cama.' };
+    converse.mockResolvedValue(modelObjective({ action: 'Doblar', object: 'la camiseta' }));
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Doblar la camiseta'] });
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it('uses a specific ancestor when a child title alone is vague', async () => {
+    const context = { ...roomRequest, treeTitle: 'Preparar el desayuno', branchTitle: 'Dejarlo listo',
+      ancestorTitles: ['Preparar la servilleta para servir'] };
+    converse.mockResolvedValue(modelObjective({ action: 'Doblar', object: 'la servilleta' }));
+
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Doblar la servilleta'] });
+  });
+
+  it('preserves an explicitly supplied filename as the outcome', async () => {
+    const context = { ...roomRequest, treeTitle: 'Preparar una entrega', branchTitle: 'Nombrar el PDF de la entrega',
+      focus: 'El nombre solicitado es Presupuesto.pdf. Ya abrí la carpeta.' };
+    converse.mockResolvedValue(modelObjective({ action: 'Renombrar', object: 'el PDF', target: 'como Presupuesto.pdf' }));
+
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ suggestions: ['Renombrar el PDF como Presupuesto.pdf'] });
+  });
+
+  it('asks for one missing detail after a model call with the usual quota reservation', async () => {
+    converse.mockResolvedValue(modelObjective({ clarify: 'destination' }));
+    const response = await handleEvent(event(JSON.stringify({ ...roomRequest, branchTitle: 'Mover la caja' })), deps());
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error).toEqual({ code: 'STEP_SUGGESTIONS_CONTEXT_REQUIRED', message: 'destination' });
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(1);
+    expect(converse).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a repeat with different articles and punctuation', async () => {
+    const context = { ...roomRequest, branchTitle: 'Preparar el desayuno', focus: 'El pan está listo.', existingStepTitles: ['Cortar una rebanada de pan.'] };
+    converse.mockResolvedValue(modelObjective({ action: 'Cortar', object: 'la rebanada de pan' }));
+    const response = await handleEvent(event(JSON.stringify(context)), deps());
 
     expect(response.statusCode).toBe(503);
     expect(converse).toHaveBeenCalledOnce();
