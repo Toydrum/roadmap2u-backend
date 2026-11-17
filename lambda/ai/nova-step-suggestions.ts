@@ -1,7 +1,7 @@
 import type { BedrockRuntimeClient, ConverseCommandOutput } from '@aws-sdk/client-bedrock-runtime';
 import { ApiError, type StepSuggestionsRequest, type StepSuggestionsResponse } from '@app/api/contracts';
 import { contradictsFocus } from './focus-constraints';
-import { ORDINARY_OBJECTIVE_PROMPT, ordinaryObjectiveFromContext, renderOrdinaryObjective } from './ordinary-objectives';
+import { ORDINARY_OBJECTIVE_PROMPT, ordinaryObjectiveFromContext, ordinaryObjectiveKey, renderOrdinaryObjective } from './ordinary-objectives';
 import { EXERCISE_PROMPT, practiceExerciseFromContext, renderPracticeExercise, usesPracticeExercise } from './practice-exercises';
 
 const MODEL_ID = 'amazon.nova-micro-v1:0';
@@ -47,8 +47,9 @@ function validateSuggestions(suggestions: unknown, request: StepSuggestionsReque
     throw new Error('invalid suggestion title');
   }
   const titles = suggestions.map((title) => title.trim());
-  const keys = new Set(titles.map(titleKey));
-  if (keys.size !== expectedCount || request.existingStepTitles.some((title) => keys.has(titleKey(title)))) {
+  const key = expectedCount === 1 && !usesPracticeExercise(request) ? (title: string) => ordinaryObjectiveKey(title, request) : titleKey;
+  const keys = new Set(titles.map(key));
+  if (keys.size !== expectedCount || request.existingStepTitles.some((title) => keys.has(key(title)))) {
     throw new Error('duplicate suggestion');
   }
   const { focus, language } = request;
@@ -67,7 +68,8 @@ export async function generateStepSuggestions(request: StepSuggestionsRequest): 
   try {
     const fromContext = practice ? practiceExerciseFromContext(request) :
       maxSuggestions === 1 ? ordinaryObjectiveFromContext(request) : null;
-    if (fromContext && (practice || !request.existingStepTitles.some((title) => titleKey(title) === titleKey(fromContext)))) {
+    if (fromContext && (practice || !request.existingStepTitles.some((title) =>
+      ordinaryObjectiveKey(title, request) === ordinaryObjectiveKey(fromContext, request)))) {
       const result = validateSuggestions([fromContext], request);
       status = 'ok';
       return result;
@@ -92,7 +94,11 @@ export async function generateStepSuggestions(request: StepSuggestionsRequest): 
     ], request) : parseSuggestions(text, request);
     status = 'ok';
     return result;
-  } catch {
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'STEP_SUGGESTIONS_CONTEXT_REQUIRED') {
+      status = 'context_required';
+      throw error;
+    }
     throw new ApiError('STEP_SUGGESTIONS_UNAVAILABLE');
   } finally {
     console.info(JSON.stringify({

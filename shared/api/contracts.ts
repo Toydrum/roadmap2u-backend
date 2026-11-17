@@ -872,6 +872,9 @@ export interface MeResponse {
   };
 }
 
+/** The detail requested in the STEP_SUGGESTIONS_CONTEXT_REQUIRED error message. */
+export type StepSuggestionContextField = 'object' | 'destination' | 'result';
+
 export interface StepSuggestionsRequest {
   language: 'es' | 'en';
   treeTitle: string;
@@ -1063,6 +1066,7 @@ export const SERVER_API_ERROR_CODES = Object.freeze([
   'CODE_EXPIRED',
   'LIMIT_EXCEEDED',
   'RATE_LIMITED',
+  'STEP_SUGGESTIONS_CONTEXT_REQUIRED',
   'STEP_SUGGESTIONS_UNAVAILABLE',
   'SYNC_TOO_OLD', // client schemaVersion newer than the server understands
   'QUOTA_EXCEEDED',

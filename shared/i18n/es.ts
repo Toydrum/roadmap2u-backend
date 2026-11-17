@@ -1546,6 +1546,7 @@ export const ES = {
       CODE_EXPIRED: 'Ese código ya caducó — pide uno nuevo.',
       LIMIT_EXCEEDED: 'Se alcanzó el límite de vínculos por ahora.',
       RATE_LIMITED: 'Muchos intentos seguidos. Espera un ratito.',
+      STEP_SUGGESTIONS_CONTEXT_REQUIRED: 'Agrega un detalle para poder sugerir un pasito.',
       STEP_SUGGESTIONS_UNAVAILABLE: 'Las sugerencias no están disponibles por ahora.',
       SYNC_TOO_OLD: 'La app necesita actualizarse para continuar.',
       QUOTA_EXCEEDED:
