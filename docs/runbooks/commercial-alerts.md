@@ -8,13 +8,15 @@ El owner operativo mantiene un secreto de GitHub Environment llamado `ALARM_NOTI
 
 Cada stage crea el topic `roadmap-commercial-alerts-${stage}` con transporte TLS obligatorio, una sola suscripción email cuando se proporciona el secreto y este inventario deliberadamente acotado:
 
-| Stage | Alarm-metrics | Señales |
-| --- | ---: | --- |
-| `dev` | 2 | API 5xx y la alarma sintética |
-| `test` | 1 | alarma sintética |
-| `prod` | 12 | Lambda `Errors` de `pre-signup` y `post-confirmation`; API 5xx; edad de la cola de cierre; mensajes visibles en la DLQ; `ConfigurationDrift`; `CommercialConfigurationUnavailable`; cuatro alarmas de sincronización; y la alarma sintética |
+| Stage | Base | Facturación | Total | Señales base |
+| --- | ---: | ---: | ---: | --- |
+| `dev` | 2 | 5 | 7 | API 5xx y la alarma sintética |
+| `test` | 1 | 5 | 6 | Alarma sintética |
+| `prod` | 12 | 14 | 26 | Lambda `Errors` de `pre-signup` y `post-confirmation`, API 5xx, edad de la cola de cierre, mensajes visibles en su DLQ, `ConfigurationDrift`, `CommercialConfigurationUnavailable`, cuatro alarmas de sincronización y la alarma sintética |
 
-Todas las alarmas usan periodos de cinco minutos, datos faltantes como `notBreaching` y el mismo topic como acción. La alarma sintética existe en los tres ambientes para que el workflow pueda comprobar el canal después de cada deploy; `test` no mantiene alertas de carga porque no recibe tráfico persistente.
+En `dev` y `test`, las cinco alarmas de facturación cubren mensajes visibles en la DLQ, edad de la cola, eventos pendientes, atraso de conciliación y errores de Stripe. Para QA, consulta `AWS/Lambda` → `Errors` por función y las métricas de firma, configuración, suscripciones duplicadas, conflictos de asociación y cierres bloqueados en `RoadMap2U/Billing/<stage>`. En `prod`, esas nueve señales también tienen alarmas.
+
+Las dos alarmas SQS de facturación usan periodos de un minuto. Las demás usan cinco minutos. Todas tratan los datos faltantes como `notBreaching` y usan el topic de su stage. El workflow usa la alarma sintética para comprobar el canal después de cada despliegue.
 
 No se crean alarmas `Duration`: el máximo de una sola invocación lenta resulta ruidoso y no representa por sí mismo una falla para el usuario. Las invocaciones que realmente fallan permanecen cubiertas en producción por Lambda `Errors`, API 5xx o los logs estructurados.
 

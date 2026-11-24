@@ -248,6 +248,8 @@ export function createBillingInfrastructure(scope: Stack, props: BillingInfrastr
 /** Sanitized JSON logs become metrics without granting runtimes cloudwatch:PutMetricData. */
 export function createBillingObservability(scope: Stack, stage: DeploymentStage, billing: BillingInfrastructure, topic: sns.ITopic): void {
   const action = new SnsAction(topic);
+  const production = stage === 'prod';
+  const nonProductionMetricAlarms = ['pending-event-age', 'reconciliation-lag', 'stripe-errors'];
   const alarm = (id: string, metric: cloudwatch.IMetric, threshold: number, sustained = false) => {
     const result = new cloudwatch.Alarm(scope, `BillingAlarm${id}`, {
       alarmName: `roadmap-commercial-${stage}-billing-${id}`,
@@ -282,9 +284,13 @@ export function createBillingObservability(scope: Stack, stage: DeploymentStage,
         unit: statistic === 'Maximum' ? cloudwatch.Unit.SECONDS : cloudwatch.Unit.COUNT,
       });
     }
-    alarm(id, new cloudwatch.Metric({ namespace: `RoadMap2U/Billing/${stage}`, metricName, statistic, period: Duration.minutes(5) }), threshold, sustained);
+    if (production || nonProductionMetricAlarms.includes(id)) {
+      alarm(id, new cloudwatch.Metric({ namespace: `RoadMap2U/Billing/${stage}`, metricName, statistic, period: Duration.minutes(5) }), threshold, sustained);
+    }
   }
-  for (const { key, fn } of billing.functions) {
-    alarm(`${key}-lambda-errors`, fn.metricErrors({ period: Duration.minutes(5) }), 0);
+  if (production) {
+    for (const { key, fn } of billing.functions) {
+      alarm(`${key}-lambda-errors`, fn.metricErrors({ period: Duration.minutes(5) }), 0);
+    }
   }
 }

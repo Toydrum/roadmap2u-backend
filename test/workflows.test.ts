@@ -263,9 +263,9 @@ describe('backend GitHub Actions', () => {
     expect(runbook).toContain('ALARM_NOTIFICATION_EMAIL');
     expect(runbook).toContain('PendingConfirmation');
     expect(runbook).toContain('roadmap-commercial-${stage}-synthetic');
-    expect(runbook).toContain('| `dev` | 2 | API 5xx y la alarma sintética |');
-    expect(runbook).toContain('| `test` | 1 |');
-    expect(runbook).toContain('| `prod` | 12 |');
+    expect(runbook).toContain('| `dev` | 2 | 5 | 7 | API 5xx y la alarma sintética |');
+    expect(runbook).toContain('| `test` | 1 | 5 | 6 | Alarma sintética |');
+    expect(runbook).toContain('| `prod` | 12 | 14 | 26 |');
     expect(runbook).toContain('`pre-signup` y `post-confirmation`');
     expect(runbook).toContain('ConfigurationDrift');
     expect(runbook).toContain('emitCommercialMetric');
