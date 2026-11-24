@@ -104,15 +104,34 @@ describe.each(STAGES)('individual billing infrastructure %s', (stage) => {
     expect(JSON.stringify(api)).not.toContain('WriteIndividualSubscriptionProjection');
   }, 60_000);
 
-  it('alarms on billing delays, duplicate mappings, blocked closure and sustained provider errors', () => {
+  it('alarms on billing delays and sustained provider errors and keeps diagnostic metrics in every stage', () => {
     const template = backend(stage);
     const alarms = resources(template, 'AWS::CloudWatch::Alarm').map((r) => r.Properties);
-    for (const key of ['billing-dlq-visible', 'billing-queue-age', 'billing-pending-event-age', 'billing-reconciliation-lag', 'billing-duplicate-subscription', 'billing-mapping-conflict', 'billing-closure-blocked', 'billing-signature-errors', 'billing-stripe-errors', 'billing-configuration-errors']) {
+    const requiredAlarms = [
+      'billing-dlq-visible', 'billing-queue-age', 'billing-pending-event-age',
+      'billing-reconciliation-lag', 'billing-stripe-errors',
+    ];
+    if (stage === 'prod') {
+      requiredAlarms.push(
+        'billing-duplicate-subscription', 'billing-mapping-conflict', 'billing-closure-blocked',
+        'billing-signature-errors', 'billing-configuration-errors',
+      );
+    }
+    for (const key of requiredAlarms) {
       const alarm = alarms.find((a) => a.AlarmName === `roadmap-commercial-${stage}-${key}`);
       expect(alarm, key).toBeDefined();
       expect(alarm.AlarmActions).toHaveLength(1);
       expect(alarm.TreatMissingData).toBe('notBreaching');
     }
+    const metricNames = resources(template, 'AWS::Logs::MetricFilter')
+      .flatMap((r) => r.Properties.MetricTransformations)
+      .filter((metric) => metric.MetricNamespace === `RoadMap2U/Billing/${stage}`)
+      .map((metric) => metric.MetricName);
+    expect(metricNames).toHaveLength(40);
+    expect(new Set(metricNames)).toEqual(new Set([
+      'PendingEventAgeSeconds', 'ReconciliationLagSeconds', 'DuplicateSubscription', 'MappingConflict',
+      'AccountClosureBillingBlocked', 'SignatureError', 'StripeError', 'ConfigurationError',
+    ]));
     expect(alarms.find((a) => a.AlarmName.endsWith('billing-queue-age'))?.Threshold).toBe(300);
     expect(alarms.find((a) => a.AlarmName.endsWith('billing-reconciliation-lag'))?.Threshold).toBe(1800);
     expect(resources(template, 'AWS::SSM::Parameter').every((r) => !r.Properties.Name.includes('/stripe/'))).toBe(true);

@@ -8,8 +8,11 @@ const HOSTED_ZONE_ID = 'Z0123456789ABCDEFGHIJ';
 const templates = new Map<string, any>();
 const BILLING_ALARMS = [
   'billing-dlq-visible', 'billing-queue-age', 'billing-pending-event-age',
-  'billing-reconciliation-lag', 'billing-duplicate-subscription', 'billing-mapping-conflict',
-  'billing-closure-blocked', 'billing-signature-errors', 'billing-stripe-errors',
+  'billing-reconciliation-lag', 'billing-stripe-errors',
+];
+const PROD_ONLY_BILLING_ALARMS = [
+  'billing-duplicate-subscription', 'billing-mapping-conflict',
+  'billing-closure-blocked', 'billing-signature-errors',
   'billing-configuration-errors', 'billing-api-lambda-errors', 'billing-webhook-lambda-errors',
   'billing-worker-lambda-errors', 'billing-reconciler-lambda-errors',
 ];
@@ -45,13 +48,13 @@ describe('commercial alarms', () => {
   it.each([
     [
       'dev',
-      2,
+      7,
       ['api-5xx', 'synthetic'],
     ],
-    ['test', 1, ['synthetic']],
+    ['test', 6, ['synthetic']],
     [
       'prod',
-      12,
+      26,
       [
         'lambda-pre-signup-errors',
         'lambda-post-confirmation-errors',
@@ -75,11 +78,14 @@ describe('commercial alarms', () => {
         (resource: any) => resource.Type === 'AWS::CloudWatch::Alarm',
       ) as any[];
 
-      expect(alarmMetricUnits(template)).toBe(expectedMetricUnits + BILLING_ALARMS.length);
+      const billingAlarms = stage === 'prod'
+        ? [...BILLING_ALARMS, ...PROD_ONLY_BILLING_ALARMS]
+        : BILLING_ALARMS;
+      expect(alarmMetricUnits(template)).toBe(expectedMetricUnits);
       expect(
         alarms.map((alarm) => alarm.Properties.AlarmName).sort(),
       ).toEqual(
-        [...expectedAlarmNames, ...BILLING_ALARMS].map((name) => `roadmap-commercial-${stage}-${name}`).sort(),
+        [...expectedAlarmNames, ...billingAlarms].map((name) => `roadmap-commercial-${stage}-${name}`).sort(),
       );
       const router = Object.values(template.Resources).find(
         (resource: any) => resource.Type === 'AWS::Lambda::Function' &&
@@ -310,7 +316,7 @@ describe('commercial alarms', () => {
     expect(topics).toHaveLength(1);
     expect(topics[0].DeletionPolicy).toBe('Retain');
     expect(topics[0].UpdateReplacePolicy).toBe('Retain');
-    expect(alarms).toHaveLength(12 + BILLING_ALARMS.length);
+    expect(alarms).toHaveLength(26);
     for (const alarm of alarms) {
       expect(alarm.DeletionPolicy).not.toBe('Retain');
       expect(alarm.UpdateReplacePolicy).not.toBe('Retain');
